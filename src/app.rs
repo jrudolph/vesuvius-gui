@@ -1,3 +1,4 @@
+
 use egui::{ColorImage, PointerButton, CursorIcon};
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
@@ -22,7 +23,7 @@ impl Default for TemplateApp {
         use memmap::MmapOptions;
         use std::fs::File;
 
-        let file = File::open("/tmp/00870.tif").unwrap();
+        let file = File::open(/* "/tmp/00870.tif" */"test-8bit.tif").unwrap();
         let mmap = unsafe { MmapOptions::new().offset(368).map(&file).unwrap() };
 
         Self {
@@ -82,14 +83,6 @@ impl eframe::App for TemplateApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // The central panel the region left after adding TopPanel's and SidePanel's
-            ui.heading("eframe template");
-
-            ui.horizontal(|ui| {
-                ui.label("Write something: ");
-                ui.text_edit_singleline(&mut self.label);
-            });
-
             let x_sl = ui.add(egui::Slider::new(&mut self.x, 0..=(self.img_width - self.frame_width - 1)).text("x"));
             let y_sl = ui.add(egui::Slider::new(&mut self.y, 0..=(self.img_height - self.frame_height - 1)).text("y"));
             if x_sl.changed() || y_sl.changed() {
@@ -112,21 +105,44 @@ impl eframe::App for TemplateApp {
 
                 let width = self.frame_width;
                 let height = self.frame_height;
-                let mut pixels = vec![0u8; width * height * 4];
+                let mut pixels = vec![0u8; width * height];
+                /* 
                 let data16 = view_as_u16(&self.data);
-                for (i, p) in pixels.chunks_exact_mut(4).enumerate() {
+                for (i, p) in pixels.iter_mut().enumerate() {
                     let x = i % width + self.x;
                     let y = i / width + self.y;
                     let off = y * real_width + x;
                     let v16 = data16[off];
                     let v = (v16 >> 8) as u8;
                     
-                    p[0] = v;
-                    p[1] = v;
-                    p[2] = v;
-                    p[3] = 255;
+                    *p = v;
+                }*/
+                /* 4bit
+                for (i, p) in pixels.iter_mut().enumerate() {
+                    let x = i % width + self.x;
+                    let y = i / width + self.y;
+                    let off = y * real_width + x;
+                    let v8 = self.data[off / 2];
+                    let v =
+                        if off % 2 == 0 {
+                            v8 & 0xf << 4
+                        } else {
+                            v8 & 0xf0
+                        };
+
+                    //let v = (v16 >> 8) as u8;
+                    
+                    *p = v;
                 }
-                let image = ColorImage::from_rgba_premultiplied([width, height], &pixels);
+                 */
+                for (i, p) in pixels.iter_mut().enumerate() {
+                    let x = i % width + self.x;
+                    let y = i / width + self.y;
+                    let off = y * real_width + x;
+                    let v8 = self.data[off];
+                    *p = v8;                    
+                }
+                let image = ColorImage::from_gray([width, height], &pixels);
 
                 // Load the texture only once.
                 let res = ui.ctx().load_texture(
@@ -158,25 +174,6 @@ impl eframe::App for TemplateApp {
                     self.texture = None;
                 };
             };
-            
-        
-            //let my_image = egui::TextureId::User(0);
-            //ui.image((my_image, egui::Vec2::new(640.0, 480.0)));
-            //ctx.load_texture(name, image, options)
-            //ui.add(egui::Image::from_bytes("bytes://test", bytes));
-            //}
-
-            ui.separator();
-
-            ui.add(egui::github_link_file!(
-                "https://github.com/emilk/eframe_template/blob/master/",
-                "Source code."
-            ));
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                powered_by_egui_and_eframe(ui);
-                egui::warn_if_debug_build(ui);
-            });
         });
     }
 }
