@@ -4,12 +4,10 @@ use egui::{ColorImage, PointerButton, CursorIcon};
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 
 pub struct TemplateApp {
-    // Example stuff:
-    label: String,
-
     //#[serde(skip)] // This how you opt-out of serialization of a field
     x: usize,
     y: usize,
+    z: usize,
     img_width: usize,
     img_height: usize,
     frame_width: usize,
@@ -27,10 +25,9 @@ impl Default for TemplateApp {
         let mmap = unsafe { MmapOptions::new().offset(368).map(&file).unwrap() };
 
         Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
-            x: 100,
-            y: 100,
+            x: 1000,
+            y: 1000,
+            z: 870,
             img_width: 9414,
             img_height: 9414,
             frame_width: 100,
@@ -88,6 +85,8 @@ impl eframe::App for TemplateApp {
             if x_sl.changed() || y_sl.changed() {
                 self.texture = None;
             }
+            let z_sl = ui.add(egui::Slider::new(&mut self.z, 0..=20000).text("z"));
+            
             
             let texture: &egui::TextureHandle = self.texture.get_or_insert_with(|| {
                 fn view_as_u16(slice: &[u8]) -> &[u16] {
@@ -163,12 +162,24 @@ impl eframe::App for TemplateApp {
                 let im = 
                     ui.image((texture.id(), texture.size_vec2()))
                         .interact(egui::Sense::drag());
+                
+                if im.hovered() {
+                    if im.hovered() {
+                        let delta = ui.input(|i| i.scroll_delta);
+                        if delta.y != 0.0 {
+                            let delta = delta.y.signum() * 10.0;
+                            self.z = (self.z as i32 + delta as i32).max(0).min(20000) as usize;
+                            //self.texture = None;
+                        }
+                    }
+                }
+                        
                 if im.dragged_by(PointerButton::Primary) {
                     let im2 = im.on_hover_cursor(CursorIcon::Grabbing);
                     let delta = -im2.drag_delta();
                     
-                    self.x = (self.x as i32 + delta.x as i32).max(0) as usize;
-                    self.y = (self.y as i32 + delta.y as i32).max(0) as usize;
+                    self.x = (self.x as i32 + delta.x as i32).max(0).min((self.img_width - self.frame_width - 1) as i32) as usize;
+                    self.y = (self.y as i32 + delta.y as i32).max(0).min((self.img_height - self.frame_height - 1) as i32) as usize;
                     self.texture = None;
                 } else if texture.size_vec2() != size {
                     self.texture = None;
@@ -178,16 +189,3 @@ impl eframe::App for TemplateApp {
     }
 }
 
-fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label("Powered by ");
-        ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-        ui.label(" and ");
-        ui.hyperlink_to(
-            "eframe",
-            "https://github.com/emilk/egui/tree/master/crates/eframe",
-        );
-        ui.label(".");
-    });
-}
