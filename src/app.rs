@@ -1,4 +1,4 @@
-use egui::ColorImage;
+use egui::{ColorImage, PointerButton, CursorIcon};
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 
@@ -32,8 +32,8 @@ impl Default for TemplateApp {
             y: 100,
             img_width: 9414,
             img_height: 9414,
-            frame_width: 1000,
-            frame_height: 1000,
+            frame_width: 100,
+            frame_height: 100,
             texture: None,
             data: mmap
         }
@@ -138,8 +138,27 @@ impl eframe::App for TemplateApp {
                 println!("Time elapsed in expensive_function() is: {:?}", duration);
                 res
             });
-
-            ui.image((texture.id(), texture.size_vec2()));
+            // use remaining space for image
+            let size =ui.available_size();
+            {
+                self.frame_width = size.x as usize;
+                self.frame_height = size.y as usize;
+                
+                let im = 
+                    ui.image((texture.id(), texture.size_vec2()))
+                        .interact(egui::Sense::drag());
+                if im.dragged_by(PointerButton::Primary) {
+                    let im2 = im.on_hover_cursor(CursorIcon::Grabbing);
+                    let delta = -im2.drag_delta();
+                    
+                    self.x = (self.x as i32 + delta.x as i32).max(0) as usize;
+                    self.y = (self.y as i32 + delta.y as i32).max(0) as usize;
+                    self.texture = None;
+                } else if texture.size_vec2() != size {
+                    self.texture = None;
+                };
+            };
+            
         
             //let my_image = egui::TextureId::User(0);
             //ui.image((my_image, egui::Vec2::new(640.0, 480.0)));
