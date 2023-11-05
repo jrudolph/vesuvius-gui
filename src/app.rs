@@ -1,5 +1,5 @@
 
-use egui::{ColorImage, PointerButton, CursorIcon};
+use egui::{ColorImage, PointerButton, CursorIcon, Vec2, Image};
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 
@@ -8,6 +8,7 @@ pub struct TemplateApp {
     x: usize,
     y: usize,
     z: usize,
+    zoom: f32,
     img_width: usize,
     img_height: usize,
     frame_width: usize,
@@ -21,13 +22,14 @@ impl Default for TemplateApp {
         use memmap::MmapOptions;
         use std::fs::File;
 
-        let file = File::open(/* "/tmp/00870.tif" */"test-8bit.tif").unwrap();
+        let file = File::open("/tmp/11487.tif").unwrap();
         let mmap = unsafe { MmapOptions::new().offset(368).map(&file).unwrap() };
 
         Self {
             x: 1000,
             y: 1000,
             z: 870,
+            zoom: 1f32,
             img_width: 9414,
             img_height: 9414,
             frame_width: 100,
@@ -86,6 +88,7 @@ impl eframe::App for TemplateApp {
                 self.texture = None;
             }
             let z_sl = ui.add(egui::Slider::new(&mut self.z, 0..=20000).text("z"));
+            let zoom_sl = ui.add(egui::Slider::new(&mut self.zoom, 0.1f32..=32f32).text("zoom").logarithmic(true));
             
             
             let texture: &egui::TextureHandle = self.texture.get_or_insert_with(|| {
@@ -102,20 +105,23 @@ impl eframe::App for TemplateApp {
                 use std::time::Instant;
                 let start = Instant::now();
 
-                let width = self.frame_width;
-                let height = self.frame_height;
+                let width = (self.frame_width as f32 / self.zoom) as usize;
+                let height = (self.frame_height as f32 / self.zoom) as usize;
                 let mut pixels = vec![0u8; width * height];
-                /* 
+
+                let q = 1; 
+                
                 let data16 = view_as_u16(&self.data);
                 for (i, p) in pixels.iter_mut().enumerate() {
                     let x = i % width + self.x;
                     let y = i / width + self.y;
-                    let off = y * real_width + x;
+
+                    let off = (y / q) * q * real_width + (x / q) * q;
                     let v16 = data16[off];
                     let v = (v16 >> 8) as u8;
                     
                     *p = v;
-                }*/
+                }
                 /* 4bit
                 for (i, p) in pixels.iter_mut().enumerate() {
                     let x = i % width + self.x;
@@ -134,13 +140,13 @@ impl eframe::App for TemplateApp {
                     *p = v;
                 }
                  */
-                for (i, p) in pixels.iter_mut().enumerate() {
+                /* for (i, p) in pixels.iter_mut().enumerate() {
                     let x = i % width + self.x;
                     let y = i / width + self.y;
                     let off = y * real_width + x;
                     let v8 = self.data[off];
                     *p = v8;                    
-                }
+                } */
                 let image = ColorImage::from_gray([width, height], &pixels);
 
                 // Load the texture only once.
@@ -159,29 +165,36 @@ impl eframe::App for TemplateApp {
                 self.frame_width = size.x as usize;
                 self.frame_height = size.y as usize;
                 
-                let im = 
-                    ui.image((texture.id(), texture.size_vec2()))
+                let image =
+                    Image::new(texture)
+                        .fit_to_original_size(self.zoom);
+
+                let im = ui.add(image)
+                    //ui.image((texture.id(), texture.size_vec2()))
                         .interact(egui::Sense::drag());
                 
+                let size2 = texture.size_vec2();
+
                 if im.hovered() {
                     if im.hovered() {
                         let delta = ui.input(|i| i.scroll_delta);
                         if delta.y != 0.0 {
                             let delta = delta.y.signum() * 10.0;
                             self.z = (self.z as i32 + delta as i32).max(0).min(20000) as usize;
-                            //self.texture = None;
+                            self.texture = None;
                         }
                     }
                 }
                         
                 if im.dragged_by(PointerButton::Primary) {
                     let im2 = im.on_hover_cursor(CursorIcon::Grabbing);
-                    let delta = -im2.drag_delta();
+                    let delta = -im2.drag_delta() / self.zoom;
+                    println!("delta: {:?} orig delta: {:?}", delta, im2.drag_delta());
                     
                     self.x = (self.x as i32 + delta.x as i32).max(0).min((self.img_width - self.frame_width - 1) as i32) as usize;
                     self.y = (self.y as i32 + delta.y as i32).max(0).min((self.img_height - self.frame_height - 1) as i32) as usize;
                     self.texture = None;
-                } else if texture.size_vec2() != size {
+                } else if size2 != size {
                     self.texture = None;
                 };
             };
