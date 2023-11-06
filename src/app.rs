@@ -14,7 +14,7 @@ pub struct TemplateApp {
     frame_width: usize,
     frame_height: usize,
     texture: Option<egui::TextureHandle>,
-    data: memmap::Mmap,
+    data: Vec<Vec<Vec<Option<memmap::Mmap>>>>,
 }
 
 impl Default for TemplateApp {
@@ -22,20 +22,35 @@ impl Default for TemplateApp {
         use memmap::MmapOptions;
         use std::fs::File;
 
-        let file = File::open("/tmp/cell_yxz_006_007_022.tif").unwrap();
-        let mmap = unsafe { MmapOptions::new().offset(8).map(&file).unwrap() };
+        //let file = File::open("/tmp/cell_yxz_006_007_022.tif").unwrap();
+        //let mmap = unsafe { MmapOptions::new().offset(8).map(&file).unwrap() };
+
+        fn map_for(x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
+            let file_name = format!("/tmp/cell_yxz_{:03}_{:03}_{:03}.tif", y, x, z);
+            
+            let file = File::open(file_name).ok()?;
+            unsafe { MmapOptions::new().offset(8).map(&file) }.ok()
+        }
+        let data =
+            (1..=29).map( |z|
+                (1..=16).map(|y| 
+                    (1..=17).map( |x| 
+                        map_for(x, y, z)
+                    ).collect()
+                ).collect()
+            ).collect();
 
         Self {
-            x: 0,
-            y: 0,
-            z: 200,
+            x: 2800,
+            y: 2500,
+            z: 10852,
             zoom: 1f32,
-            img_width: 500,
-            img_height: 500,
+            img_width: 8096,
+            img_height: 7888,
             frame_width: 100,
             frame_height: 100,
             texture: None,
-            data: mmap
+            data: data
         }
     }
 }
@@ -87,7 +102,7 @@ impl eframe::App for TemplateApp {
             if x_sl.changed() || y_sl.changed() {
                 self.texture = None;
             }
-            let z_sl = ui.add(egui::Slider::new(&mut self.z, 0..=499).text("z"));
+            let z_sl = ui.add(egui::Slider::new(&mut self.z, 0..=14500).text("z"));
             let zoom_sl = ui.add(egui::Slider::new(&mut self.zoom, 0.1f32..=32f32).text("zoom").logarithmic(true));
             
             
@@ -125,16 +140,21 @@ impl eframe::App for TemplateApp {
 
                     let v = 
                         if x >= 0 && x < self.img_width as i32 && y >= 0 && y < self.img_height as i32 {
-                            let off = ((y as usize / q) * q * real_width + (x as usize / q) * q) * 2 + 500147 * self.z;
-                            if off + 1 >= self.data.len() {
-                                if !printed {
-                                    println!("x: {}, y: {}, z:{}, off: {}, len: {}", x, y, self.z, off, self.data.len());
-                                    printed = true;
+                            
+                            if let Some(tile) = &self.data[(self.z / 500) as usize][(y / 500) as usize][(x / 500) as usize] {
+                                let off = (((y % 500) as usize / q) * q * 500 + ((x % 500) as usize / q) * q) * 2 + 500147 * (self.z % 500);
+                                if off + 1 >= tile.len() {
+                                    if !printed {
+                                        println!("x: {}, y: {}, z:{}, off: {}, len: {}", x, y, self.z, off, self.data.len());
+                                        printed = true;
+                                    }
+                                    *p = 0;
+                                    continue;
                                 }
-                                *p = 0;
-                                continue;
+                                (tile[off + 1] & 0xff)
+                            } else {
+                                0
                             }
-                            self.data[off + 1]
                         } else {
                             0
                         };
@@ -201,7 +221,7 @@ impl eframe::App for TemplateApp {
                         let delta = ui.input(|i| i.scroll_delta);
                         if delta.y != 0.0 {
                             let delta = delta.y.signum() * 1.0;
-                            self.z = (self.z as i32 + delta as i32).max(0).min(499) as usize;
+                            self.z = (self.z as i32 + delta as i32).max(0).min(15000) as usize;
                             self.texture = None;
                         }
                     }
