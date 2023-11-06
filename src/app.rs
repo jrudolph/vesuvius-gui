@@ -109,7 +109,7 @@ impl eframe::App for TemplateApp {
                 let height = (self.frame_height as f32 / self.zoom) as usize;
                 let mut pixels = vec![0u8; width * height];
 
-                let q = 2;
+                let q = 1;
 
                 // 8 + 500147
                 let mut printed = false;
@@ -174,8 +174,8 @@ impl eframe::App for TemplateApp {
                     image,
                     Default::default()
                 );
-                //let duration = start.elapsed();
-                //println!("Time elapsed in expensive_function() is: {:?}", duration);
+                let duration = start.elapsed();
+                println!("Time elapsed in expensive_function() is: {:?}", duration);
                 res
             });
             // use remaining space for image
