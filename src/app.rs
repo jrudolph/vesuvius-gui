@@ -1,5 +1,5 @@
 
-use egui::{ColorImage, PointerButton, CursorIcon, Vec2, Image};
+use egui::{ColorImage, PointerButton, CursorIcon, Image};
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 
@@ -33,8 +33,8 @@ impl Default for TemplateApp {
         }
         let data =
             (1..=29).map( |z|
-                (1..=16).map(|y| 
-                    (1..=17).map( |x| 
+                (1..=16).map(|y|
+                    (1..=17).map( |x|
                         map_for(x, y, z)
                     ).collect()
                 ).collect()
@@ -102,21 +102,11 @@ impl eframe::App for TemplateApp {
             if x_sl.changed() || y_sl.changed() {
                 self.texture = None;
             }
-            let z_sl = ui.add(egui::Slider::new(&mut self.z, 0..=14500).text("z"));
-            let zoom_sl = ui.add(egui::Slider::new(&mut self.zoom, 0.1f32..=32f32).text("zoom").logarithmic(true));
+            let _z_sl = ui.add(egui::Slider::new(&mut self.z, 0..=14500).text("z"));
+            let _zoom_sl = ui.add(egui::Slider::new(&mut self.zoom, 0.1f32..=32f32).text("zoom").logarithmic(true));
             
             
             let texture: &egui::TextureHandle = self.texture.get_or_insert_with(|| {
-                /* fn view_as_u16(slice: &[u8]) -> &[u16] {
-                    // Ensure that the slice length is a multiple of 2, as each u16 is 2 bytes.
-                    //assert_eq!(slice.len() % 2, 0);
-                
-                    // Use pointer casting to reinterpret the slice as a slice of u16.
-                    unsafe {
-                        std::slice::from_raw_parts(slice.as_ptr() as *const u16, slice.len() / 2)
-                    }
-                } */
-                let real_width = self.img_width;
                 use std::time::Instant;
                 let start = Instant::now();
 
@@ -126,17 +116,12 @@ impl eframe::App for TemplateApp {
 
                 let q = 1;
 
-                // 8 + 500147
                 let mut printed = false;
                 
-                //let data16 = view_as_u16(&self.data);
                 for (i, p) in pixels.iter_mut().enumerate() {
                     let x = (i % width) as i32 + self.x;
                     let y = (i / width) as i32 + self.y;
 
-                    //let v16 = data16[off];
-                    //let v = (v16 >> 8) as u8;
-                    
 
                     let v = 
                         if x >= 0 && x < self.img_width as i32 && y >= 0 && y < self.img_height as i32 {
@@ -151,7 +136,7 @@ impl eframe::App for TemplateApp {
                                     *p = 0;
                                     continue;
                                 }
-                                (tile[off + 1] & 0xff)
+                                tile[off + 1]
                             } else {
                                 0
                             }
@@ -211,7 +196,6 @@ impl eframe::App for TemplateApp {
                         .fit_to_original_size(self.zoom);
 
                 let im = ui.add(image)
-                    //ui.image((texture.id(), texture.size_vec2()))
                         .interact(egui::Sense::drag());
                 
                 let size2 = texture.size_vec2();
