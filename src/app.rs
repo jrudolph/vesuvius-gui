@@ -4,14 +4,14 @@ trait World {
     fn get(&self, xyz: [i32; 3]) -> u8;
 }
 
-struct MappedCells {
+struct MappedVolumeGrid {
     max_x: usize,
     max_y: usize,
     max_z: usize,
     data: Vec<Vec<Vec<Option<memmap::Mmap>>>>,
 }
-impl MappedCells {
-    pub fn from_data_dir(data_dir: &str) -> MappedCells {
+impl MappedVolumeGrid {
+    pub fn from_data_dir(data_dir: &str) -> MappedVolumeGrid {
         use memmap::MmapOptions;
         use std::fs::File;
 
@@ -51,7 +51,7 @@ impl MappedCells {
         }
         if !std::path::Path::new(data_dir).exists() {
             println!("Data directory {} does not exist", data_dir);
-            return MappedCells {
+            return MappedVolumeGrid {
                 max_x: 0,
                 max_y: 0,
                 max_z: 0,
@@ -71,7 +71,7 @@ impl MappedCells {
         println!("Found {} cells in {}", slices_found, data_dir);
         println!("max_x: {}, max_y: {}, max_z: {}", max_x, max_y, max_z);
 
-        MappedCells {
+        MappedVolumeGrid {
             max_x: max_x - 1,
             max_y: max_y - 1,
             max_z: max_z - 1,
@@ -79,7 +79,7 @@ impl MappedCells {
         }
     }
 }
-impl World for MappedCells {
+impl World for MappedVolumeGrid {
     fn get(&self, xyz: [i32; 3]) -> u8 {
         let x_tile = xyz[0] as usize / 500;
         let y_tile = xyz[1] as usize / 500;
@@ -161,7 +161,7 @@ impl TemplateApp {
         app
     }
     fn load_data(&mut self, data_dir: &str) {
-        self.world = Box::new(MappedCells::from_data_dir(data_dir));
+        self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir));
         self.data_dir = data_dir.to_string();
     }
 
@@ -217,8 +217,8 @@ impl TemplateApp {
         xyz[d_coord] = self.coord[d_coord];
 
         for (i, p) in pixels.iter_mut().enumerate() {
-            xyz[u_coord] = (i % width) as i32 + self.coord[u_coord] - (250_f32 / self.zoom) as i32;
-            xyz[v_coord] = (i / width) as i32 + self.coord[v_coord] - (250_f32 / self.zoom) as i32;
+            xyz[u_coord] = (i % width) as i32 + self.coord[u_coord] - (250 as f32 / self.zoom) as i32;
+            xyz[v_coord] = (i / width) as i32 + self.coord[v_coord] - (250 as f32 / self.zoom) as i32;
 
             *p = self.world.get(xyz);
         }
