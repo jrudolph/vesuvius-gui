@@ -211,8 +211,8 @@ impl TemplateApp {
         xyz[d_coord] = self.coord[d_coord];
 
         for (i, p) in pixels.iter_mut().enumerate() {
-            xyz[u_coord] = (i % width) as i32 + self.coord[u_coord] - 250;
-            xyz[v_coord] = (i / width) as i32 + self.coord[v_coord] - 250;
+            xyz[u_coord] = (i % width) as i32 + self.coord[u_coord] - (250 as f32 / self.zoom) as i32;
+            xyz[v_coord] = (i / width) as i32 + self.coord[v_coord] - (250 as f32 / self.zoom) as i32;
 
             *p = self.world.get(xyz);
         }
@@ -272,15 +272,16 @@ impl eframe::App for TemplateApp {
                 )
                 .text("y"),
             );
-            if x_sl.changed() || y_sl.changed() {
-                self.clear_textures();
-            }
+
             let _z_sl = ui.add(egui::Slider::new(&mut self.z(), 0..=14500).text("z"));
-            let _zoom_sl = ui.add(
+            let zoom_sl = ui.add(
                 egui::Slider::new(&mut self.zoom, 0.1f32..=32f32)
                     .text("zoom")
                     .logarithmic(true),
             );
+            if x_sl.changed() || y_sl.changed() || zoom_sl.changed() {
+                self.clear_textures();
+            }
 
             let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, |s| &mut s.texture_xy);
             let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
