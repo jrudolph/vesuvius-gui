@@ -1,10 +1,13 @@
 # Vesuvius Volume Browser
 
-A simple browser to browse volume data from the [Vesuvius Challenge](https://scrollprize.org/data) data set.
+A simple browser built with Rust and [egui](https://github.com/emilk/egui) to browse volume data from the [Vesuvius Challenge](https://scrollprize.org/data) data set.
 
 ## Usage
 
-Download any number of cells from the volume_grids folder http://dl.ash2txt.org/full-scrolls/Scroll1.volpkg/volume_grids/20230205180739/
+Install required X11 libraries:
+  * Ubuntu: `apt install -y libgl1 libxrandr2 libxi6 libxcursor1`
+
+Download any number of cells from a [volume_grids folder](http://dl.ash2txt.org/full-scrolls/Scroll1.volpkg/volume_grids/20230205180739/)
 and put them into a directory. Then run the app with `./vesuvius-gui <path-to-directory>` / `cargo run --release <path-to-directory>`. The app will then
 pick up whatever cells is there and display them.
 
