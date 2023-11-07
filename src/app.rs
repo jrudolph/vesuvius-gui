@@ -1,5 +1,4 @@
-
-use egui::{ColorImage, PointerButton, CursorIcon, Image, Response, Ui};
+use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 
@@ -25,18 +24,13 @@ impl Default for TemplateApp {
 
         fn map_for(x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
             let file_name = format!("/tmp/cell_yxz_{:03}_{:03}_{:03}.tif", y, x, z);
-            
+
             let file = File::open(file_name).ok()?;
             unsafe { MmapOptions::new().offset(8).map(&file) }.ok()
         }
-        let data =
-            (1..=29).map( |z|
-                (1..=16).map(|y|
-                    (1..=17).map( |x|
-                        map_for(x, y, z)
-                    ).collect()
-                ).collect()
-            ).collect();
+        let data = (1..=29)
+            .map(|z| (1..=16).map(|y| (1..=17).map(|x| map_for(x, y, z)).collect()).collect())
+            .collect();
 
         Self {
             coord: [2800, 2500, 10852],
@@ -46,7 +40,7 @@ impl Default for TemplateApp {
             texture_xy: None,
             texture_xz: None,
             texture_yz: None,
-            data: data
+            data: data,
         }
     }
 }
@@ -56,8 +50,6 @@ impl TemplateApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
-
-        
 
         Default::default()
     }
@@ -83,7 +75,14 @@ impl TemplateApp {
     fn y(&self) -> i32 { self.coord[1] }
     fn z(&self) -> i32 { self.coord[2] }
 
-    fn get_or_create_texture(&mut self, ui: &Ui, u_coord: usize, v_coord: usize, d_coord: usize, t: fn(&mut Self) -> &mut Option<egui::TextureHandle>) -> egui::TextureHandle {
+    fn get_or_create_texture(
+        &mut self,
+        ui: &Ui,
+        u_coord: usize,
+        v_coord: usize,
+        d_coord: usize,
+        t: fn(&mut Self) -> &mut Option<egui::TextureHandle>,
+    ) -> egui::TextureHandle {
         if let Some(texture) = t(self) {
             texture.clone()
         } else {
@@ -110,21 +109,23 @@ impl TemplateApp {
             xyz[u_coord] = (i % width) as i32 + self.coord[u_coord] - 250;
             xyz[v_coord] = (i / width) as i32 + self.coord[v_coord] - 250;
 
-            let v =
-                if let Some(tile) = &self.data[(xyz[2] / 500) as usize][(xyz[1] / 500) as usize][(xyz[0] / 500) as usize] {
-                    let off = (((xyz[1] % 500) as usize / q) * q * 500 + ((xyz[0] % 500) as usize / q) * q) * 2 + 500147 * (xyz[2] % 500) as usize;
-                    if off + 1 >= tile.len() {
-                        /* if !printed {
-                            println!("x: {}, y: {}, z:{}, off: {}, len: {}", x, y, z, off, self.data.len());
-                            printed = true;
-                        } */
-                        *p = 0;
-                        continue;
-                    }
-                    tile[off + 1]
-                } else {
-                    0
-                };
+            let v = if let Some(tile) =
+                &self.data[(xyz[2] / 500) as usize][(xyz[1] / 500) as usize][(xyz[0] / 500) as usize]
+            {
+                let off = (((xyz[1] % 500) as usize / q) * q * 500 + ((xyz[0] % 500) as usize / q) * q) * 2
+                    + 500147 * (xyz[2] % 500) as usize;
+                if off + 1 >= tile.len() {
+                    /* if !printed {
+                        println!("x: {}, y: {}, z:{}, off: {}, len: {}", x, y, z, off, self.data.len());
+                        printed = true;
+                    } */
+                    *p = 0;
+                    continue;
+                }
+                tile[off + 1]
+            } else {
+                0
+            };
 
             *p = v;
         }
@@ -156,11 +157,7 @@ impl TemplateApp {
         let image = ColorImage::from_gray([width, height], &pixels);
 
         // Load the texture only once.
-        let res = ui.ctx().load_texture(
-            "my-image-xy",
-            image,
-            Default::default()
-        );
+        let res = ui.ctx().load_texture("my-image-xy", image, Default::default());
         let duration = start.elapsed();
         println!("Time elapsed in expensive_function() is: {:?}", duration);
         res
@@ -197,14 +194,30 @@ impl eframe::App for TemplateApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let x_sl = ui.add(egui::Slider::new(&mut self.x(), -10000..=10000/* 0..=(self.img_width - self.frame_width - 1) */).text("x"));
-            let y_sl = ui.add(egui::Slider::new(&mut self.y(), -10000..=10000/* 0..=(self.img_height - self.frame_height - 1) */).text("y"));
+            let x_sl = ui.add(
+                egui::Slider::new(
+                    &mut self.x(),
+                    -10000..=10000, /* 0..=(self.img_width - self.frame_width - 1) */
+                )
+                .text("x"),
+            );
+            let y_sl = ui.add(
+                egui::Slider::new(
+                    &mut self.y(),
+                    -10000..=10000, /* 0..=(self.img_height - self.frame_height - 1) */
+                )
+                .text("y"),
+            );
             if x_sl.changed() || y_sl.changed() {
                 self.clear_textures();
             }
             let _z_sl = ui.add(egui::Slider::new(&mut self.z(), 0..=14500).text("z"));
-            let _zoom_sl = ui.add(egui::Slider::new(&mut self.zoom, 0.1f32..=32f32).text("zoom").logarithmic(true));
-            
+            let _zoom_sl = ui.add(
+                egui::Slider::new(&mut self.zoom, 0.1f32..=32f32)
+                    .text("zoom")
+                    .logarithmic(true),
+            );
+
             let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, |s| &mut s.texture_xy);
             let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
             let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
@@ -214,12 +227,11 @@ impl eframe::App for TemplateApp {
             {
                 //self.frame_width = size.x as usize;
                 //self.frame_height = size.y as usize;
-                
-                let image =
-                    Image::new(texture_xy)
-                        .max_height(500f32)
-                        .max_width(500f32)
-                        .fit_to_original_size(self.zoom);
+
+                let image = Image::new(texture_xy)
+                    .max_height(500f32)
+                    .max_width(500f32)
+                    .fit_to_original_size(self.zoom);
 
                 let image_xz = Image::new(texture_xz)
                     .max_height(500f32)
@@ -232,15 +244,14 @@ impl eframe::App for TemplateApp {
                     .fit_to_original_size(self.zoom);
 
                 ui.horizontal(|ui| {
-                    let im_xy = ui.add(image)
-                        .interact(egui::Sense::drag());
+                    let im_xy = ui.add(image).interact(egui::Sense::drag());
                     let im_xz = ui.add(image_xz);
                     let im_yz = ui.add(image_yz);
                     self.add_scroll_handler(&im_xy, &ui, |s| &mut s.coord[2]);
                     self.add_scroll_handler(&im_xz, &ui, |s| &mut s.coord[1]);
                     self.add_scroll_handler(&im_yz, &ui, |s| &mut s.coord[0]);
-                                    //let size2 = texture.size_vec2();
-                    
+                    //let size2 = texture.size_vec2();
+
                     /* if im_xy.hovered() {
                         let delta = ui.input(|i| i.scroll_delta);
                         if delta.y != 0.0 {
@@ -249,7 +260,7 @@ impl eframe::App for TemplateApp {
                             self.clear_textures();
                         }
                     } */
-                            
+
                     if im_xy.dragged_by(PointerButton::Primary) {
                         let im2 = im_xy.on_hover_cursor(CursorIcon::Grabbing);
                         let delta = -im2.drag_delta() / self.zoom;
@@ -262,14 +273,11 @@ impl eframe::App for TemplateApp {
                         //println!("oldx: {}, oldy: {}, x: {}, y: {}", oldx, oldy, self.x(), self.y());
                         self.clear_textures();
                     } /* else if size2.x as usize != self.frame_width || size2.y as usize != self.frame_height {
-                        println!("Reset because size changed from {:?} to {:?}", size2, size);
-                        self.clear_textures();
-                    }; */
+                          println!("Reset because size changed from {:?} to {:?}", size2, size);
+                          self.clear_textures();
+                      }; */
                 });
-                
-
             };
         });
     }
 }
-
