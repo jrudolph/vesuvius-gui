@@ -2341,6 +2341,7 @@ dependencies = [
  "env_logger",
  "log",
  "memmap",
+ "regex",
  "serde",
 ]
 
