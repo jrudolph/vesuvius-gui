@@ -2,6 +2,40 @@ use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 
+trait World {
+    fn get(&self, xyz: [i32; 3]) -> u8;
+}
+
+struct MappedCells {
+    data: Vec<Vec<Vec<Option<memmap::Mmap>>>>,
+}
+impl World for MappedCells {
+    fn get(&self, xyz: [i32; 3]) -> u8 {
+        if xyz[0] < 0 || xyz[1] < 0 || xyz[2] < 0 {
+            0
+        } else if let Some(tile) = &self.data[xyz[2] as usize / 500][xyz[1] as usize / 500][xyz[0] as usize / 500] {
+            let off =
+                500147 * ((xyz[2] % 500) as usize) + ((xyz[1] % 500) as usize * 500 + (xyz[0] % 500) as usize) * 2;
+
+            //println!("xyz: {:?}, off: {}, tile: {:?}", xyz, off, tile);
+
+            // off + 1 because we select the higher order bits of little endian 16 bit values
+            if off + 1 >= tile.len() {
+                0
+            } else {
+                tile[off + 1]
+            }
+        } else {
+            0
+        }
+    }
+}
+
+struct EmptyWorld {}
+impl World for EmptyWorld {
+    fn get(&self, _xyz: [i32; 3]) -> u8 { 0 }
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TemplateApp {
@@ -17,7 +51,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     texture_yz: Option<egui::TextureHandle>,
     #[serde(skip)]
-    data: Vec<Vec<Vec<Option<memmap::Mmap>>>>,
+    world: Box<dyn World>,
 }
 
 impl Default for TemplateApp {
@@ -31,7 +65,7 @@ impl Default for TemplateApp {
             texture_xy: None,
             texture_xz: None,
             texture_yz: None,
-            data: vec![],
+            world: Box::new(EmptyWorld {}),
         }
     }
 }
@@ -82,7 +116,7 @@ impl TemplateApp {
         println!("Found {} slices", slices_found);
 
         self.data_dir = data_dir.to_string();
-        self.data = data;
+        self.world = Box::new(MappedCells { data });
     }
 
     pub fn clear_textures(&mut self) {
@@ -140,25 +174,7 @@ impl TemplateApp {
             xyz[u_coord] = (i % width) as i32 + self.coord[u_coord] - 250;
             xyz[v_coord] = (i / width) as i32 + self.coord[v_coord] - 250;
 
-            let v = if let Some(tile) =
-                &self.data[(xyz[2] / 500) as usize][(xyz[1] / 500) as usize][(xyz[0] / 500) as usize]
-            {
-                let off = (((xyz[1] % 500) as usize / q) * q * 500 + ((xyz[0] % 500) as usize / q) * q) * 2
-                    + 500147 * (xyz[2] % 500) as usize;
-                if off + 1 >= tile.len() {
-                    /* if !printed {
-                        println!("x: {}, y: {}, z:{}, off: {}, len: {}", x, y, z, off, self.data.len());
-                        printed = true;
-                    } */
-                    *p = 0;
-                    continue;
-                }
-                tile[off + 1]
-            } else {
-                0
-            };
-
-            *p = v;
+            *p = self.world.get(xyz);
         }
         /* 4bit
         for (i, p) in pixels.iter_mut().enumerate() {
