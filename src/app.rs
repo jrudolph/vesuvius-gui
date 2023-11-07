@@ -308,8 +308,8 @@ impl eframe::App for TemplateApp {
                 let x = self.x;
 
                 for (i, p) in pixels.iter_mut().enumerate() {
-                    let z = (i % width) as i32 + (self.z as i32) - 250;
-                    let y = (i / width) as i32 + (self.y as i32) - 250;
+                    let y = (i % width) as i32 + (self.y as i32) - 250;
+                    let z = (i / width) as i32 + (self.z as i32) - 250;
                     if i == 0 {
                         println!("x: {}, y: {}, z: {}", x, y, z);
                     }
@@ -390,51 +390,55 @@ impl eframe::App for TemplateApp {
                         .max_width(500f32)
                         .fit_to_original_size(self.zoom);
 
-                let im_xy = ui.add(image)
-                        .interact(egui::Sense::drag());
+                
 
                 let image_xz = Image::new(texture_xz)
                     .max_height(500f32)
                     .max_width(500f32)
                     .fit_to_original_size(self.zoom);
-                let im_xz = ui.add(image_xz);
 
                 let image_yz = Image::new(texture_yz)
                     .max_height(500f32)
                     .max_width(500f32)
                     .fit_to_original_size(self.zoom);
-                let im_yz = ui.add(image_yz);
-                
-                //let size2 = texture.size_vec2();
-                
-                self.add_scroll_handler(&im_xy, &ui, |s| &mut s.z);
-                self.add_scroll_handler(&im_xz, &ui, |s| &mut s.y);
-                self.add_scroll_handler(&im_yz, &ui, |s| &mut s.x);
 
-                /* if im_xy.hovered() {
-                    let delta = ui.input(|i| i.scroll_delta);
-                    if delta.y != 0.0 {
-                        let delta = delta.y.signum() * 1.0;
-                        self.z = (self.z as i32 + delta as i32).max(0).min(15000) as usize;
+                ui.horizontal(|ui| {
+                    let im_xy = ui.add(image)
+                        .interact(egui::Sense::drag());
+                    let im_xz = ui.add(image_xz);
+                    let im_yz = ui.add(image_yz);
+                    self.add_scroll_handler(&im_xy, &ui, |s| &mut s.z);
+                    self.add_scroll_handler(&im_xz, &ui, |s| &mut s.y);
+                    self.add_scroll_handler(&im_yz, &ui, |s| &mut s.x);
+                                    //let size2 = texture.size_vec2();
+                    
+                    /* if im_xy.hovered() {
+                        let delta = ui.input(|i| i.scroll_delta);
+                        if delta.y != 0.0 {
+                            let delta = delta.y.signum() * 1.0;
+                            self.z = (self.z as i32 + delta as i32).max(0).min(15000) as usize;
+                            self.clear_textures();
+                        }
+                    } */
+                            
+                    if im_xy.dragged_by(PointerButton::Primary) {
+                        let im2 = im_xy.on_hover_cursor(CursorIcon::Grabbing);
+                        let delta = -im2.drag_delta() / self.zoom;
+                        //println!("delta: {:?} orig delta: {:?}", delta, im2.drag_delta());
+                        //let oldx = self.x;
+                        //let oldy = self.y;
+
+                        self.x = self.x as i32 + delta.x as i32;
+                        self.y = self.y as i32 + delta.y as i32;
+                        //println!("oldx: {}, oldy: {}, x: {}, y: {}", oldx, oldy, self.x, self.y);
                         self.clear_textures();
-                    }
-                } */
-                        
-                if im_xy.dragged_by(PointerButton::Primary) {
-                    let im2 = im_xy.on_hover_cursor(CursorIcon::Grabbing);
-                    let delta = -im2.drag_delta() / self.zoom;
-                    //println!("delta: {:?} orig delta: {:?}", delta, im2.drag_delta());
-                    //let oldx = self.x;
-                    //let oldy = self.y;
+                    } /* else if size2.x as usize != self.frame_width || size2.y as usize != self.frame_height {
+                        println!("Reset because size changed from {:?} to {:?}", size2, size);
+                        self.clear_textures();
+                    }; */
+                });
+                
 
-                    self.x = self.x as i32 + delta.x as i32;
-                    self.y = self.y as i32 + delta.y as i32;
-                    //println!("oldx: {}, oldy: {}, x: {}, y: {}", oldx, oldy, self.x, self.y);
-                    self.clear_textures();
-                } /* else if size2.x as usize != self.frame_width || size2.y as usize != self.frame_height {
-                    println!("Reset because size changed from {:?} to {:?}", size2, size);
-                    self.clear_textures();
-                }; */
             };
         });
     }
