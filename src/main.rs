@@ -14,6 +14,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "eframe template",
         native_options,
-        Box::new(|cc| Box::new(vesuvius_gui::TemplateApp::new(cc))),
+        Box::new(|cc| Box::new(vesuvius_gui::TemplateApp::new(cc, std::env::args().nth(1)))),
     )
 }

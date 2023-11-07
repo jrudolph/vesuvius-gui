@@ -9,6 +9,7 @@ pub struct TemplateApp {
     zoom: f32,
     frame_width: usize,
     frame_height: usize,
+    data_dir: String,
     #[serde(skip)]
     texture_xy: Option<egui::TextureHandle>,
     #[serde(skip)]
@@ -21,46 +22,67 @@ pub struct TemplateApp {
 
 impl Default for TemplateApp {
     fn default() -> Self {
-        use memmap::MmapOptions;
-        use std::fs::File;
-
-        //let file = File::open("/tmp/cell_yxz_006_007_022.tif").unwrap();
-        //let mmap = unsafe { MmapOptions::new().offset(8).map(&file).unwrap() };
-
-        fn map_for(x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
-            let file_name = format!("/tmp/cell_yxz_{:03}_{:03}_{:03}.tif", y, x, z);
-
-            let file = File::open(file_name).ok()?;
-            unsafe { MmapOptions::new().offset(8).map(&file) }.ok()
-        }
-        let data = (1..=29)
-            .map(|z| (1..=16).map(|y| (1..=17).map(|x| map_for(x, y, z)).collect()).collect())
-            .collect();
-
         Self {
             coord: [2800, 2500, 10852],
             zoom: 1f32,
             frame_width: 500,
             frame_height: 500,
+            data_dir: ".".to_string(),
             texture_xy: None,
             texture_xz: None,
             texture_yz: None,
-            data,
+            data: vec![],
         }
     }
 }
 
 impl TemplateApp {
     /// Called once before the first frame.
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: Option<String>) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
+        let mut app: TemplateApp = if let Some(storage) = cc.storage {
+            eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
+        } else {
+            Default::default()
+        };
 
-        if let Some(storage) = cc.storage {
-            return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
+        app.load_data(&data_dir.unwrap_or_else(|| app.data_dir.clone()));
+
+        app
+    }
+    fn load_data(&mut self, data_dir: &str) {
+        use memmap::MmapOptions;
+        use std::fs::File;
+
+        //let file = File::open("/tmp/cell_yxz_006_007_022.tif").unwrap();
+        //let mmap = unsafe { MmapOptions::new().offset(8).map(&file).unwrap() };
+
+        fn map_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
+            let file_name = format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
+
+            let file = File::open(file_name).ok()?;
+            unsafe { MmapOptions::new().offset(8).map(&file) }.ok()
         }
+        if !std::path::Path::new(data_dir).exists() {
+            println!("Data directory {} does not exist", data_dir);
+            return;
+        }
+        println!("Loading from {}", data_dir);
+        let data: Vec<Vec<Vec<Option<memmap::Mmap>>>> = (1..=29)
+            .map(|z| {
+                (1..=16)
+                    .map(|y| (1..=17).map(|x| map_for(data_dir, x, y, z)).collect())
+                    .collect()
+            })
+            .collect();
 
-        Default::default()
+        // count number of slices found
+        let slices_found = data.iter().flatten().flatten().flatten().count();
+        println!("Found {} slices", slices_found);
+
+        self.data_dir = data_dir.to_string();
+        self.data = data;
     }
 
     pub fn clear_textures(&mut self) {
@@ -101,8 +123,8 @@ impl TemplateApp {
         }
     }
     fn create_texture(&self, ui: &Ui, u_coord: usize, v_coord: usize, d_coord: usize) -> egui::TextureHandle {
-        use std::time::Instant;
-        let start = Instant::now();
+        //use std::time::Instant;
+        //let start = Instant::now();
 
         let width = (self.frame_width as f32 / self.zoom) as usize;
         let height = (self.frame_height as f32 / self.zoom) as usize;
@@ -167,8 +189,8 @@ impl TemplateApp {
 
         // Load the texture only once.
         let res = ui.ctx().load_texture("my-image-xy", image, Default::default());
-        let duration = start.elapsed();
-        println!("Time elapsed in expensive_function() is: {:?}", duration);
+        //let duration = start.elapsed();
+        //println!("Time elapsed in expensive_function() is: {:?}", duration);
         res
     }
 }
