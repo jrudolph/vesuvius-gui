@@ -5,12 +5,8 @@ use egui::{ColorImage, PointerButton, CursorIcon, Image, Response, Ui};
 
 pub struct TemplateApp {
     //#[serde(skip)] // This how you opt-out of serialization of a field
-    x: i32,
-    y: i32,
-    z: i32,
+    coord: [i32; 3],
     zoom: f32,
-    img_width: usize,
-    img_height: usize,
     frame_width: usize,
     frame_height: usize,
     texture_xy: Option<egui::TextureHandle>,
@@ -43,12 +39,8 @@ impl Default for TemplateApp {
             ).collect();
 
         Self {
-            x: 2800,
-            y: 2500,
-            z: 10852,
+            coord: [2800, 2500, 10852],
             zoom: 1f32,
-            img_width: 8096,
-            img_height: 7888,
             frame_width: 500,
             frame_height: 500,
             texture_xy: None,
@@ -87,6 +79,92 @@ impl TemplateApp {
             }
         }
     }
+    fn x(&self) -> i32 { self.coord[0] }
+    fn y(&self) -> i32 { self.coord[1] }
+    fn z(&self) -> i32 { self.coord[2] }
+
+    fn get_or_create_texture(&mut self, ui: &Ui, u_coord: usize, v_coord: usize, d_coord: usize, t: fn(&mut Self) -> &mut Option<egui::TextureHandle>) -> egui::TextureHandle {
+        if let Some(texture) = t(self) {
+            texture.clone()
+        } else {
+            let res = self.create_texture(ui, u_coord, v_coord, d_coord);
+            *t(self) = Some(res.clone());
+            res
+        }
+    }
+    fn create_texture(&self, ui: &Ui, u_coord: usize, v_coord: usize, d_coord: usize) -> egui::TextureHandle {
+        use std::time::Instant;
+        let start = Instant::now();
+
+        let width = (self.frame_width as f32 / self.zoom) as usize;
+        let height = (self.frame_height as f32 / self.zoom) as usize;
+        let mut pixels = vec![0u8; width * height];
+
+        let q = 1;
+
+        //let mut printed = false;
+        let mut xyz: [i32; 3] = [0, 0, 0];
+        xyz[d_coord] = self.coord[d_coord];
+
+        for (i, p) in pixels.iter_mut().enumerate() {
+            xyz[u_coord] = (i % width) as i32 + self.coord[u_coord] - 250;
+            xyz[v_coord] = (i / width) as i32 + self.coord[v_coord] - 250;
+
+            let v =
+                if let Some(tile) = &self.data[(xyz[2] / 500) as usize][(xyz[1] / 500) as usize][(xyz[0] / 500) as usize] {
+                    let off = (((xyz[1] % 500) as usize / q) * q * 500 + ((xyz[0] % 500) as usize / q) * q) * 2 + 500147 * (xyz[2] % 500) as usize;
+                    if off + 1 >= tile.len() {
+                        /* if !printed {
+                            println!("x: {}, y: {}, z:{}, off: {}, len: {}", x, y, z, off, self.data.len());
+                            printed = true;
+                        } */
+                        *p = 0;
+                        continue;
+                    }
+                    tile[off + 1]
+                } else {
+                    0
+                };
+
+            *p = v;
+        }
+        /* 4bit
+        for (i, p) in pixels.iter_mut().enumerate() {
+            let x = i % width + self.x();
+            let y = i / width + self.y();
+            let off = y * real_width + x;
+            let v8 = self.data[off / 2];
+            let v =
+                if off % 2 == 0 {
+                    v8 & 0xf << 4
+                } else {
+                    v8 & 0xf0
+                };
+
+            //let v = (v16 >> 8) as u8;
+
+            *p = v;
+        }
+            */
+        /* for (i, p) in pixels.iter_mut().enumerate() {
+            let x = i % width + self.x();
+            let y = i / width + self.y();
+            let off = y * real_width + x;
+            let v8 = self.data[off];
+            *p = v8;
+        } */
+        let image = ColorImage::from_gray([width, height], &pixels);
+
+        // Load the texture only once.
+        let res = ui.ctx().load_texture(
+            "my-image-xy",
+            image,
+            Default::default()
+        );
+        let duration = start.elapsed();
+        println!("Time elapsed in expensive_function() is: {:?}", duration);
+        res
+    }
 }
 
 impl eframe::App for TemplateApp {
@@ -119,265 +197,18 @@ impl eframe::App for TemplateApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let x_sl = ui.add(egui::Slider::new(&mut self.x, -10000..=10000/* 0..=(self.img_width - self.frame_width - 1) */).text("x"));
-            let y_sl = ui.add(egui::Slider::new(&mut self.y, -10000..=10000/* 0..=(self.img_height - self.frame_height - 1) */).text("y"));
+            let x_sl = ui.add(egui::Slider::new(&mut self.x(), -10000..=10000/* 0..=(self.img_width - self.frame_width - 1) */).text("x"));
+            let y_sl = ui.add(egui::Slider::new(&mut self.y(), -10000..=10000/* 0..=(self.img_height - self.frame_height - 1) */).text("y"));
             if x_sl.changed() || y_sl.changed() {
                 self.clear_textures();
             }
-            let _z_sl = ui.add(egui::Slider::new(&mut self.z, 0..=14500).text("z"));
+            let _z_sl = ui.add(egui::Slider::new(&mut self.z(), 0..=14500).text("z"));
             let _zoom_sl = ui.add(egui::Slider::new(&mut self.zoom, 0.1f32..=32f32).text("zoom").logarithmic(true));
             
-            
-            let texture_xy: &egui::TextureHandle = self.texture_xy.get_or_insert_with(|| {
-                use std::time::Instant;
-                let start = Instant::now();
+            let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, |s| &mut s.texture_xy);
+            let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
+            let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
 
-                let width = (self.frame_width as f32 / self.zoom) as usize;
-                let height = (self.frame_height as f32 / self.zoom) as usize;
-                let mut pixels = vec![0u8; width * height];
-
-                let q = 1;
-
-                let mut printed = false;
-                let z = self.z;
-                
-                for (i, p) in pixels.iter_mut().enumerate() {
-                    let x = (i % width) as i32 + self.x - 250;
-                    let y = (i / width) as i32 + self.y - 250;
-
-
-                    let v = 
-                        if x >= 0 && x < self.img_width as i32 && y >= 0 && y < self.img_height as i32 {
-                            
-                            if let Some(tile) = &self.data[(self.z / 500) as usize][(y / 500) as usize][(x / 500) as usize] {
-                                let off = (((y % 500) as usize / q) * q * 500 + ((x % 500) as usize / q) * q) * 2 + 500147 * (z % 500) as usize;
-                                if off + 1 >= tile.len() {
-                                    if !printed {
-                                        println!("x: {}, y: {}, z:{}, off: {}, len: {}", x, y, self.z, off, self.data.len());
-                                        printed = true;
-                                    }
-                                    *p = 0;
-                                    continue;
-                                }
-                                tile[off + 1]
-                            } else {
-                                0
-                            }
-                        } else {
-                            0
-                        };
-
-                    *p = v;
-                }
-                /* 4bit
-                for (i, p) in pixels.iter_mut().enumerate() {
-                    let x = i % width + self.x;
-                    let y = i / width + self.y;
-                    let off = y * real_width + x;
-                    let v8 = self.data[off / 2];
-                    let v =
-                        if off % 2 == 0 {
-                            v8 & 0xf << 4
-                        } else {
-                            v8 & 0xf0
-                        };
-
-                    //let v = (v16 >> 8) as u8;
-                    
-                    *p = v;
-                }
-                 */
-                /* for (i, p) in pixels.iter_mut().enumerate() {
-                    let x = i % width + self.x;
-                    let y = i / width + self.y;
-                    let off = y * real_width + x;
-                    let v8 = self.data[off];
-                    *p = v8;                    
-                } */
-                let image = ColorImage::from_gray([width, height], &pixels);
-
-                // Load the texture only once.
-                let res = ui.ctx().load_texture(
-                    "my-image-xy",
-                    image,
-                    Default::default()
-                );
-                let duration = start.elapsed();
-                println!("Time elapsed in expensive_function() is: {:?}", duration);
-                res
-            });
-
-            let texture_xz: &egui::TextureHandle = self.texture_xz.get_or_insert_with(|| {
-                use std::time::Instant;
-                let start = Instant::now();
-
-                let width = (self.frame_width as f32 / self.zoom) as usize;
-                let height = (self.frame_height as f32 / self.zoom) as usize;
-                let mut pixels = vec![0u8; width * height];
-
-                let q = 1;
-
-                let mut printed = false;
-                
-                let y = self.y;
-
-                for (i, p) in pixels.iter_mut().enumerate() {
-                    let x = (i % width) as i32 + self.x - 250;
-                    let z = (i / width) as i32 + (self.z as i32) - 250;
-                    if i == 0 {
-                        println!("x: {}, y: {}, z: {}", x, y, z);
-                    }
-
-
-                    let v = 
-                        //if x >= 0 && x < self.img_width as i32 && z >= 0 && z < self.img_height as i32 {
-                        if let Some(tile) = &self.data[(z / 500) as usize][(y / 500) as usize][(x / 500) as usize] {
-                            let off = (((y % 500) as usize / q) * q * 500 + ((x % 500) as usize / q) * q) * 2 + 500147 * (z % 500) as usize;
-                            if i == 0 {
-                                println!("off: {}", off);
-                            }
-                            if off + 1 >= tile.len() {
-                                if !printed {
-                                    println!("x: {}, y: {}, z:{}, off: {}, len: {}", x, y, z, off, self.data.len());
-                                    printed = true;
-                                }
-                                0
-                            }
-                            else {
-                                tile[off + 1]
-                            }
-                        } else {
-                            0
-                        };
-                        /* } else {
-                            0
-                        }; */
-
-                    *p = v;
-                }
-                /* 4bit
-                for (i, p) in pixels.iter_mut().enumerate() {
-                    let x = i % width + self.x;
-                    let y = i / width + self.y;
-                    let off = y * real_width + x;
-                    let v8 = self.data[off / 2];
-                    let v =
-                        if off % 2 == 0 {
-                            v8 & 0xf << 4
-                        } else {
-                            v8 & 0xf0
-                        };
-
-                    //let v = (v16 >> 8) as u8;
-                    
-                    *p = v;
-                }
-                 */
-                /* for (i, p) in pixels.iter_mut().enumerate() {
-                    let x = i % width + self.x;
-                    let y = i / width + self.y;
-                    let off = y * real_width + x;
-                    let v8 = self.data[off];
-                    *p = v8;                    
-                } */
-                let image = ColorImage::from_gray([width, height], &pixels);
-
-                // Load the texture only once.
-                let res = ui.ctx().load_texture(
-                    "my-image-xz",
-                    image,
-                    Default::default()
-                );
-                let duration = start.elapsed();
-                println!("Time elapsed in expensive_function() is: {:?}", duration);
-                res
-            });
-
-            let texture_yz: &egui::TextureHandle = self.texture_yz.get_or_insert_with(|| {
-                use std::time::Instant;
-                let start = Instant::now();
-
-                let width = (self.frame_width as f32 / self.zoom) as usize;
-                let height = (self.frame_height as f32 / self.zoom) as usize;
-                let mut pixels = vec![0u8; width * height];
-
-                let q = 1;
-
-                let mut printed = false;
-                
-                let x = self.x;
-
-                for (i, p) in pixels.iter_mut().enumerate() {
-                    let y = (i % width) as i32 + (self.y as i32) - 250;
-                    let z = (i / width) as i32 + (self.z as i32) - 250;
-                    if i == 0 {
-                        println!("x: {}, y: {}, z: {}", x, y, z);
-                    }
-
-
-                    let v = 
-                        //if x >= 0 && x < self.img_width as i32 && z >= 0 && z < self.img_height as i32 {
-                        if let Some(tile) = &self.data[(z / 500) as usize][(y / 500) as usize][(x / 500) as usize] {
-                            let off = (((y % 500) as usize / q) * q * 500 + ((x % 500) as usize / q) * q) * 2 + 500147 * (z % 500) as usize;
-                            if i == 0 {
-                                println!("off: {}", off);
-                            }
-                            if off + 1 >= tile.len() {
-                                if !printed {
-                                    println!("x: {}, y: {}, z:{}, off: {}, len: {}", x, y, z, off, self.data.len());
-                                    printed = true;
-                                }
-                                0
-                            }
-                            else {
-                                tile[off + 1]
-                            }
-                        } else {
-                            0
-                        };
-                        /* } else {
-                            0
-                        }; */
-
-                    *p = v;
-                }
-                /* 4bit
-                for (i, p) in pixels.iter_mut().enumerate() {
-                    let x = i % width + self.x;
-                    let y = i / width + self.y;
-                    let off = y * real_width + x;
-                    let v8 = self.data[off / 2];
-                    let v =
-                        if off % 2 == 0 {
-                            v8 & 0xf << 4
-                        } else {
-                            v8 & 0xf0
-                        };
-
-                    //let v = (v16 >> 8) as u8;
-                    
-                    *p = v;
-                }
-                 */
-                /* for (i, p) in pixels.iter_mut().enumerate() {
-                    let x = i % width + self.x;
-                    let y = i / width + self.y;
-                    let off = y * real_width + x;
-                    let v8 = self.data[off];
-                    *p = v8;                    
-                } */
-                let image = ColorImage::from_gray([width, height], &pixels);
-
-                // Load the texture only once.
-                let res = ui.ctx().load_texture(
-                    "my-image-yz",
-                    image,
-                    Default::default()
-                );
-                let duration = start.elapsed();
-                println!("Time elapsed in expensive_function() is: {:?}", duration);
-                res
-            });
             // use remaining space for image
             //let size =ui.available_size();
             {
@@ -389,8 +220,6 @@ impl eframe::App for TemplateApp {
                         .max_height(500f32)
                         .max_width(500f32)
                         .fit_to_original_size(self.zoom);
-
-                
 
                 let image_xz = Image::new(texture_xz)
                     .max_height(500f32)
@@ -407,16 +236,16 @@ impl eframe::App for TemplateApp {
                         .interact(egui::Sense::drag());
                     let im_xz = ui.add(image_xz);
                     let im_yz = ui.add(image_yz);
-                    self.add_scroll_handler(&im_xy, &ui, |s| &mut s.z);
-                    self.add_scroll_handler(&im_xz, &ui, |s| &mut s.y);
-                    self.add_scroll_handler(&im_yz, &ui, |s| &mut s.x);
+                    self.add_scroll_handler(&im_xy, &ui, |s| &mut s.coord[2]);
+                    self.add_scroll_handler(&im_xz, &ui, |s| &mut s.coord[1]);
+                    self.add_scroll_handler(&im_yz, &ui, |s| &mut s.coord[0]);
                                     //let size2 = texture.size_vec2();
                     
                     /* if im_xy.hovered() {
                         let delta = ui.input(|i| i.scroll_delta);
                         if delta.y != 0.0 {
                             let delta = delta.y.signum() * 1.0;
-                            self.z = (self.z as i32 + delta as i32).max(0).min(15000) as usize;
+                            self.z() = (self.z() as i32 + delta as i32).max(0).min(15000) as usize;
                             self.clear_textures();
                         }
                     } */
@@ -425,12 +254,12 @@ impl eframe::App for TemplateApp {
                         let im2 = im_xy.on_hover_cursor(CursorIcon::Grabbing);
                         let delta = -im2.drag_delta() / self.zoom;
                         //println!("delta: {:?} orig delta: {:?}", delta, im2.drag_delta());
-                        //let oldx = self.x;
-                        //let oldy = self.y;
+                        //let oldx = self.x();
+                        //let oldy = self.y();
 
-                        self.x = self.x as i32 + delta.x as i32;
-                        self.y = self.y as i32 + delta.y as i32;
-                        //println!("oldx: {}, oldy: {}, x: {}, y: {}", oldx, oldy, self.x, self.y);
+                        self.coord[0] += delta.x as i32;
+                        self.coord[1] += delta.y as i32;
+                        //println!("oldx: {}, oldy: {}, x: {}, y: {}", oldx, oldy, self.x(), self.y());
                         self.clear_textures();
                     } /* else if size2.x as usize != self.frame_width || size2.y as usize != self.frame_height {
                         println!("Reset because size changed from {:?} to {:?}", size2, size);
