@@ -40,14 +40,14 @@ impl Default for TemplateApp {
             texture_xy: None,
             texture_xz: None,
             texture_yz: None,
-            data: data,
+            data,
         }
     }
 }
 
 impl TemplateApp {
     /// Called once before the first frame.
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
 
@@ -166,7 +166,7 @@ impl TemplateApp {
 
 impl eframe::App for TemplateApp {
     /// Called by the frame work to save state before shutdown.
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         //eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
@@ -247,9 +247,9 @@ impl eframe::App for TemplateApp {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
                     let im_xz = ui.add(image_xz);
                     let im_yz = ui.add(image_yz);
-                    self.add_scroll_handler(&im_xy, &ui, |s| &mut s.coord[2]);
-                    self.add_scroll_handler(&im_xz, &ui, |s| &mut s.coord[1]);
-                    self.add_scroll_handler(&im_yz, &ui, |s| &mut s.coord[0]);
+                    self.add_scroll_handler(&im_xy, ui, |s| &mut s.coord[2]);
+                    self.add_scroll_handler(&im_xz, ui, |s| &mut s.coord[1]);
+                    self.add_scroll_handler(&im_yz, ui, |s| &mut s.coord[0]);
                     //let size2 = texture.size_vec2();
 
                     /* if im_xy.hovered() {
