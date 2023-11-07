@@ -157,14 +157,14 @@ impl TemplateApp {
         }
     }
     fn create_texture(&self, ui: &Ui, u_coord: usize, v_coord: usize, d_coord: usize) -> egui::TextureHandle {
-        //use std::time::Instant;
-        //let start = Instant::now();
+        use std::time::Instant;
+        let _start = Instant::now();
 
         let width = (self.frame_width as f32 / self.zoom) as usize;
         let height = (self.frame_height as f32 / self.zoom) as usize;
         let mut pixels = vec![0u8; width * height];
 
-        let q = 1;
+        //let q = 1;
 
         //let mut printed = false;
         let mut xyz: [i32; 3] = [0, 0, 0];
@@ -205,8 +205,8 @@ impl TemplateApp {
 
         // Load the texture only once.
         let res = ui.ctx().load_texture("my-image-xy", image, Default::default());
-        //let duration = start.elapsed();
-        //println!("Time elapsed in expensive_function() is: {:?}", duration);
+        let _duration = _start.elapsed();
+        //println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
         res
     }
 }
