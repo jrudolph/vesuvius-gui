@@ -1,4 +1,3 @@
 unstable_features = true
 fn_single_line = true
 max_width = 120
-brace_style = "PreferSameLine"
