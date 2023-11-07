@@ -1,7 +1,5 @@
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
-/// We derive Deserialize/Serialize so we can persist app state on shutdown.
-
 trait World {
     fn get(&self, xyz: [i32; 3]) -> u8;
 }
@@ -11,6 +9,75 @@ struct MappedCells {
     max_y: usize,
     max_z: usize,
     data: Vec<Vec<Vec<Option<memmap::Mmap>>>>,
+}
+impl MappedCells {
+    pub fn from_data_dir(data_dir: &str) -> MappedCells {
+        use memmap::MmapOptions;
+        use std::fs::File;
+
+        // find highest xyz values for files in data_dir named like this format: format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
+        // use regex to match file names
+        let mut max_x = 0;
+        let mut max_y = 0;
+        let mut max_z = 0;
+        for entry in std::fs::read_dir(data_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let file_name = path.file_name().unwrap().to_str().unwrap();
+            if let Some(captures) = regex::Regex::new(r"cell_yxz_(\d+)_(\d+)_(\d+)\.tif")
+                .unwrap()
+                .captures(file_name)
+            {
+                //println!("Found file: {}", file_name);
+                let x = captures.get(2).unwrap().as_str().parse::<usize>().unwrap();
+                let y = captures.get(1).unwrap().as_str().parse::<usize>().unwrap();
+                let z = captures.get(3).unwrap().as_str().parse::<usize>().unwrap();
+                if x > max_x {
+                    max_x = x;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
+                if z > max_z {
+                    max_z = z;
+                }
+            }
+        }
+        fn map_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
+            let file_name = format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
+
+            let file = File::open(file_name).ok()?;
+            unsafe { MmapOptions::new().offset(8).map(&file) }.ok()
+        }
+        if !std::path::Path::new(data_dir).exists() {
+            println!("Data directory {} does not exist", data_dir);
+            return MappedCells {
+                max_x: 0,
+                max_y: 0,
+                max_z: 0,
+                data: vec![],
+            };
+        }
+        let data: Vec<Vec<Vec<Option<memmap::Mmap>>>> = (1..=max_z)
+            .map(|z| {
+                (1..=max_y)
+                    .map(|y| (1..=max_x).map(|x| map_for(data_dir, x, y, z)).collect())
+                    .collect()
+            })
+            .collect();
+
+        // count number of slices found
+        let slices_found = data.iter().flatten().flatten().flatten().count();
+        println!("Found {} cells in {}", slices_found, data_dir);
+        println!("max_x: {}, max_y: {}, max_z: {}", max_x, max_y, max_z);
+
+        MappedCells {
+            max_x: max_x - 1,
+            max_y: max_y - 1,
+            max_z: max_z - 1,
+            data,
+        }
+    }
 }
 impl World for MappedCells {
     fn get(&self, xyz: [i32; 3]) -> u8 {
@@ -94,69 +161,8 @@ impl TemplateApp {
         app
     }
     fn load_data(&mut self, data_dir: &str) {
-        use memmap::MmapOptions;
-        use std::fs::File;
-
-        // find highest xyz values for files in data_dir named like this format: format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
-        // use regex to match file names
-        let mut max_x = 0;
-        let mut max_y = 0;
-        let mut max_z = 0;
-        for entry in std::fs::read_dir(data_dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            let file_name = path.file_name().unwrap().to_str().unwrap();
-            if let Some(captures) = regex::Regex::new(r"cell_yxz_(\d+)_(\d+)_(\d+)\.tif")
-                .unwrap()
-                .captures(file_name)
-            {
-                //println!("Found file: {}", file_name);
-                let x = captures.get(2).unwrap().as_str().parse::<usize>().unwrap();
-                let y = captures.get(1).unwrap().as_str().parse::<usize>().unwrap();
-                let z = captures.get(3).unwrap().as_str().parse::<usize>().unwrap();
-                if x > max_x {
-                    max_x = x;
-                }
-                if y > max_y {
-                    max_y = y;
-                }
-                if z > max_z {
-                    max_z = z;
-                }
-            }
-        }
-        fn map_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
-            let file_name = format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
-
-            let file = File::open(file_name).ok()?;
-            unsafe { MmapOptions::new().offset(8).map(&file) }.ok()
-        }
-        if !std::path::Path::new(data_dir).exists() {
-            println!("Data directory {} does not exist", data_dir);
-            return;
-        }
-        let data: Vec<Vec<Vec<Option<memmap::Mmap>>>> = (1..=max_z)
-            .map(|z| {
-                (1..=max_y)
-                    .map(|y| (1..=max_x).map(|x| map_for(data_dir, x, y, z)).collect())
-                    .collect()
-            })
-            .collect();
-
-        // count number of slices found
-        let slices_found = data.iter().flatten().flatten().flatten().count();
-        println!("Found {} cells in {}", slices_found, data_dir);
-        println!("max_x: {}, max_y: {}, max_z: {}", max_x, max_y, max_z);
-
+        self.world = Box::new(MappedCells::from_data_dir(data_dir));
         self.data_dir = data_dir.to_string();
-
-        let cells = MappedCells {
-            max_x: max_x - 1,
-            max_y: max_y - 1,
-            max_z: max_z - 1,
-            data,
-        };
-        self.world = Box::new(cells);
     }
 
     pub fn clear_textures(&mut self) {
@@ -211,8 +217,8 @@ impl TemplateApp {
         xyz[d_coord] = self.coord[d_coord];
 
         for (i, p) in pixels.iter_mut().enumerate() {
-            xyz[u_coord] = (i % width) as i32 + self.coord[u_coord] - (250 as f32 / self.zoom) as i32;
-            xyz[v_coord] = (i / width) as i32 + self.coord[v_coord] - (250 as f32 / self.zoom) as i32;
+            xyz[u_coord] = (i % width) as i32 + self.coord[u_coord] - (250_f32 / self.zoom) as i32;
+            xyz[v_coord] = (i / width) as i32 + self.coord[v_coord] - (250_f32 / self.zoom) as i32;
 
             *p = self.world.get(xyz);
         }
