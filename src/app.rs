@@ -125,8 +125,6 @@ impl TemplateApp {
                 }
             }
         }
-        println!("max_x: {}, max_y: {}, max_z: {}", max_x, max_y, max_z);
-
         fn map_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
             let file_name = format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
 
@@ -137,7 +135,6 @@ impl TemplateApp {
             println!("Data directory {} does not exist", data_dir);
             return;
         }
-        println!("Loading from {}", data_dir);
         let data: Vec<Vec<Vec<Option<memmap::Mmap>>>> = (1..=max_z)
             .map(|z| {
                 (1..=max_y)
@@ -148,7 +145,8 @@ impl TemplateApp {
 
         // count number of slices found
         let slices_found = data.iter().flatten().flatten().flatten().count();
-        println!("Found {} slices", slices_found);
+        println!("Found {} cells in {}", slices_found, data_dir);
+        println!("max_x: {}, max_y: {}, max_z: {}", max_x, max_y, max_z);
 
         self.data_dir = data_dir.to_string();
 
