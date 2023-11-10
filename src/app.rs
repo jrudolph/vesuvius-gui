@@ -4,6 +4,66 @@ trait World {
     fn get(&self, xyz: [i32; 3]) -> u8;
 }
 
+type V500 = [u8; 500*500*500];
+
+struct VolumeGrid4x4x4 {
+    max_x: usize,
+    max_y: usize,
+    max_z: usize,
+    data: Vec<Vec<Vec<Option<Box<V500>>>>>,
+}
+impl World for VolumeGrid4x4x4 {
+    fn get(&self, xyz: [i32; 3]) -> u8 {
+        let x_tile = xyz[0] as usize / 500;
+        let y_tile = xyz[1] as usize / 500;
+        let z_tile = xyz[2] as usize / 500;
+
+        if xyz[0] < 0 || xyz[1] < 0 || xyz[2] < 0 || x_tile > self.max_x || y_tile > self.max_y || z_tile > self.max_z {
+            //println!("out of bounds: {:?} x_tile: {} y_tile: {} z_tile: {} max_x: {}, max_y: {}, max_z: {}", xyz, x_tile, y_tile, z_tile, self.max_x, self.max_y, self.max_z);
+            0
+        } else if let Some(tile) = &self.data[z_tile][y_tile][x_tile] {
+            let tx = (xyz[0] % 500) as usize;
+            let ty = (xyz[1] % 500) as usize;
+            let tz = (xyz[2] % 500) as usize;
+
+            let bx = tx >> 2;
+            let by = ty >> 2;
+            let bz = tz >> 2;
+
+            let boff = bz * 125 * 125 + by * 125 + bx;
+
+            let px = tx & 3;
+            let py = ty & 3;
+            let pz = tz & 3;
+
+            let poff = pz * 16 + py * 4 + px;
+
+            let off = boff * 64 + poff;
+
+            if off < tile.len() {
+                tile[off]
+            } else {
+                0
+            }
+
+
+            /* let off =
+                500147 * ((xyz[2] % 500) as usize) + ((xyz[1] % 500) as usize * 500 + (xyz[0] % 500) as usize) * 2;
+
+            //println!("xyz: {:?}, off: {}, tile: {:?}", xyz, off, tile);
+
+            // off + 1 because we select the higher order bits of little endian 16 bit values
+            if off + 1 >= tile.len() {
+                0
+            } else {
+                tile[off + 1]
+            } */
+        } else {
+            0
+        }
+    }
+}
+
 struct MappedVolumeGrid {
     max_x: usize,
     max_y: usize,
@@ -76,6 +136,75 @@ impl MappedVolumeGrid {
             max_y: max_y - 1,
             max_z: max_z - 1,
             data,
+        }
+    }
+
+    fn to_volume_grid(&self) -> VolumeGrid4x4x4 {
+        fn data_for(mapped: &memmap::Mmap, x: usize, y: usize, z: usize) -> Box<V500> {
+            let mut buffer = Box::new([0u8; 500 * 500 * 500]);
+            let mut printed = false;
+            for z in 0..500 {
+                for y in 0..500 {
+                    for x in 0..500 {
+                        let bx = x >> 2;
+                        let by = y >> 2;
+                        let bz = z >> 2;
+
+                        let boff = bz * 125 * 125 + by * 125 + bx;
+
+                        let px = x & 3;
+                        let py = y & 3;
+                        let pz = z & 3;
+
+                        let poff = pz * 16 + py * 4 + px;
+
+                        let off = boff * 64 + poff;
+                        //let off = z * 500 * 500 + y * 500 + x;
+
+                        let moff =
+                            500147 * z + (y * 500 + x) * 2;
+        
+                        /* if x < 2 && y < 2 && z < 50 {
+                            println!("x: {}, y: {}, z: {}, bx: {}, by: {}, bz: {}, px: {}, py: {}, pz: {}, boff: {}, poff: {}, off: {}, moff: {}", x, y, z, bx, by, bz, px, py, pz, boff, poff, off, moff);
+                        } */
+        
+                        // off + 1 because we select the higher order bits of little endian 16 bit values
+                        if moff + 1 >= mapped.len() {
+                            ()
+                        } else {
+                            if (buffer[off] != 0 && !printed) {
+                                printed = true;
+                                println!("Overwriting value at {} {} {}", x, y, z);
+                                println!("x: {}, y: {}, z: {}, bx: {}, by: {}, bz: {}, px: {}, py: {}, pz: {}, boff: {}, poff: {}, off: {}, moff: {}", x, y, z, bx, by, bz, px, py, pz, boff, poff, off, moff);
+                            }
+                            buffer[off] = mapped[moff + 1];
+                        }
+                        }
+                }
+            }
+            buffer
+        }
+
+        let data: Vec<Vec<Vec<Option<Box<V500>>>>> = 
+        (0..=self.max_z).map(|z| {
+                (0..=self.max_y).map(|y| 
+                    (0..=self.max_x).map(|x| {
+                        if let Some(map) = &self.data[z][y][x] {
+                            println!("Converting cell {} {} {}", x, y, z);
+                            Some(data_for(map, x, y, z))
+                        } else {
+                            None
+                        }
+                    }).collect())
+                    .collect()
+            })
+            .collect();
+
+        VolumeGrid4x4x4 { 
+            max_x: self.max_x,
+            max_y: self.max_y,
+            max_z: self.max_z,
+            data
         }
     }
 }
@@ -161,7 +290,7 @@ impl TemplateApp {
         app
     }
     fn load_data(&mut self, data_dir: &str) {
-        self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir));
+        self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
         self.data_dir = data_dir.to_string();
     }
 
@@ -252,7 +381,7 @@ impl TemplateApp {
         // Load the texture only once.
         let res = ui.ctx().load_texture("my-image-xy", image, Default::default());
         let _duration = _start.elapsed();
-        //println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
+        println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
         res
     }
 }
