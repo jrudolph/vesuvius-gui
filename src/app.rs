@@ -4,6 +4,141 @@ trait World {
     fn get(&self, xyz: [i32; 3]) -> u8;
 }
 
+struct VolumeGrid16x16x16Mapped {
+    max_x: usize,
+    max_y: usize,
+    max_z: usize,
+    data: Vec<Vec<Vec<Option<memmap::Mmap>>>>,
+}
+impl VolumeGrid16x16x16Mapped {
+    pub fn from_data_dir(data_dir: &str) -> VolumeGrid16x16x16Mapped {
+        use memmap::MmapOptions;
+        use std::fs::File;
+
+        // find highest xyz values for files in data_dir named like this format: format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
+        // use regex to match file names
+        let mut max_x = 0;
+        let mut max_y = 0;
+        let mut max_z = 0;
+        for entry in std::fs::read_dir(data_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let file_name = path.file_name().unwrap().to_str().unwrap();
+            //home/johannes/git/self/_2023/vesuvius-browser/data/blocks/scroll1/20230205180739/128-16/z041/xyz-010-010-041.bin
+            if let Some(captures) = regex::Regex::new(r"xyz-(\d+)-(\d+)-(\d+).bin")
+                .unwrap()
+                .captures(file_name)
+            {
+                println!("Found file: {}", file_name);
+                let x = captures.get(1).unwrap().as_str().parse::<usize>().unwrap();
+                let y = captures.get(2).unwrap().as_str().parse::<usize>().unwrap();
+                let z = captures.get(3).unwrap().as_str().parse::<usize>().unwrap();
+                if x > max_x {
+                    max_x = x;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
+                if z > max_z {
+                    max_z = z;
+                }
+            }
+        }
+        fn map_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
+            let file_name = format!("{}/xyz-{:03}-{:03}-{:03}.bin", data_dir, x, y, z);
+            //println!("at {}", file_name);
+
+            let file = File::open(file_name).ok()?;
+            unsafe { MmapOptions::new().map(&file) }.ok()
+        }
+        if !std::path::Path::new(data_dir).exists() {
+            println!("Data directory {} does not exist", data_dir);
+            return VolumeGrid16x16x16Mapped {
+                max_x: 0,
+                max_y: 0,
+                max_z: 0,
+                data: vec![],
+            };
+        }
+        let data: Vec<Vec<Vec<Option<memmap::Mmap>>>> = (0..=max_z)
+            .map(|z| {
+                (0..=max_y)
+                    .map(|y| (0..=max_x).map(|x| map_for(data_dir, x, y, z)).collect())
+                    .collect()
+            })
+            .collect();
+
+        // count number of slices found
+        let slices_found = data.iter().flatten().flatten().flatten().count();
+        println!("Found {} cells in {}", slices_found, data_dir);
+        println!("max_x: {}, max_y: {}, max_z: {}", max_x, max_y, max_z);
+
+        VolumeGrid16x16x16Mapped {
+            max_x: max_x,
+            max_y: max_y,
+            max_z: max_z,
+            data,
+        }
+    }
+}
+impl World for VolumeGrid16x16x16Mapped {
+    fn get(&self, xyz: [i32; 3]) -> u8 {
+        let x_tile = xyz[0] as usize >> 7;
+        let y_tile = xyz[1] as usize >> 7;
+        let z_tile = xyz[2] as usize >> 7;
+
+        if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 {
+            println!("x: {}, y: {}, z: {} x_tile: {} y_tile: {} z_tile: {}", xyz[0], xyz[1], xyz[2], x_tile, y_tile, z_tile);
+        }
+
+        if xyz[0] < 0 || xyz[1] < 0 || xyz[2] < 0 || x_tile > self.max_x || y_tile > self.max_y || z_tile > self.max_z {
+            /* if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 { 
+                println!("out of bounds: {:?} x_tile: {} y_tile: {} z_tile: {} max_x: {}, max_y: {}, max_z: {}", xyz, x_tile, y_tile, z_tile, self.max_x, self.max_y, self.max_z);
+            } */
+                
+            0
+        } else if let Some(tile) = &self.data[z_tile][y_tile][x_tile] {
+            //println!("Found tile: {} {} {}", x_tile, y_tile, z_tile);
+            let tx = (xyz[0] & 0x7f) as usize;
+            let ty = (xyz[1] & 0x7f) as usize;
+            let tz = (xyz[2] & 0x7f) as usize;
+
+            let bx = tx >> 4;
+            let by = ty >> 4;
+            let bz = tz >> 4;
+
+            let boff = (bz << 6) + (by << 3) + bx;
+            //println!("bx: {}, by: {}, bz: {}, boff: {}", bx, by, bz, boff);
+
+            let px = tx & 0xf;
+            let py = ty & 0xf;
+            let pz = tz & 0xf;
+
+            let poff = pz * 256 + py * 16 + px;
+
+            let off = boff * 4096 + poff;
+
+            if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 {
+                println!("x: {} y: {} z: {} tile: {} {} {}  boff: {} poff: {} off: {}", xyz[0], xyz[1], xyz[2], x_tile, y_tile, z_tile, boff, poff, off);
+            }
+
+            if off < tile.len() {
+                tile[off]
+            } else {
+                println!("Buffer too small");
+                println!("x: {} y: {} z: {} tile: {} {} {}  boff: {} poff: {} off: {}", xyz[0], xyz[1], xyz[2], x_tile, y_tile, z_tile, boff, poff, off);
+                0
+            }
+        } else {
+            if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 {
+                println!("tile not found: {:?} x_tile: {} y_tile: {} z_tile: {} max_x: {}, max_y: {}, max_z: {}", xyz, x_tile, y_tile, z_tile, self.max_x, self.max_y, self.max_z);
+            }
+
+            0
+        }
+    }
+}
+
 type V500 = [u8; 512*512*512];
 
 struct VolumeGrid4x4x4 {
@@ -302,7 +437,8 @@ impl TemplateApp {
         app
     }
     fn load_data(&mut self, data_dir: &str) {
-        self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
+        //self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
+        self.world = Box::new(VolumeGrid16x16x16Mapped::from_data_dir(data_dir));
         self.data_dir = data_dir.to_string();
     }
 
