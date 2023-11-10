@@ -1,23 +1,48 @@
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
 trait World {
-    fn get(&self, xyz: [i32; 3]) -> u8;
+    fn get(&mut self, xyz: [i32; 3]) -> u8;
+}
+
+enum TileState {
+    Unknown,
+    Missing,
+    Exists,
+    Loaded(memmap::Mmap),
+    Downloading,
 }
 
 struct VolumeGrid16x16x16Mapped {
+    data_dir: String,
     max_x: usize,
     max_y: usize,
     max_z: usize,
-    data: Vec<Vec<Vec<Option<memmap::Mmap>>>>,
+    data: Vec<Vec<Vec<TileState>>>,
 }
 impl VolumeGrid16x16x16Mapped {
-    pub fn from_data_dir(data_dir: &str) -> VolumeGrid16x16x16Mapped {
+    fn map_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
         use memmap::MmapOptions;
         use std::fs::File;
+        let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}.bin", data_dir, z, x, y, z);
+        //println!("at {}", file_name);
 
+        let file = File::open(file_name).ok()?;
+        unsafe { MmapOptions::new().map(&file) }.ok()
+    }
+    fn try_loading_tile(&mut self, x: usize, y: usize, z: usize) {
+        let tile_state = &mut self.data[z][y][x];
+        if let TileState::Unknown = tile_state {
+            if let Some(mmap) = Self::map_for(&self.data_dir, x, y, z) {
+                *tile_state = TileState::Loaded(mmap);
+            } else {
+                *tile_state = TileState::Missing;
+            }
+        }
+    }
+    pub fn from_data_dir(data_dir: &str, max_x: usize, max_y: usize, max_z: usize) -> VolumeGrid16x16x16Mapped {
         // find highest xyz values for files in data_dir named like this format: format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
         // use regex to match file names
-        let mut max_x = 0;
+        /* let mut max_x = 0;
         let mut max_y = 0;
         let mut max_z = 0;
         for entry in std::fs::read_dir(data_dir).unwrap() {
@@ -43,37 +68,33 @@ impl VolumeGrid16x16x16Mapped {
                     max_z = z;
                 }
             }
-        }
-        fn map_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
-            let file_name = format!("{}/xyz-{:03}-{:03}-{:03}.bin", data_dir, x, y, z);
-            //println!("at {}", file_name);
-
-            let file = File::open(file_name).ok()?;
-            unsafe { MmapOptions::new().map(&file) }.ok()
-        }
+        } */
         if !std::path::Path::new(data_dir).exists() {
-            println!("Data directory {} does not exist", data_dir);
-            return VolumeGrid16x16x16Mapped {
-                max_x: 0,
-                max_y: 0,
-                max_z: 0,
-                data: vec![],
-            };
+            panic!("Data directory {} does not exist", data_dir);
         }
-        let data: Vec<Vec<Vec<Option<memmap::Mmap>>>> = (0..=max_z)
+        // map_for(data_dir, x, y, z).map_or(TileState::Missing, |x| TileState::Loaded(x))
+        let data: Vec<Vec<Vec<TileState>>> = (0..=max_z)
             .map(|z| {
                 (0..=max_y)
-                    .map(|y| (0..=max_x).map(|x| map_for(data_dir, x, y, z)).collect())
+                    .map(|y| (0..=max_x)
+                    .map(|x| TileState::Unknown).collect())
                     .collect()
             })
             .collect();
 
-        // count number of slices found
-        let slices_found = data.iter().flatten().flatten().flatten().count();
+        /* // count number of slices found
+        let slices_found = data.iter().flatten().flatten().flat_map(|x| {
+            if let TileState::Loaded(_) = x {
+                Some(())
+            } else {
+                None
+            }
+        }).count();
         println!("Found {} cells in {}", slices_found, data_dir);
-        println!("max_x: {}, max_y: {}, max_z: {}", max_x, max_y, max_z);
+        println!("max_x: {}, max_y: {}, max_z: {}", max_x, max_y, max_z); */
 
         VolumeGrid16x16x16Mapped {
+            data_dir: data_dir.to_string(),
             max_x: max_x,
             max_y: max_y,
             max_z: max_z,
@@ -82,14 +103,14 @@ impl VolumeGrid16x16x16Mapped {
     }
 }
 impl World for VolumeGrid16x16x16Mapped {
-    fn get(&self, xyz: [i32; 3]) -> u8 {
+    fn get(&mut self, xyz: [i32; 3]) -> u8 {
         let x_tile = xyz[0] as usize >> 7;
         let y_tile = xyz[1] as usize >> 7;
         let z_tile = xyz[2] as usize >> 7;
 
-        if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 {
+        /* if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 {
             println!("x: {}, y: {}, z: {} x_tile: {} y_tile: {} z_tile: {}", xyz[0], xyz[1], xyz[2], x_tile, y_tile, z_tile);
-        }
+        } */
 
         if xyz[0] < 0 || xyz[1] < 0 || xyz[2] < 0 || x_tile > self.max_x || y_tile > self.max_y || z_tile > self.max_z {
             /* if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 { 
@@ -97,44 +118,49 @@ impl World for VolumeGrid16x16x16Mapped {
             } */
                 
             0
-        } else if let Some(tile) = &self.data[z_tile][y_tile][x_tile] {
-            //println!("Found tile: {} {} {}", x_tile, y_tile, z_tile);
-            let tx = (xyz[0] & 0x7f) as usize;
-            let ty = (xyz[1] & 0x7f) as usize;
-            let tz = (xyz[2] & 0x7f) as usize;
-
-            let bx = tx >> 4;
-            let by = ty >> 4;
-            let bz = tz >> 4;
-
-            let boff = (bz << 6) + (by << 3) + bx;
-            //println!("bx: {}, by: {}, bz: {}, boff: {}", bx, by, bz, boff);
-
-            let px = tx & 0xf;
-            let py = ty & 0xf;
-            let pz = tz & 0xf;
-
-            let poff = pz * 256 + py * 16 + px;
-
-            let off = boff * 4096 + poff;
-
-            if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 {
-                println!("x: {} y: {} z: {} tile: {} {} {}  boff: {} poff: {} off: {}", xyz[0], xyz[1], xyz[2], x_tile, y_tile, z_tile, boff, poff, off);
+        } else {
+            if let TileState::Unknown = self.data[z_tile][y_tile][x_tile] {
+                self.try_loading_tile(x_tile, y_tile, z_tile);
             }
+            if let TileState::Loaded(tile) = &self.data[z_tile][y_tile][x_tile] {
+                //println!("Found tile: {} {} {}", x_tile, y_tile, z_tile);
+                let tx = (xyz[0] & 0x7f) as usize;
+                let ty = (xyz[1] & 0x7f) as usize;
+                let tz = (xyz[2] & 0x7f) as usize;
 
-            if off < tile.len() {
-                tile[off]
+                let bx = tx >> 4;
+                let by = ty >> 4;
+                let bz = tz >> 4;
+
+                let boff = (bz << 6) + (by << 3) + bx;
+                //println!("bx: {}, by: {}, bz: {}, boff: {}", bx, by, bz, boff);
+
+                let px = tx & 0xf;
+                let py = ty & 0xf;
+                let pz = tz & 0xf;
+
+                let poff = pz * 256 + py * 16 + px;
+
+                let off = boff * 4096 + poff;
+
+                /* if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 {
+                    println!("x: {} y: {} z: {} tile: {} {} {}  boff: {} poff: {} off: {}", xyz[0], xyz[1], xyz[2], x_tile, y_tile, z_tile, boff, poff, off);
+                } */
+
+                if off < tile.len() {
+                    tile[off]
+                } else {
+                    println!("Buffer too small");
+                    println!("x: {} y: {} z: {} tile: {} {} {}  boff: {} poff: {} off: {}", xyz[0], xyz[1], xyz[2], x_tile, y_tile, z_tile, boff, poff, off);
+                    0
+                }
             } else {
-                println!("Buffer too small");
-                println!("x: {} y: {} z: {} tile: {} {} {}  boff: {} poff: {} off: {}", xyz[0], xyz[1], xyz[2], x_tile, y_tile, z_tile, boff, poff, off);
+                /* if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 {
+                    println!("tile not found: {:?} x_tile: {} y_tile: {} z_tile: {} max_x: {}, max_y: {}, max_z: {}", xyz, x_tile, y_tile, z_tile, self.max_x, self.max_y, self.max_z);
+                } */
+
                 0
             }
-        } else {
-            if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 {
-                println!("tile not found: {:?} x_tile: {} y_tile: {} z_tile: {} max_x: {}, max_y: {}, max_z: {}", xyz, x_tile, y_tile, z_tile, self.max_x, self.max_y, self.max_z);
-            }
-
-            0
         }
     }
 }
@@ -148,7 +174,7 @@ struct VolumeGrid4x4x4 {
     data: Vec<Vec<Vec<Option<Box<V500>>>>>,
 }
 impl World for VolumeGrid4x4x4 {
-    fn get(&self, xyz: [i32; 3]) -> u8 {
+    fn get(&mut self, xyz: [i32; 3]) -> u8 {
         let x_tile = xyz[0] as usize / 500;
         let y_tile = xyz[1] as usize / 500;
         let z_tile = xyz[2] as usize / 500;
@@ -356,7 +382,7 @@ impl MappedVolumeGrid {
     }
 }
 impl World for MappedVolumeGrid {
-    fn get(&self, xyz: [i32; 3]) -> u8 {
+    fn get(&mut self, xyz: [i32; 3]) -> u8 {
         let x_tile = xyz[0] as usize / 500;
         let y_tile = xyz[1] as usize / 500;
         let z_tile = xyz[2] as usize / 500;
@@ -384,7 +410,7 @@ impl World for MappedVolumeGrid {
 
 struct EmptyWorld {}
 impl World for EmptyWorld {
-    fn get(&self, _xyz: [i32; 3]) -> u8 { 0 }
+    fn get(&mut self, _xyz: [i32; 3]) -> u8 { 0 }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -438,7 +464,7 @@ impl TemplateApp {
     }
     fn load_data(&mut self, data_dir: &str) {
         //self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
-        self.world = Box::new(VolumeGrid16x16x16Mapped::from_data_dir(data_dir));
+        self.world = Box::new(VolumeGrid16x16x16Mapped::from_data_dir(data_dir ,78, 78, 120));
         self.data_dir = data_dir.to_string();
     }
 
@@ -479,7 +505,7 @@ impl TemplateApp {
             res
         }
     }
-    fn create_texture(&self, ui: &Ui, u_coord: usize, v_coord: usize, d_coord: usize) -> egui::TextureHandle {
+    fn create_texture(&mut self, ui: &Ui, u_coord: usize, v_coord: usize, d_coord: usize) -> egui::TextureHandle {
         use std::time::Instant;
         let _start = Instant::now();
 
@@ -529,7 +555,7 @@ impl TemplateApp {
         // Load the texture only once.
         let res = ui.ctx().load_texture("my-image-xy", image, Default::default());
         let _duration = _start.elapsed();
-        println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
+        //println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
         res
     }
 }
