@@ -4,7 +4,7 @@ trait World {
     fn get(&self, xyz: [i32; 3]) -> u8;
 }
 
-type V500 = [u8; 500*500*500];
+type V500 = [u8; 512*512*512];
 
 struct VolumeGrid4x4x4 {
     max_x: usize,
@@ -30,7 +30,7 @@ impl World for VolumeGrid4x4x4 {
             let by = ty >> 2;
             let bz = tz >> 2;
 
-            let boff = bz * 125 * 125 + by * 125 + bx;
+            let boff = (bz << 14) + (by << 7) + bx;
 
             let px = tx & 3;
             let py = ty & 3;
@@ -141,7 +141,7 @@ impl MappedVolumeGrid {
 
     fn to_volume_grid(&self) -> VolumeGrid4x4x4 {
         fn data_for(mapped: &memmap::Mmap, x: usize, y: usize, z: usize) -> Box<V500> {
-            let mut buffer = Box::new([0u8; 500 * 500 * 500]);
+            let mut buffer = Box::new([0u8; 512 * 512 * 512]);
             let mut printed = false;
             for z in 0..500 {
                 for y in 0..500 {
@@ -150,7 +150,8 @@ impl MappedVolumeGrid {
                         let by = y >> 2;
                         let bz = z >> 2;
 
-                        let boff = bz * 125 * 125 + by * 125 + bx;
+                        let boff = (bz << 14) + (by << 7) + bx;
+                        //println!("bx: {}, by: {}, bz: {}, boff: {}", bx, by, bz, boff);
 
                         let px = x & 3;
                         let py = y & 3;
@@ -172,11 +173,17 @@ impl MappedVolumeGrid {
                         if moff + 1 >= mapped.len() {
                             ()
                         } else {
+                            if (off >= buffer.len()) {
+                                println!("out of bounds");
+                                println!("x: {}, y: {}, z: {}, bx: {}, by: {}, bz: {}, px: {}, py: {}, pz: {}, boff: {}, poff: {}, off: {}, moff: {}", x, y, z, bx, by, bz, px, py, pz, boff, poff, off, moff);
+                            }
                             if (buffer[off] != 0 && !printed) {
                                 printed = true;
                                 println!("Overwriting value at {} {} {}", x, y, z);
                                 println!("x: {}, y: {}, z: {}, bx: {}, by: {}, bz: {}, px: {}, py: {}, pz: {}, boff: {}, poff: {}, off: {}, moff: {}", x, y, z, bx, by, bz, px, py, pz, boff, poff, off, moff);
+                                panic!();
                             }
+                            
                             buffer[off] = mapped[moff + 1];
                         }
                         }
