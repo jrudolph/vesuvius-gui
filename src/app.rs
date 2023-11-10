@@ -26,19 +26,20 @@ impl World for VolumeGrid4x4x4 {
             let ty = (xyz[1] % 500) as usize;
             let tz = (xyz[2] % 500) as usize;
 
-            let bx = tx >> 2;
-            let by = ty >> 2;
-            let bz = tz >> 2;
+            let bx = tx >> 4;
+            let by = ty >> 4;
+            let bz = tz >> 4;
 
-            let boff = (bz << 14) + (by << 7) + bx;
+            let boff = (bz << 10) + (by << 5) + bx;
+            //println!("bx: {}, by: {}, bz: {}, boff: {}", bx, by, bz, boff);
 
-            let px = tx & 3;
-            let py = ty & 3;
-            let pz = tz & 3;
+            let px = tx & 0xf;
+            let py = ty & 0xf;
+            let pz = tz & 0xf;
 
-            let poff = pz * 16 + py * 4 + px;
+            let poff = pz * 256 + py * 16 + px;
 
-            let off = boff * 64 + poff;
+            let off = boff * 4096 + poff;
 
             if off < tile.len() {
                 tile[off]
@@ -146,20 +147,24 @@ impl MappedVolumeGrid {
             for z in 0..500 {
                 for y in 0..500 {
                     for x in 0..500 {
-                        let bx = x >> 2;
-                        let by = y >> 2;
-                        let bz = z >> 2;
+                        let tx = x;//(xyz[0] % 500) as usize;
+                        let ty = y;//(xyz[1] % 500) as usize;
+                        let tz = z;//(xyz[2] % 500) as usize;
 
-                        let boff = (bz << 14) + (by << 7) + bx;
+                        let bx = tx >> 4;
+                        let by = ty >> 4;
+                        let bz = tz >> 4;
+
+                        let boff = (bz << 10) + (by << 5) + bx;
                         //println!("bx: {}, by: {}, bz: {}, boff: {}", bx, by, bz, boff);
 
-                        let px = x & 3;
-                        let py = y & 3;
-                        let pz = z & 3;
+                        let px = tx & 0xf;
+                        let py = ty & 0xf;
+                        let pz = tz & 0xf;
 
-                        let poff = pz * 16 + py * 4 + px;
+                        let poff = pz * 256 + py * 16 + px;
 
-                        let off = boff * 64 + poff;
+                        let off = boff * 4096 + poff;
                         //let off = z * 500 * 500 + y * 500 + x;
 
                         let moff =
