@@ -14,9 +14,105 @@ trait World {
 enum TileState {
     Unknown,
     Missing,
-    Exists,
+    //Exists,
     Loaded(memmap::Mmap),
     Downloading(Arc<Mutex<bool>>),
+}
+
+type DownloadTask = (Arc<Mutex<bool>>, usize, usize, usize);
+
+enum DownloadMessage {
+    Download(DownloadTask),
+    Position(i32, i32 ,i32),
+}
+
+struct Downloader {
+    download_queue: Sender<DownloadMessage>,
+}
+impl Downloader {
+    fn new(dir: &str) -> Downloader {
+        let (sender, receiver) = std::sync::mpsc::channel::<DownloadMessage>();
+
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let dir = dir.to_string();
+        thread::spawn(move || {
+            let mut queue = Vec::new();
+            let mut pos = (0,0,0);
+            loop {
+                while let Ok(msg) = receiver.try_recv() {
+                    match msg {
+                        DownloadMessage::Download(task) => {
+                            queue.push(task);
+                        }
+                        DownloadMessage::Position(x, y, z) => {
+                            pos = (x, y, z)
+                        }
+                    }
+                }
+
+                let cur = count.load(Ordering::Acquire);
+                if cur >= 16 || queue.is_empty() {
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+
+                if count.compare_exchange(cur, cur + 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
+                    queue.sort_by_key(|(_, x, y, z)| {
+                        let dx = *x as i32 * 128 + 64 - pos.0;
+                        let dy = *y as i32 * 128 + 64 - pos.1;
+                        let dz = *z as i32 * 128 + 64 - pos.2;
+                        let score = -(dx*dx + dy*dy + dz*dz);
+                        //println!("{} {} {} {}", x, y, z, score);
+                        score
+                    });
+                    let (inner, x, y, z) = queue.pop().unwrap();
+                    {
+                        //println!("Downloading {} {} {}", x, y, z);
+                        //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                        //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                        //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                        let url = format!("http://5.161.229.51:8095/tiles/scroll/1/volume/20230205180739/download/128-16?x={}&y={}&z={}", x, y, z);
+                        let mut request = ehttp::Request::get(url);
+                        request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
+                        
+                        let dir = dir.clone();
+                        println!("downloading tile {}/{}/{}", x, y, z);
+                        let c2 = count.clone();
+                        ehttp::fetch(request, move |response| {
+                            if let Ok(res) = response {
+                                if res.status == 200 {
+                                    println!("got tile {}/{}/{}", x, y, z);
+                                    let bytes = res.bytes;
+                                    // save bytes to file
+                                    let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}.bin", dir, z, x, y, z);
+                                    std::fs::create_dir_all(format!("{}/z{:03}", dir, z)).unwrap();
+                                    std::fs::write(file_name, bytes).unwrap();
+                                } else {
+                                    println!("failed to download tile {}/{}/{}: {}", x, y, z, res.status);
+                                    *inner.lock().unwrap() = true;
+                                }
+                            }       
+
+                            c2.fetch_sub(1, Ordering::Acquire);
+                            *inner.lock().unwrap() = true;        
+                        });
+                    }
+                }
+            }
+        });
+        
+        Downloader {
+            download_queue: sender
+        }
+    }
+
+    fn queue(&self, task: DownloadTask) {
+        self.download_queue.send(DownloadMessage::Download(task)).unwrap();
+    }
+    fn position(&self, x: i32, y: i32, z: i32) {
+        self.download_queue.send(DownloadMessage::Position(x, y, z)).unwrap();
+    }
 }
 
 struct VolumeGrid16x16x16Mapped {
@@ -24,7 +120,7 @@ struct VolumeGrid16x16x16Mapped {
     max_x: usize,
     max_y: usize,
     max_z: usize,
-    download_queue: Sender<(Arc<Mutex<bool>>, usize, usize, usize)>,
+    downloader: Downloader,
     data: Vec<Vec<Vec<TileState>>>,
 }
 impl VolumeGrid16x16x16Mapped {
@@ -44,7 +140,7 @@ impl VolumeGrid16x16x16Mapped {
                 *tile_state = TileState::Loaded(mmap);
             } else {
                 let finished = Arc::new(Mutex::new(false));
-                self.download_queue.send((finished.clone(), x, y, z)).unwrap();
+                self.downloader.queue((finished.clone(), x, y, z));
                 *tile_state = TileState::Downloading(finished);
             } 
         } else if let TileState::Downloading(finished) = tile_state {
@@ -58,7 +154,7 @@ impl VolumeGrid16x16x16Mapped {
             }
         }
     }
-    pub fn from_data_dir(data_dir: &str, max_x: usize, max_y: usize, max_z: usize, download_queue: Sender<(Arc<Mutex<bool>>, usize, usize, usize)>) -> VolumeGrid16x16x16Mapped {
+    pub fn from_data_dir(data_dir: &str, max_x: usize, max_y: usize, max_z: usize, downloader: Downloader) -> VolumeGrid16x16x16Mapped {
         // find highest xyz values for files in data_dir named like this format: format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
         // use regex to match file names
         /* let mut max_x = 0;
@@ -117,7 +213,7 @@ impl VolumeGrid16x16x16Mapped {
             max_x: max_x,
             max_y: max_y,
             max_z: max_z,
-            download_queue,
+            downloader,
             data,
         }
     }
@@ -193,6 +289,7 @@ impl World for VolumeGrid16x16x16Mapped {
         /* if plane_coord != 2 {
             return;
         } */
+        self.downloader.position(xyz[0], xyz[1], xyz[2]);
         let min_uc = xyz[u_coord] - width as i32 / 2;
         let max_uc = xyz[u_coord] + width as i32 / 2;
         let min_vc = xyz[v_coord] - height as i32 / 2;
@@ -275,7 +372,12 @@ impl World for VolumeGrid16x16x16Mapped {
 
                                     if u >= 0 && u < width as i32 && v >= 0 && v < height as i32 {
                                         let off = boff * 4096 + offs_i[2] * 256 + offs_i[1] * 16 + offs_i[0];
-                                        buffer[v as usize * width + u as usize] = tile[off as usize];// & 0xf0;
+                                        let pluscon = (((tile[off as usize]) as i32 - 70).max(0) * 255 / (255 - 100)).min(255) as u8;
+                                        if (u / 128) % 2 == 0 {
+                                            buffer[v as usize * width + u as usize] = pluscon;//tile[off as usize];
+                                        } else {
+                                            buffer[v as usize * width + u as usize] = (pluscon  & 0xc0) + 0x20;
+                                        }
                                     }
                                 }
                             }
@@ -630,67 +732,6 @@ impl Default for TemplateApp {
             texture_yz: None,
             world: Box::new(EmptyWorld {}),
         }
-    }
-}
-
-struct Downloader {}
-impl Downloader {
-    fn new(dir: &str) -> Sender<(Arc<Mutex<bool>>, usize, usize, usize)> {
-        let (sender, receiver) = std::sync::mpsc::channel::<(Arc<Mutex<bool>>, usize, usize, usize)>();
-
-        let count = Arc::new(AtomicUsize::new(0));
-
-        let dir = dir.to_string();
-        thread::spawn(move || {
-            let mut queue = Vec::new();
-            loop {
-                while let Ok(task) = receiver.try_recv() {
-                    queue.push(task);
-                }
-
-                let cur = count.load(Ordering::Acquire);
-                if cur >= 8 || queue.is_empty() {
-                    thread::sleep(Duration::from_millis(50));
-                    continue;
-                }
-
-                if count.compare_exchange(cur, cur + 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
-                   let (inner, x, y, z) = queue.pop().unwrap();
-                   {
-                        //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                        //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                        //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                        let url = format!("http://5.161.229.51:8095/tiles/scroll/1/volume/20230205180739/download/128-16?x={}&y={}&z={}", x, y, z);
-                        let mut request = ehttp::Request::get(url);
-                        request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
-                        
-                        let dir = dir.clone();
-                        println!("downloading tile {}/{}/{}", x, y, z);
-                        let c2 = count.clone();
-                        ehttp::fetch(request, move |response| {
-                            if let Ok(res) = response {
-                                if res.status == 200 {
-                                    println!("got tile {}/{}/{}", x, y, z);
-                                    let bytes = res.bytes;
-                                    // save bytes to file
-                                    let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}.bin", dir, z, x, y, z);
-                                    std::fs::create_dir_all(format!("{}/z{:03}", dir, z)).unwrap();
-                                    std::fs::write(file_name, bytes).unwrap();
-                                } else {
-                                    println!("failed to download tile {}/{}/{}: {}", x, y, z, res.status);
-                                    *inner.lock().unwrap() = true;
-                                }
-                            }       
-
-                            c2.fetch_sub(1, Ordering::Acquire);
-                            *inner.lock().unwrap() = true;        
-                        });
-                    }
-                }
-            }
-        });
-        
-        sender
     }
 }
 
