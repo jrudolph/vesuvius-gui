@@ -1,4 +1,8 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::thread;
+use std::time::Duration;
 
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
@@ -20,6 +24,7 @@ struct VolumeGrid16x16x16Mapped {
     max_x: usize,
     max_y: usize,
     max_z: usize,
+    download_queue: Sender<(Arc<Mutex<bool>>, usize, usize, usize)>,
     data: Vec<Vec<Vec<TileState>>>,
 }
 impl VolumeGrid16x16x16Mapped {
@@ -39,30 +44,7 @@ impl VolumeGrid16x16x16Mapped {
                 *tile_state = TileState::Loaded(mmap);
             } else {
                 let finished = Arc::new(Mutex::new(false));
-                let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                let mut request = ehttp::Request::get(url);
-                request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
-                
-                let inner = finished.clone();
-                let dir = self.data_dir.clone();
-                println!("downloading tile {}/{}/{}", x, y, z);
-                ehttp::fetch(request, move |response| {
-                    if let Ok(res) = response {
-                        if res.status == 200 {
-                            println!("got tile {}/{}/{}", x, y, z);
-                            let bytes = res.bytes;
-                            // save bytes to file
-                            let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}.bin", dir, z, x, y, z);
-                            std::fs::create_dir_all(format!("{}/z{:03}", dir, z)).unwrap();
-                            std::fs::write(file_name, bytes).unwrap();
-                        } else {
-                            println!("failed to download tile {}/{}/{}: {}", x, y, z, res.status);
-                            *inner.lock().unwrap() = true;
-                        }
-                    }       
-
-                    *inner.lock().unwrap() = true;        
-                });
+                self.download_queue.send((finished.clone(), x, y, z)).unwrap();
                 *tile_state = TileState::Downloading(finished);
             } 
         } else if let TileState::Downloading(finished) = tile_state {
@@ -76,7 +58,7 @@ impl VolumeGrid16x16x16Mapped {
             }
         }
     }
-    pub fn from_data_dir(data_dir: &str, max_x: usize, max_y: usize, max_z: usize) -> VolumeGrid16x16x16Mapped {
+    pub fn from_data_dir(data_dir: &str, max_x: usize, max_y: usize, max_z: usize, download_queue: Sender<(Arc<Mutex<bool>>, usize, usize, usize)>) -> VolumeGrid16x16x16Mapped {
         // find highest xyz values for files in data_dir named like this format: format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
         // use regex to match file names
         /* let mut max_x = 0;
@@ -135,6 +117,7 @@ impl VolumeGrid16x16x16Mapped {
             max_x: max_x,
             max_y: max_y,
             max_z: max_z,
+            download_queue,
             data,
         }
     }
@@ -239,6 +222,10 @@ impl World for VolumeGrid16x16x16Mapped {
                 tile_i[v_coord] = tile_vc as usize;
                 tile_i[plane_coord] = tile_pc as usize;
 
+                if tile_i[0] >= self.max_x || tile_i[1] >= self.max_y || tile_i[2] >= self.max_z {
+                    continue;
+                }
+
                 //println!("tile_x: {} tile_y: {}", tile_x, tile_y);
                 if let TileState::Downloading(finished) = &self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
                     if *finished.lock().unwrap() {
@@ -249,8 +236,6 @@ impl World for VolumeGrid16x16x16Mapped {
                     self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2]);
                 }
                 
-                //if let TileState::Loaded(tile) = &self.data[z_tile][y_tile][x_tile] {
-
                 if let TileState::Loaded(tile) = &mut self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
                     // iterate over blocks in tile
                     let min_tile_uc = (tile_uc * 128).max(min_uc) - tile_uc * 128;
@@ -290,7 +275,7 @@ impl World for VolumeGrid16x16x16Mapped {
 
                                     if u >= 0 && u < width as i32 && v >= 0 && v < height as i32 {
                                         let off = boff * 4096 + offs_i[2] * 256 + offs_i[1] * 16 + offs_i[0];
-                                        buffer[v as usize * width + u as usize] = tile[off as usize];
+                                        buffer[v as usize * width + u as usize] = tile[off as usize];// & 0xf0;
                                     }
                                 }
                             }
@@ -648,6 +633,67 @@ impl Default for TemplateApp {
     }
 }
 
+struct Downloader {}
+impl Downloader {
+    fn new(dir: &str) -> Sender<(Arc<Mutex<bool>>, usize, usize, usize)> {
+        let (sender, receiver) = std::sync::mpsc::channel::<(Arc<Mutex<bool>>, usize, usize, usize)>();
+
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let dir = dir.to_string();
+        thread::spawn(move || {
+            let mut queue = Vec::new();
+            loop {
+                while let Ok(task) = receiver.try_recv() {
+                    queue.push(task);
+                }
+
+                let cur = count.load(Ordering::Acquire);
+                if cur >= 8 || queue.is_empty() {
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+
+                if count.compare_exchange(cur, cur + 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
+                   let (inner, x, y, z) = queue.pop().unwrap();
+                   {
+                        //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                        //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                        //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                        let url = format!("http://5.161.229.51:8095/tiles/scroll/1/volume/20230205180739/download/128-16?x={}&y={}&z={}", x, y, z);
+                        let mut request = ehttp::Request::get(url);
+                        request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
+                        
+                        let dir = dir.clone();
+                        println!("downloading tile {}/{}/{}", x, y, z);
+                        let c2 = count.clone();
+                        ehttp::fetch(request, move |response| {
+                            if let Ok(res) = response {
+                                if res.status == 200 {
+                                    println!("got tile {}/{}/{}", x, y, z);
+                                    let bytes = res.bytes;
+                                    // save bytes to file
+                                    let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}.bin", dir, z, x, y, z);
+                                    std::fs::create_dir_all(format!("{}/z{:03}", dir, z)).unwrap();
+                                    std::fs::write(file_name, bytes).unwrap();
+                                } else {
+                                    println!("failed to download tile {}/{}/{}: {}", x, y, z, res.status);
+                                    *inner.lock().unwrap() = true;
+                                }
+                            }       
+
+                            c2.fetch_sub(1, Ordering::Acquire);
+                            *inner.lock().unwrap() = true;        
+                        });
+                    }
+                }
+            }
+        });
+        
+        sender
+    }
+}
+
 impl TemplateApp {
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>, data_dir: Option<String>) -> Self {
@@ -665,7 +711,7 @@ impl TemplateApp {
     }
     fn load_data(&mut self, data_dir: &str) {
         //self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
-        self.world = Box::new(VolumeGrid16x16x16Mapped::from_data_dir(data_dir ,78, 78, 200));
+        self.world = Box::new(VolumeGrid16x16x16Mapped::from_data_dir(data_dir ,78, 78, 200, Downloader::new(data_dir)));
         self.data_dir = data_dir.to_string();
     }
 
@@ -729,12 +775,12 @@ impl TemplateApp {
         } */
         
         let image = ColorImage::from_gray([width, height], &pixels);
-        println!("Time elapsed before loading in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _start.elapsed());
+        //println!("Time elapsed before loading in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _start.elapsed());
         // Load the texture only once.
         let res = ui.ctx().load_texture("my-image-xy", image, Default::default());
 
         let _duration = _start.elapsed();
-        println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
+        //println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
         res
     }
 }
