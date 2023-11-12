@@ -4,6 +4,7 @@ use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
 trait World {
     fn get(&mut self, xyz: [i32; 3]) -> u8;
+    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]);
 }
 
 enum TileState {
@@ -40,6 +41,8 @@ impl VolumeGrid16x16x16Mapped {
                 let finished = Arc::new(Mutex::new(false));
                 let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                 let mut request = ehttp::Request::get(url);
+                request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
+                
                 let inner = finished.clone();
                 let dir = self.data_dir.clone();
                 println!("downloading tile {}/{}/{}", x, y, z);
@@ -203,6 +206,9 @@ impl World for VolumeGrid16x16x16Mapped {
             }
         }
     }
+    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]) {
+
+    }
 }
 
 type V500 = [u8; 512*512*512];
@@ -247,21 +253,79 @@ impl World for VolumeGrid4x4x4 {
             } else {
                 0
             }
-
-
-            /* let off =
-                500147 * ((xyz[2] % 500) as usize) + ((xyz[1] % 500) as usize * 500 + (xyz[0] % 500) as usize) * 2;
-
-            //println!("xyz: {:?}, off: {}, tile: {:?}", xyz, off, tile);
-
-            // off + 1 because we select the higher order bits of little endian 16 bit values
-            if off + 1 >= tile.len() {
-                0
-            } else {
-                tile[off + 1]
-            } */
         } else {
             0
+        }
+    }
+    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]) {
+        if plane_coord != 2 {
+            return;
+        }
+        let min_x = xyz[0] - width as i32 / 2;
+        let max_x = xyz[0] + width as i32 / 2;
+        let min_y = xyz[1] - height as i32 / 2;
+        let max_y = xyz[1] + height as i32 / 2;
+        let z = xyz[2];
+
+        let tile_min_x = min_x / 500;
+        let tile_max_x = max_x / 500;
+
+        let tile_min_y = min_y / 500;
+        let tile_max_y = max_y / 500;
+
+        let tile_z = z / 500;
+        let tile_z_off = z % 500;
+        let block_z = tile_z_off / 16;
+        let block_z_off = tile_z_off % 16;
+
+        //println!("x: {} y: {} z: {}", xyz[0], xyz[1], xyz[2]);
+        //println!("min_x: {} max_x: {} min_y: {} max_y: {} z: {}", min_x, max_x, min_y, max_y, z);
+        //println!("tile_min_x: {} tile_max_x: {} tile_min_y: {} tile_max_y: {} tile_z: {} block_z: {} block_z_off: {}", tile_min_x, tile_max_x, tile_min_y, tile_max_y, tile_z, block_z, block_z_off);
+
+        // iterate over all tiles
+        for tile_x in tile_min_x..=tile_max_x {
+            for tile_y in tile_min_y..=tile_max_y {
+                //println!("tile_x: {} tile_y: {}", tile_x, tile_y);
+                
+                if let Some(tile) = &mut self.data[tile_z as usize][tile_y as usize][tile_x as usize] {
+                    // iterate over blocks in tile
+                    let min_tile_x = (tile_x * 500).max(min_x) - tile_x * 500;
+                    let max_tile_x = (tile_x * 500 + 500).min(max_x) - tile_x * 500;
+                    let min_tile_y = (tile_y * 500).max(min_y) - tile_y * 500;
+                    let max_tile_y = (tile_y * 500 + 500).min(max_y) - tile_y * 500;
+
+                    let min_block_x = min_tile_x / 16;
+                    let max_block_x = max_tile_x / 16;
+                    let min_block_y = min_tile_y / 16;
+                    let max_block_y = max_tile_y / 16;
+
+                    //println!("min_tile_x: {} max_tile_x: {} min_tile_y: {} max_tile_y: {}", min_tile_x, max_tile_x, min_tile_y, max_tile_y);
+                    //println!("min_block_x: {} max_block_x: {} min_block_y: {} max_block_y: {}", min_block_x, max_block_x, min_block_y, max_block_y);
+
+                    for block_y in min_block_y..=max_block_y {
+                        for block_x in min_block_x..=max_block_x {
+                            let boff = (block_z << 10) + (block_y << 5) + block_x;
+                            
+                            // iterate over pixels in block
+                            for y in 0..16 {
+                                for x in 0..16 {
+                                    let u = (tile_x * 500 + block_x * 16 + x) as i32 - min_x;
+                                    let v = (tile_y * 500 + block_y * 16 + y) as i32 - min_y;
+                                    if x == 0 && y == 0 {
+                                        //println!("block_x: {} block_y: {}", block_x, block_y);
+                                        //println!("u: {} v: {}", u, v);
+                                    }
+
+                                    if u >= 0 && u < width as i32 && v >= 0 && v < height as i32 {
+                                        let off = boff * 4096 + block_z_off * 256 + y * 16 + x;
+                                        buffer[v as usize * width + u as usize] = tile[off as usize];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -446,11 +510,17 @@ impl World for MappedVolumeGrid {
             0
         }
     }
+    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]) {
+
+    }
 }
 
 struct EmptyWorld {}
 impl World for EmptyWorld {
     fn get(&mut self, _xyz: [i32; 3]) -> u8 { 0 }
+    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]) {
+
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -503,8 +573,8 @@ impl TemplateApp {
         app
     }
     fn load_data(&mut self, data_dir: &str) {
-        //self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
-        self.world = Box::new(VolumeGrid16x16x16Mapped::from_data_dir(data_dir ,78, 78, 200));
+        self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
+        //self.world = Box::new(VolumeGrid16x16x16Mapped::from_data_dir(data_dir ,78, 78, 200));
         self.data_dir = data_dir.to_string();
     }
 
@@ -559,37 +629,14 @@ impl TemplateApp {
         let mut xyz: [i32; 3] = [0, 0, 0];
         xyz[d_coord] = self.coord[d_coord];
 
-        for (i, p) in pixels.iter_mut().enumerate() {
+        self.world.paint(self.coord, u_coord, v_coord, d_coord, width, height, &mut pixels);
+        /* for (i, p) in pixels.iter_mut().enumerate() {
             xyz[u_coord] = (i % width) as i32 + self.coord[u_coord] - (250 as f32 / self.zoom) as i32;
             xyz[v_coord] = (i / width) as i32 + self.coord[v_coord] - (250 as f32 / self.zoom) as i32;
 
             *p = self.world.get(xyz);
-        }
-        /* 4bit
-        for (i, p) in pixels.iter_mut().enumerate() {
-            let x = i % width + self.x();
-            let y = i / width + self.y();
-            let off = y * real_width + x;
-            let v8 = self.data[off / 2];
-            let v =
-                if off % 2 == 0 {
-                    v8 & 0xf << 4
-                } else {
-                    v8 & 0xf0
-                };
-
-            //let v = (v16 >> 8) as u8;
-
-            *p = v;
-        }
-            */
-        /* for (i, p) in pixels.iter_mut().enumerate() {
-            let x = i % width + self.x();
-            let y = i / width + self.y();
-            let off = y * real_width + x;
-            let v8 = self.data[off];
-            *p = v8;
         } */
+        
         let image = ColorImage::from_gray([width, height], &pixels);
         println!("Time elapsed before loading in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _start.elapsed());
         // Load the texture only once.
