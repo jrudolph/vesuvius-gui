@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
 trait World {
@@ -9,7 +11,7 @@ enum TileState {
     Missing,
     Exists,
     Loaded(memmap::Mmap),
-    Downloading,
+    Downloading(Arc<Mutex<bool>>),
 }
 
 struct VolumeGrid16x16x16Mapped {
@@ -35,7 +37,39 @@ impl VolumeGrid16x16x16Mapped {
             if let Some(mmap) = Self::map_for(&self.data_dir, x, y, z) {
                 *tile_state = TileState::Loaded(mmap);
             } else {
-                *tile_state = TileState::Missing;
+                let finished = Arc::new(Mutex::new(false));
+                let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                let mut request = ehttp::Request::get(url);
+                let inner = finished.clone();
+                let dir = self.data_dir.clone();
+                println!("downloading tile {}/{}/{}", x, y, z);
+                ehttp::fetch(request, move |response| {
+                    if let Ok(res) = response {
+                        if res.status == 200 {
+                            println!("got tile {}/{}/{}", x, y, z);
+                            let bytes = res.bytes;
+                            // save bytes to file
+                            let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}.bin", dir, z, x, y, z);
+                            std::fs::create_dir_all(format!("{}/z{:03}", dir, z)).unwrap();
+                            std::fs::write(file_name, bytes).unwrap();
+                        } else {
+                            println!("failed to download tile {}/{}/{}: {}", x, y, z, res.status);
+                            *inner.lock().unwrap() = true;
+                        }
+                    }       
+
+                    *inner.lock().unwrap() = true;        
+                });
+                *tile_state = TileState::Downloading(finished);
+            } 
+        } else if let TileState::Downloading(finished) = tile_state {
+            if *finished.lock().unwrap() {
+                if let Some(mmap) = Self::map_for(&self.data_dir, x, y, z) {
+                    *tile_state = TileState::Loaded(mmap);
+                } else {
+                    // set to missing permanently
+                    *tile_state = TileState::Missing;
+                }
             }
         }
     }
@@ -119,9 +153,15 @@ impl World for VolumeGrid16x16x16Mapped {
                 
             0
         } else {
-            if let TileState::Unknown = self.data[z_tile][y_tile][x_tile] {
+            if let TileState::Downloading(finished) = &self.data[z_tile][y_tile][x_tile] {
+                if *finished.lock().unwrap() {
+                    self.try_loading_tile(x_tile, y_tile, z_tile);
+                }
+            }
+            if let TileState::Unknown = &self.data[z_tile][y_tile][x_tile] {
                 self.try_loading_tile(x_tile, y_tile, z_tile);
             }
+            
             if let TileState::Loaded(tile) = &self.data[z_tile][y_tile][x_tile] {
                 //println!("Found tile: {} {} {}", x_tile, y_tile, z_tile);
                 let tx = (xyz[0] & 0x7f) as usize;
@@ -464,7 +504,7 @@ impl TemplateApp {
     }
     fn load_data(&mut self, data_dir: &str) {
         //self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
-        self.world = Box::new(VolumeGrid16x16x16Mapped::from_data_dir(data_dir ,78, 78, 120));
+        self.world = Box::new(VolumeGrid16x16x16Mapped::from_data_dir(data_dir ,78, 78, 200));
         self.data_dir = data_dir.to_string();
     }
 
@@ -551,11 +591,12 @@ impl TemplateApp {
             *p = v8;
         } */
         let image = ColorImage::from_gray([width, height], &pixels);
-
+        println!("Time elapsed before loading in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _start.elapsed());
         // Load the texture only once.
         let res = ui.ctx().load_texture("my-image-xy", image, Default::default());
+
         let _duration = _start.elapsed();
-        //println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
+        println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
         res
     }
 }
@@ -569,20 +610,20 @@ impl eframe::App for TemplateApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let x_sl = ui.add(
                 egui::Slider::new(
-                    &mut self.x(),
+                    &mut self.coord[0],
                     -10000..=10000, /* 0..=(self.img_width - self.frame_width - 1) */
                 )
                 .text("x"),
             );
             let y_sl = ui.add(
                 egui::Slider::new(
-                    &mut self.y(),
+                    &mut self.coord[1],
                     -10000..=10000, /* 0..=(self.img_height - self.frame_height - 1) */
                 )
                 .text("y"),
             );
 
-            let _z_sl = ui.add(egui::Slider::new(&mut self.z(), 0..=14500).text("z"));
+            let _z_sl = ui.add(egui::Slider::new(&mut self.coord[2], 0..=25000).text("z"));
             let zoom_sl = ui.add(
                 egui::Slider::new(&mut self.zoom, 0.1f32..=32f32)
                     .text("zoom")
