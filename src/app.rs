@@ -254,15 +254,15 @@ impl World for VolumeGrid16x16x16Mapped {
                     let max_tile_y = (tile_y * 128 + 128).min(max_y) - tile_y * 128;
 
                     let min_block_x = min_tile_x / 16;
-                    let max_block_x = max_tile_x / 16;
+                    let max_block_x = (max_tile_x + 15) / 16;
                     let min_block_y = min_tile_y / 16;
-                    let max_block_y = max_tile_y / 16;
+                    let max_block_y = (max_tile_y + 15) / 16;
 
                     //println!("min_tile_x: {} max_tile_x: {} min_tile_y: {} max_tile_y: {}", min_tile_x, max_tile_x, min_tile_y, max_tile_y);
                     //println!("min_block_x: {} max_block_x: {} min_block_y: {} max_block_y: {}", min_block_x, max_block_x, min_block_y, max_block_y);
 
-                    for block_y in min_block_y..=max_block_y {
-                        for block_x in min_block_x..=max_block_x {
+                    for block_y in min_block_y..max_block_y {
+                        for block_x in min_block_x..max_block_x {
                             let boff = (block_z << 6) + (block_y << 3) + block_x;
                             
                             // iterate over pixels in block
