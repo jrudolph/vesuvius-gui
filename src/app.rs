@@ -207,76 +207,89 @@ impl World for VolumeGrid16x16x16Mapped {
         }
     }
     fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]) {
-        if plane_coord != 2 {
+        /* if plane_coord != 2 {
             return;
-        }
-        let min_x = xyz[0] - width as i32 / 2;
-        let max_x = xyz[0] + width as i32 / 2;
-        let min_y = xyz[1] - height as i32 / 2;
-        let max_y = xyz[1] + height as i32 / 2;
-        let z = xyz[2];
+        } */
+        let min_uc = xyz[u_coord] - width as i32 / 2;
+        let max_uc = xyz[u_coord] + width as i32 / 2;
+        let min_vc = xyz[v_coord] - height as i32 / 2;
+        let max_vc = xyz[v_coord] + height as i32 / 2;
+        let pc = xyz[plane_coord];
 
-        let tile_min_x = min_x / 128;
-        let tile_max_x = max_x / 128;
+        let tile_min_uc = min_uc / 128;
+        let uc = max_uc / 128;
 
-        let tile_min_y = min_y / 128;
-        let tile_max_y = max_y / 128;
+        let tile_min_vc = min_vc / 128;
+        let tile_max_vc = max_vc / 128;
 
-        let tile_z = z / 128;
-        let tile_z_off = z % 128;
-        let block_z = tile_z_off / 16;
-        let block_z_off = tile_z_off % 16;
+        let tile_pc = pc / 128;
+        let tile_pc_off = pc % 128;
+        let block_pc = tile_pc_off / 16;
+        let block_pc_off = tile_pc_off % 16;
 
         //println!("x: {} y: {} z: {}", xyz[0], xyz[1], xyz[2]);
         //println!("min_x: {} max_x: {} min_y: {} max_y: {} z: {}", min_x, max_x, min_y, max_y, z);
         //println!("tile_min_x: {} tile_max_x: {} tile_min_y: {} tile_max_y: {} tile_z: {} block_z: {} block_z_off: {}", tile_min_x, tile_max_x, tile_min_y, tile_max_y, tile_z, block_z, block_z_off);
 
         // iterate over all tiles
-        for tile_x in tile_min_x..=tile_max_x {
-            for tile_y in tile_min_y..=tile_max_y {
+        for tile_uc in tile_min_uc..=uc {
+            for tile_vc in tile_min_vc..=tile_max_vc {
+                let mut tile_i = [0; 3];
+                tile_i[u_coord] = tile_uc as usize;
+                tile_i[v_coord] = tile_vc as usize;
+                tile_i[plane_coord] = tile_pc as usize;
+
                 //println!("tile_x: {} tile_y: {}", tile_x, tile_y);
-                if let TileState::Downloading(finished) = &self.data[tile_z as usize][tile_y as usize][tile_x as usize] {
+                if let TileState::Downloading(finished) = &self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
                     if *finished.lock().unwrap() {
-                        self.try_loading_tile(tile_x as usize, tile_y as usize, tile_z as usize);
+                        self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2]);
                     }
                 }
-                if let TileState::Unknown = &self.data[tile_z as usize][tile_y as usize][tile_x as usize] {
-                    self.try_loading_tile(tile_x as usize, tile_y as usize, tile_z as usize);
+                if let TileState::Unknown = &self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
+                    self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2]);
                 }
                 
                 //if let TileState::Loaded(tile) = &self.data[z_tile][y_tile][x_tile] {
 
-                if let TileState::Loaded(tile) = &mut self.data[tile_z as usize][tile_y as usize][tile_x as usize] {
+                if let TileState::Loaded(tile) = &mut self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
                     // iterate over blocks in tile
-                    let min_tile_x = (tile_x * 128).max(min_x) - tile_x * 128;
-                    let max_tile_x = (tile_x * 128 + 128).min(max_x) - tile_x * 128;
-                    let min_tile_y = (tile_y * 128).max(min_y) - tile_y * 128;
-                    let max_tile_y = (tile_y * 128 + 128).min(max_y) - tile_y * 128;
+                    let min_tile_uc = (tile_uc * 128).max(min_uc) - tile_uc * 128;
+                    let max_tile_uc = (tile_uc * 128 + 128).min(max_uc) - tile_uc * 128;
+                    let min_tile_vc = (tile_vc * 128).max(min_vc) - tile_vc * 128;
+                    let max_tile_vc = (tile_vc * 128 + 128).min(max_vc) - tile_vc * 128;
 
-                    let min_block_x = min_tile_x / 16;
-                    let max_block_x = (max_tile_x + 15) / 16;
-                    let min_block_y = min_tile_y / 16;
-                    let max_block_y = (max_tile_y + 15) / 16;
+                    let min_block_uc = min_tile_uc / 16;
+                    let max_block_uc = (max_tile_uc + 15) / 16;
+                    let min_block_vc = min_tile_vc / 16;
+                    let max_block_vc = (max_tile_vc + 15) / 16;
 
                     //println!("min_tile_x: {} max_tile_x: {} min_tile_y: {} max_tile_y: {}", min_tile_x, max_tile_x, min_tile_y, max_tile_y);
                     //println!("min_block_x: {} max_block_x: {} min_block_y: {} max_block_y: {}", min_block_x, max_block_x, min_block_y, max_block_y);
 
-                    for block_y in min_block_y..max_block_y {
-                        for block_x in min_block_x..max_block_x {
-                            let boff = (block_z << 6) + (block_y << 3) + block_x;
+                    for block_vc in min_block_vc..max_block_vc {
+                        for block_uc in min_block_uc..max_block_uc {
+                            let mut block_i = [0; 3];
+                            block_i[u_coord] = block_uc as usize;
+                            block_i[v_coord] = block_vc as usize;
+                            block_i[plane_coord] = block_pc as usize;
+                            let boff = (block_i[2] << 6) + (block_i[1] << 3) + block_i[0];
                             
                             // iterate over pixels in block
-                            for y in 0..16 {
-                                for x in 0..16 {
-                                    let u = (tile_x * 128 + block_x * 16 + x) as i32 - min_x;
-                                    let v = (tile_y * 128 + block_y * 16 + y) as i32 - min_y;
-                                    if x == 0 && y == 0 {
+                            for vc in 0..16 {
+                                for uc in 0..16 {
+                                    let u = (tile_uc * 128 + block_uc * 16 + uc) as i32 - min_uc;
+                                    let v = (tile_vc * 128 + block_vc * 16 + vc) as i32 - min_vc;
+                                    if uc == 0 && vc == 0 {
                                         //println!("block_x: {} block_y: {}", block_x, block_y);
                                         //println!("u: {} v: {}", u, v);
                                     }
+                                    let mut offs_i = [0; 3];
+                                    offs_i[u_coord] = uc as usize;
+                                    offs_i[v_coord] = vc as usize;
+                                    offs_i[plane_coord] = block_pc_off as usize;
 
                                     if u >= 0 && u < width as i32 && v >= 0 && v < height as i32 {
-                                        let off = boff * 4096 + block_z_off * 256 + y * 16 + x;
+                                        let off = boff * 4096 + offs_i[2] * 256 + offs_i[1] * 16 + offs_i[0];
                                         buffer[v as usize * width + u as usize] = tile[off as usize];
                                     }
                                 }
