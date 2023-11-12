@@ -275,8 +275,8 @@ impl World for VolumeGrid4x4x4 {
 
         let tile_z = z / 500;
         let tile_z_off = z % 500;
-        let block_z = tile_z_off / 16;
-        let block_z_off = tile_z_off % 16;
+        let block_z = tile_z_off / 4;
+        let block_z_off = tile_z_off % 4;
 
         //println!("x: {} y: {} z: {}", xyz[0], xyz[1], xyz[2]);
         //println!("min_x: {} max_x: {} min_y: {} max_y: {} z: {}", min_x, max_x, min_y, max_y, z);
@@ -294,30 +294,30 @@ impl World for VolumeGrid4x4x4 {
                     let min_tile_y = (tile_y * 500).max(min_y) - tile_y * 500;
                     let max_tile_y = (tile_y * 500 + 500).min(max_y) - tile_y * 500;
 
-                    let min_block_x = min_tile_x / 16;
-                    let max_block_x = max_tile_x / 16;
-                    let min_block_y = min_tile_y / 16;
-                    let max_block_y = max_tile_y / 16;
+                    let min_block_x = min_tile_x / 4;
+                    let max_block_x = max_tile_x / 4;
+                    let min_block_y = min_tile_y / 4;
+                    let max_block_y = max_tile_y / 4;
 
                     //println!("min_tile_x: {} max_tile_x: {} min_tile_y: {} max_tile_y: {}", min_tile_x, max_tile_x, min_tile_y, max_tile_y);
                     //println!("min_block_x: {} max_block_x: {} min_block_y: {} max_block_y: {}", min_block_x, max_block_x, min_block_y, max_block_y);
 
                     for block_y in min_block_y..=max_block_y {
                         for block_x in min_block_x..=max_block_x {
-                            let boff = (block_z << 10) + (block_y << 5) + block_x;
+                            let boff = (block_z << 14) + (block_y << 7) + block_x;
                             
                             // iterate over pixels in block
-                            for y in 0..16 {
-                                for x in 0..16 {
-                                    let u = (tile_x * 500 + block_x * 16 + x) as i32 - min_x;
-                                    let v = (tile_y * 500 + block_y * 16 + y) as i32 - min_y;
+                            for y in 0..4 {
+                                for x in 0..4 {
+                                    let u = (tile_x * 500 + block_x * 4 + x) as i32 - min_x;
+                                    let v = (tile_y * 500 + block_y * 4 + y) as i32 - min_y;
                                     if x == 0 && y == 0 {
                                         //println!("block_x: {} block_y: {}", block_x, block_y);
                                         //println!("u: {} v: {}", u, v);
                                     }
 
                                     if u >= 0 && u < width as i32 && v >= 0 && v < height as i32 {
-                                        let off = boff * 4096 + block_z_off * 256 + y * 16 + x;
+                                        let off = boff * 64 + block_z_off * 16 + y * 4 + x;
                                         buffer[v as usize * width + u as usize] = tile[off as usize];
                                     }
                                 }
@@ -416,20 +416,20 @@ impl MappedVolumeGrid {
                         let ty = y;//(xyz[1] % 500) as usize;
                         let tz = z;//(xyz[2] % 500) as usize;
 
-                        let bx = tx >> 4;
-                        let by = ty >> 4;
-                        let bz = tz >> 4;
+                        let bx = tx >> 2;
+                        let by = ty >> 2;
+                        let bz = tz >> 2;
 
-                        let boff = (bz << 10) + (by << 5) + bx;
+                        let boff = (bz << 14) + (by << 7) + bx;
                         //println!("bx: {}, by: {}, bz: {}, boff: {}", bx, by, bz, boff);
 
-                        let px = tx & 0xf;
-                        let py = ty & 0xf;
-                        let pz = tz & 0xf;
+                        let px = tx & 0x3;
+                        let py = ty & 0x3;
+                        let pz = tz & 0x3;
 
-                        let poff = pz * 256 + py * 16 + px;
+                        let poff = pz * 16 + py * 4 + px;
 
-                        let off = boff * 4096 + poff;
+                        let off = boff * 64 + poff;
                         //let off = z * 500 * 500 + y * 500 + x;
 
                         let moff =
