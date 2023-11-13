@@ -11,15 +11,24 @@ trait World {
     fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]);
 }
 
+#[derive(Copy, Clone, Debug)]
+struct Quality {
+    bit_mask: u8,
+    downsampling_factor: u8,
+}
+impl Quality {
+    const Full: Quality = Quality { bit_mask: 0xff, downsampling_factor: 4 };
+}
+
 enum TileState {
     Unknown,
     Missing,
     //Exists,
-    Loaded(memmap::Mmap),
+    Loaded(memmap::Mmap, Quality),
     Downloading(Arc<Mutex<bool>>),
 }
 
-type DownloadTask = (Arc<Mutex<bool>>, usize, usize, usize);
+type DownloadTask = (Arc<Mutex<bool>>, usize, usize, usize, Quality);
 
 enum DownloadMessage {
     Download(DownloadTask),
@@ -58,21 +67,23 @@ impl Downloader {
                 }
 
                 if count.compare_exchange(cur, cur + 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
-                    queue.sort_by_key(|(_, x, y, z)| {
-                        let dx = *x as i32 * 128 + 64 - pos.0;
-                        let dy = *y as i32 * 128 + 64 - pos.1;
-                        let dz = *z as i32 * 128 + 64 - pos.2;
+                    queue.sort_by_key(|(_, x, y, z, q)| {
+                        let f = q.downsampling_factor as i32;
+                        let dx = *x as i32 * 128 * f + 64 * f - pos.0;
+                        let dy = *y as i32 * 128 * f + 64 * f - pos.1;
+                        let dz = *z as i32 * 128 * f + 64 * f - pos.2;
                         let score = -(dx*dx + dy*dy + dz*dz);
                         //println!("{} {} {} {}", x, y, z, score);
                         score
                     });
-                    let (inner, x, y, z) = queue.pop().unwrap();
+                    let (inner, x, y, z, quality) = queue.pop().unwrap();
                     {
                         //println!("Downloading {} {} {}", x, y, z);
                         //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                        let url = format!("http://5.161.229.51:8095/tiles/scroll/1/volume/20230205180739/download/128-16?x={}&y={}&z={}", x, y, z);
+                        let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1/volume/20230205180739/download/128-16?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
+                        //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/128-16?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
                         let mut request = ehttp::Request::get(url);
                         request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
                         
@@ -85,7 +96,7 @@ impl Downloader {
                                     println!("got tile {}/{}/{}", x, y, z);
                                     let bytes = res.bytes;
                                     // save bytes to file
-                                    let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}.bin", dir, z, x, y, z);
+                                    let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
                                     std::fs::create_dir_all(format!("{}/z{:03}", dir, z)).unwrap();
                                     std::fs::write(file_name, bytes).unwrap();
                                 } else {
@@ -124,29 +135,29 @@ struct VolumeGrid16x16x16Mapped {
     data: Vec<Vec<Vec<TileState>>>,
 }
 impl VolumeGrid16x16x16Mapped {
-    fn map_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
+    fn map_for(data_dir: &str, x: usize, y: usize, z: usize, quality: Quality) -> Option<TileState> {
         use memmap::MmapOptions;
         use std::fs::File;
-        let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}.bin", data_dir, z, x, y, z);
+        let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", data_dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
         //println!("at {}", file_name);
 
         let file = File::open(file_name).ok()?;
-        unsafe { MmapOptions::new().map(&file) }.ok()
+        unsafe { MmapOptions::new().map(&file) }.ok().map(|x| TileState::Loaded(x, Quality::Full))
     }
-    fn try_loading_tile(&mut self, x: usize, y: usize, z: usize) {
+    fn try_loading_tile(&mut self, x: usize, y: usize, z: usize, quality: Quality) {
         let tile_state = &mut self.data[z][y][x];
         if let TileState::Unknown = tile_state {
-            if let Some(mmap) = Self::map_for(&self.data_dir, x, y, z) {
-                *tile_state = TileState::Loaded(mmap);
+            if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
+                *tile_state = state;
             } else {
                 let finished = Arc::new(Mutex::new(false));
-                self.downloader.queue((finished.clone(), x, y, z));
+                self.downloader.queue((finished.clone(), x, y, z, quality));
                 *tile_state = TileState::Downloading(finished);
             } 
         } else if let TileState::Downloading(finished) = tile_state {
             if *finished.lock().unwrap() {
-                if let Some(mmap) = Self::map_for(&self.data_dir, x, y, z) {
-                    *tile_state = TileState::Loaded(mmap);
+                if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
+                    *tile_state = state;
                 } else {
                     // set to missing permanently
                     *tile_state = TileState::Missing;
@@ -237,14 +248,14 @@ impl World for VolumeGrid16x16x16Mapped {
         } else {
             if let TileState::Downloading(finished) = &self.data[z_tile][y_tile][x_tile] {
                 if *finished.lock().unwrap() {
-                    self.try_loading_tile(x_tile, y_tile, z_tile);
+                    self.try_loading_tile(x_tile, y_tile, z_tile, Quality::Full);
                 }
             }
             if let TileState::Unknown = &self.data[z_tile][y_tile][x_tile] {
-                self.try_loading_tile(x_tile, y_tile, z_tile);
+                self.try_loading_tile(x_tile, y_tile, z_tile, Quality::Full);
             }
             
-            if let TileState::Loaded(tile) = &self.data[z_tile][y_tile][x_tile] {
+            if let TileState::Loaded(tile, quality) = &self.data[z_tile][y_tile][x_tile] {
                 //println!("Found tile: {} {} {}", x_tile, y_tile, z_tile);
                 let tx = (xyz[0] & 0x7f) as usize;
                 let ty = (xyz[1] & 0x7f) as usize;
@@ -290,22 +301,27 @@ impl World for VolumeGrid16x16x16Mapped {
             return;
         } */
         self.downloader.position(xyz[0], xyz[1], xyz[2]);
+
+        let sfactor = Quality::Full.downsampling_factor as i32;
+        let tilesize = 128 * sfactor;
+        let blocksize = 16 * sfactor;
+
         let min_uc = xyz[u_coord] - width as i32 / 2;
         let max_uc = xyz[u_coord] + width as i32 / 2;
         let min_vc = xyz[v_coord] - height as i32 / 2;
         let max_vc = xyz[v_coord] + height as i32 / 2;
         let pc = xyz[plane_coord];
 
-        let tile_min_uc = min_uc / 128;
-        let uc = max_uc / 128;
+        let tile_min_uc = min_uc /tilesize;
+        let uc = max_uc / tilesize;
 
-        let tile_min_vc = min_vc / 128;
-        let tile_max_vc = max_vc / 128;
+        let tile_min_vc = min_vc / tilesize;
+        let tile_max_vc = max_vc / tilesize;
 
-        let tile_pc = pc / 128;
-        let tile_pc_off = pc % 128;
-        let block_pc = tile_pc_off / 16;
-        let block_pc_off = tile_pc_off % 16;
+        let tile_pc = pc / tilesize;
+        let tile_pc_off = pc % tilesize;
+        let block_pc = tile_pc_off / blocksize;
+        let block_pc_off = tile_pc_off % blocksize;
 
         //println!("x: {} y: {} z: {}", xyz[0], xyz[1], xyz[2]);
         //println!("min_x: {} max_x: {} min_y: {} max_y: {} z: {}", min_x, max_x, min_y, max_y, z);
@@ -326,24 +342,25 @@ impl World for VolumeGrid16x16x16Mapped {
                 //println!("tile_x: {} tile_y: {}", tile_x, tile_y);
                 if let TileState::Downloading(finished) = &self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
                     if *finished.lock().unwrap() {
-                        self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2]);
+                        self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality::Full);
                     }
                 }
                 if let TileState::Unknown = &self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
-                    self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2]);
+                    self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality::Full);
                 }
                 
-                if let TileState::Loaded(tile) = &mut self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
+                if let TileState::Loaded(tile, quality) = &mut self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
                     // iterate over blocks in tile
-                    let min_tile_uc = (tile_uc * 128).max(min_uc) - tile_uc * 128;
-                    let max_tile_uc = (tile_uc * 128 + 128).min(max_uc) - tile_uc * 128;
-                    let min_tile_vc = (tile_vc * 128).max(min_vc) - tile_vc * 128;
-                    let max_tile_vc = (tile_vc * 128 + 128).min(max_vc) - tile_vc * 128;
+                    let min_tile_uc = (tile_uc * tilesize).max(min_uc) - tile_uc * tilesize;
+                    let max_tile_uc = (tile_uc * tilesize + tilesize).min(max_uc) - tile_uc * tilesize;
+                    let min_tile_vc = (tile_vc * tilesize).max(min_vc) - tile_vc * tilesize;
+                    let max_tile_vc = (tile_vc * tilesize + tilesize).min(max_vc) - tile_vc * tilesize;
 
-                    let min_block_uc = min_tile_uc / 16;
-                    let max_block_uc = (max_tile_uc + 15) / 16;
-                    let min_block_vc = min_tile_vc / 16;
-                    let max_block_vc = (max_tile_vc + 15) / 16;
+                    
+                    let min_block_uc = min_tile_uc / blocksize;
+                    let max_block_uc = (max_tile_uc + blocksize - 1) / blocksize;
+                    let min_block_vc = min_tile_vc / blocksize;
+                    let max_block_vc = (max_tile_vc + (blocksize - 1)) / blocksize;
 
                     //println!("min_tile_x: {} max_tile_x: {} min_tile_y: {} max_tile_y: {}", min_tile_x, max_tile_x, min_tile_y, max_tile_y);
                     //println!("min_block_x: {} max_block_x: {} min_block_y: {} max_block_y: {}", min_block_x, max_block_x, min_block_y, max_block_y);
@@ -357,36 +374,38 @@ impl World for VolumeGrid16x16x16Mapped {
                             let boff = (block_i[2] << 6) + (block_i[1] << 3) + block_i[0];
                             
                             // iterate over pixels in block
-                            for vc in 0..16 {
-                                for uc in 0..16 {
-                                    let u = (tile_uc * 128 + block_uc * 16 + uc) as i32 - min_uc;
-                                    let v = (tile_vc * 128 + block_vc * 16 + vc) as i32 - min_vc;
+                            for vc in 0..blocksize {
+                                for uc in 0..blocksize {
+                                    let u = (tile_uc * tilesize + block_uc * blocksize + uc) as i32 - min_uc;
+                                    let v = (tile_vc * tilesize + block_vc * blocksize + vc) as i32 - min_vc;
                                     if uc == 0 && vc == 0 {
                                         //println!("block_x: {} block_y: {}", block_x, block_y);
                                         //println!("u: {} v: {}", u, v);
                                     }
                                     let mut offs_i = [0; 3];
-                                    if (u / 128) % 2 == 0 {
-                                    offs_i[u_coord] = uc as usize;
-                                    offs_i[v_coord] = vc as usize;
-                                    offs_i[plane_coord] = block_pc_off as usize;
-                                    } else {
+                                    //if (u / tilesize) % 2 == 0 {
+                                    offs_i[u_coord] = uc as usize / sfactor as usize;
+                                    offs_i[v_coord] = vc as usize / sfactor as usize;
+                                    offs_i[plane_coord] = block_pc_off as usize / sfactor as usize;
+                                    /* } else {
                                         let fac = 2;
                                         offs_i[u_coord] = (uc as usize) / fac * fac;
                                         offs_i[v_coord] = (vc as usize) / fac * fac;
                                         offs_i[plane_coord] = (block_pc_off as usize) / fac * fac;
-                                    }
+                                    } */
+                                    //let factor = quality.downsampling_factor as usize * quality.downsampling_factor as usize * quality.downsampling_factor as usize;
 
                                     if u >= 0 && u < width as i32 && v >= 0 && v < height as i32 {
                                         let off = boff * 4096 + offs_i[2] * 256 + offs_i[1] * 16 + offs_i[0];
                                         let value = tile[off as usize];
-                                        let pluscon = ((value as i32 - 70).max(0) * 255 / (255 - 100)).min(255) as u8;
+
+                                        //let pluscon = ((value as i32 - 70).max(0) * 255 / (255 - 100)).min(255) as u8;
                                         
-                                        if (u / 128) % 2 == 0 {
+                                        /* if (u / 128) % 2 == 0 */ {
                                             buffer[v as usize * width + u as usize] = value;
-                                        } else {
+                                        } /* else {
                                             buffer[v as usize * width + u as usize] = (value & 0xf0) + 0x08;//(tile[((off / 8) * 8) as usize] & 0xc0) + 0x20;
-                                        }
+                                        } */
                                     }
                                 }
                             }
@@ -733,8 +752,8 @@ impl Default for TemplateApp {
         Self {
             coord: [2800, 2500, 10852],
             zoom: 1f32,
-            frame_width: 500,
-            frame_height: 500,
+            frame_width: 1000,
+            frame_height: 1000,
             data_dir: ".".to_string(),
             texture_xy: None,
             texture_xz: None,
@@ -754,6 +773,8 @@ impl TemplateApp {
         } else {
             Default::default()
         };
+        app.frame_height = 750;
+        app.frame_width = 750;
 
         app.load_data(&data_dir.unwrap_or_else(|| app.data_dir.clone()));
 
@@ -775,17 +796,13 @@ impl TemplateApp {
         if image.hovered() {
             let delta = ui.input(|i| i.scroll_delta);
             if delta.y != 0.0 {
-                let delta = delta.y.signum() * 1.0;
+                let delta = delta.y.signum() * Quality::Full.downsampling_factor as f32;
                 let m = v(self);
-                *m += delta as i32;
+                *m = (*m + delta as i32) / Quality::Full.downsampling_factor as i32 * Quality::Full.downsampling_factor as i32;
                 self.clear_textures();
             }
         }
     }
-    fn x(&self) -> i32 { self.coord[0] }
-    fn y(&self) -> i32 { self.coord[1] }
-    fn z(&self) -> i32 { self.coord[2] }
-
     fn get_or_create_texture(
         &mut self,
         ui: &Ui,
@@ -878,18 +895,18 @@ impl eframe::App for TemplateApp {
                 //self.frame_height = size.y as usize;
 
                 let image = Image::new(texture_xy)
-                    .max_height(500f32)
-                    .max_width(500f32)
+                    .max_height(self.frame_height as f32)
+                    .max_width(self.frame_width as f32)
                     .fit_to_original_size(self.zoom);
 
                 let image_xz = Image::new(texture_xz)
-                    .max_height(500f32)
-                    .max_width(500f32)
+                    .max_height(self.frame_height as f32)
+                    .max_width(self.frame_width as f32)
                     .fit_to_original_size(self.zoom);
 
                 let image_yz = Image::new(texture_yz)
-                    .max_height(500f32)
-                    .max_width(500f32)
+                    .max_height(self.frame_height as f32)
+                    .max_width(self.frame_width as f32)
                     .fit_to_original_size(self.zoom);
 
                 ui.horizontal(|ui| {
