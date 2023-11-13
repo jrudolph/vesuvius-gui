@@ -366,17 +366,26 @@ impl World for VolumeGrid16x16x16Mapped {
                                         //println!("u: {} v: {}", u, v);
                                     }
                                     let mut offs_i = [0; 3];
+                                    if (u / 128) % 2 == 0 {
                                     offs_i[u_coord] = uc as usize;
                                     offs_i[v_coord] = vc as usize;
                                     offs_i[plane_coord] = block_pc_off as usize;
+                                    } else {
+                                        let fac = 2;
+                                        offs_i[u_coord] = (uc as usize) / fac * fac;
+                                        offs_i[v_coord] = (vc as usize) / fac * fac;
+                                        offs_i[plane_coord] = (block_pc_off as usize) / fac * fac;
+                                    }
 
                                     if u >= 0 && u < width as i32 && v >= 0 && v < height as i32 {
                                         let off = boff * 4096 + offs_i[2] * 256 + offs_i[1] * 16 + offs_i[0];
-                                        let pluscon = (((tile[off as usize]) as i32 - 70).max(0) * 255 / (255 - 100)).min(255) as u8;
+                                        let value = tile[off as usize];
+                                        let pluscon = ((value as i32 - 70).max(0) * 255 / (255 - 100)).min(255) as u8;
+                                        
                                         if (u / 128) % 2 == 0 {
-                                            buffer[v as usize * width + u as usize] = pluscon;//tile[off as usize];
+                                            buffer[v as usize * width + u as usize] = value;
                                         } else {
-                                            buffer[v as usize * width + u as usize] = (pluscon  & 0xc0) + 0x20;
+                                            buffer[v as usize * width + u as usize] = (value & 0xf0) + 0x08;//(tile[((off / 8) * 8) as usize] & 0xc0) + 0x20;
                                         }
                                     }
                                 }
