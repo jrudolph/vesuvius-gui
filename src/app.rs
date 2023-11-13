@@ -17,7 +17,7 @@ struct Quality {
     downsampling_factor: u8,
 }
 impl Quality {
-    const Full: Quality = Quality { bit_mask: 0xff, downsampling_factor: 4 };
+    const Full: Quality = Quality { bit_mask: 0xff, downsampling_factor: 2 };
 }
 
 enum TileState {
@@ -803,6 +803,16 @@ impl TemplateApp {
             }
         }
     }
+    fn add_drag_handler(&mut self, image: &Response, ucoord: usize, vcoord: usize) {
+        if image.dragged_by(PointerButton::Primary) {
+            //let im2 = image.on_hover_cursor(CursorIcon::Grabbing);
+            let delta = -image.drag_delta() / self.zoom;
+
+            self.coord[ucoord] += delta.x as i32;
+            self.coord[vcoord] += delta.y as i32;
+            self.clear_textures();
+        }
+    }
     fn get_or_create_texture(
         &mut self,
         ui: &Ui,
@@ -884,6 +894,8 @@ impl eframe::App for TemplateApp {
                 self.clear_textures();
             }
 
+            ui.label(format!("FPS: {}", 1.0 / (_frame.info().cpu_usage.unwrap_or_default() + 1e-6)));
+
             let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, |s| &mut s.texture_xy);
             let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
             let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
@@ -911,11 +923,15 @@ impl eframe::App for TemplateApp {
 
                 ui.horizontal(|ui| {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
-                    let im_xz = ui.add(image_xz);
-                    let im_yz = ui.add(image_yz);
+                    let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
+                    let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
                     self.add_scroll_handler(&im_xy, ui, |s| &mut s.coord[2]);
                     self.add_scroll_handler(&im_xz, ui, |s| &mut s.coord[1]);
                     self.add_scroll_handler(&im_yz, ui, |s| &mut s.coord[0]);
+
+                    self.add_drag_handler(&im_xy, 0, 1);
+                    self.add_drag_handler(&im_xz, 0, 2);
+                    self.add_drag_handler(&im_yz, 2, 1);
                     //let size2 = texture.size_vec2();
 
                     /* if im_xy.hovered() {
@@ -927,7 +943,7 @@ impl eframe::App for TemplateApp {
                         }
                     } */
 
-                    if im_xy.dragged_by(PointerButton::Primary) {
+                    /* if im_xy.dragged_by(PointerButton::Primary) {
                         let im2 = im_xy.on_hover_cursor(CursorIcon::Grabbing);
                         let delta = -im2.drag_delta() / self.zoom;
                         //println!("delta: {:?} orig delta: {:?}", delta, im2.drag_delta());
@@ -938,7 +954,7 @@ impl eframe::App for TemplateApp {
                         self.coord[1] += delta.y as i32;
                         //println!("oldx: {}, oldy: {}, x: {}, y: {}", oldx, oldy, self.x(), self.y());
                         self.clear_textures();
-                    } /* else if size2.x as usize != self.frame_width || size2.y as usize != self.frame_height {
+                    } */ /* else if size2.x as usize != self.frame_width || size2.y as usize != self.frame_height {
                           println!("Reset because size changed from {:?} to {:?}", size2, size);
                           self.clear_textures();
                       }; */
