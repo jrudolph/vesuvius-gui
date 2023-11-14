@@ -21,15 +21,35 @@ impl Quality {
     const Full: Quality = Quality { bit_mask: 0xff, downsampling_factor: 2 };
 }
 
+#[derive(Copy, Clone, Debug)]
+enum DownloadState {
+    Queuing,
+    Downloading,
+    Done,
+    Failed,
+    Pruned, // was not in view any more and therefore pruned
+}
+impl DownloadState {
+    fn needs_reload(&self) -> bool {
+        match self {
+            DownloadState::Queuing => false,
+            DownloadState::Downloading => false,
+            DownloadState::Done => true,
+            DownloadState::Failed => true,
+            DownloadState::Pruned => true,
+        }
+    }
+}
+
 enum TileState {
     Unknown,
     Missing,
     //Exists,
     Loaded(memmap::Mmap),
-    Downloading(Arc<Mutex<bool>>),
+    Downloading(Arc<Mutex<DownloadState>>),
 }
 
-type DownloadTask = (Arc<Mutex<bool>>, usize, usize, usize, Quality);
+type DownloadTask = (Arc<Mutex<DownloadState>>, usize, usize, usize, Quality);
 
 enum DownloadMessage {
     Download(DownloadTask),
@@ -40,13 +60,15 @@ struct Downloader {
     download_queue: Sender<DownloadMessage>,
 }
 impl Downloader {
-    fn new(dir: &str) -> Downloader {
+    fn new(dir: &str, frame_width: usize, frame_height: usize) -> Downloader {
         let (sender, receiver) = std::sync::mpsc::channel::<DownloadMessage>();
 
         let count = Arc::new(AtomicUsize::new(0));
 
         let dir = dir.to_string();
         thread::spawn(move || {
+            let larger_edge = frame_width.max(frame_height) as i32;
+
             let mut queue = Vec::new();
             let mut pos = (0,0,0);
             loop {
@@ -68,47 +90,70 @@ impl Downloader {
                 }
 
                 if count.compare_exchange(cur, cur + 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
-                    queue.sort_by_key(|(_, x, y, z, q)| {
+                    let higher = 
+                    queue.retain(|(state, x, y, z, q)| {
                         let f = q.downsampling_factor as i32;
                         let dx = *x as i32 * 64 * f + 32 * f - pos.0;
                         let dy = *y as i32 * 64 * f + 32 * f - pos.1;
                         let dz = *z as i32 * 64 * f + 32 * f - pos.2;
-                        let score = (q.downsampling_factor, -(dx*dx + dy*dy + dz*dz));
-                        //println!("{} {} {} {}", x, y, z, score);
-                        score
-                    });
-                    let (inner, x, y, z, quality) = queue.pop().unwrap();
-                    {
-                        //println!("Downloading {} {} {}", x, y, z);
-                        //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                        //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                        //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                        let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
-                        //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
-                        let mut request = ehttp::Request::get(url);
-                        request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
                         
-                        let dir = dir.clone();
-                        println!("downloading tile {}/{}/{} f: {}", x, y, z, quality.downsampling_factor);
-                        let c2 = count.clone();
-                        ehttp::fetch(request, move |response| {
-                            if let Ok(res) = response {
-                                if res.status == 200 {
-                                    println!("got tile {}/{}/{}", x, y, z);
-                                    let bytes = res.bytes;
-                                    // save bytes to file
-                                    let file_name = format!("{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
-                                    std::fs::create_dir_all(format!("{}/64-4/z{:03}", dir, z)).unwrap();
-                                    std::fs::write(file_name, bytes).unwrap();
-                                } else {
-                                    println!("failed to download tile {}/{}/{}: {}", x, y, z, res.status);
-                                    *inner.lock().unwrap() = true;
-                                }
-                            }       
 
-                            c2.fetch_sub(1, Ordering::Acquire);
-                            *inner.lock().unwrap() = true;        
+                        if (dx.abs() > larger_edge / 2 && dy.abs() > larger_edge / 2) && dz.abs() > larger_edge / 2 {
+                            println!("Pruning {} {} {} {}", x, y, z, q.downsampling_factor);
+                            *state.lock().unwrap() = DownloadState::Pruned;
+                            false
+                        } else  {
+                            true
+                        }
+
+                    });
+                    if !queue.is_empty() {
+                        queue.sort_by_key(|(_, x, y, z, q)| {
+                            let f = q.downsampling_factor as i32;
+                            let dx = *x as i32 * 64 * f + 32 * f - pos.0;
+                            let dy = *y as i32 * 64 * f + 32 * f - pos.1;
+                            let dz = *z as i32 * 64 * f + 32 * f - pos.2;
+                            let score = (q.downsampling_factor, -(dx*dx + dy*dy + dz*dz));
+                            //println!("{} {} {} {}", x, y, z, score);
+                            score
                         });
+                        
+                        let (state, x, y, z, quality) = queue.pop().unwrap();
+                        {
+                            *state.lock().unwrap() = DownloadState::Downloading;
+                            //println!("Downloading {} {} {}", x, y, z);
+                            //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                            //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                            //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                            let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
+                            //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
+                            let mut request = ehttp::Request::get(url);
+                            request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
+                            
+                            let dir = dir.clone();
+                            println!("downloading tile {}/{}/{} f: {}", x, y, z, quality.downsampling_factor);
+                            let c2 = count.clone();
+                            ehttp::fetch(request, move |response| {
+                                if let Ok(res) = response {
+                                    if res.status == 200 {
+                                        println!("got tile {}/{}/{}", x, y, z);
+                                        let bytes = res.bytes;
+                                        // save bytes to file
+                                        let file_name = format!("{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
+                                        std::fs::create_dir_all(format!("{}/64-4/z{:03}", dir, z)).unwrap();
+                                        std::fs::write(file_name, bytes).unwrap();
+                                        *state.lock().unwrap() = DownloadState::Done;
+                                    } else {
+                                        println!("failed to download tile {}/{}/{}: {}", x, y, z, res.status);
+                                        *state.lock().unwrap() = DownloadState::Failed;
+                                    }
+                                } else {
+                                    *state.lock().unwrap() = DownloadState::Failed;
+                                }
+
+                                c2.fetch_sub(1, Ordering::Acquire);
+                            });
+                        }
                     }
                 }
             }
@@ -159,19 +204,35 @@ impl VolumeGrid64x4Mapped {
             if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
                 *tile_state = state;
             } else {
-                let finished = Arc::new(Mutex::new(false));
+                let finished = Arc::new(Mutex::new(DownloadState::Queuing));
                 self.downloader.queue((finished.clone(), x, y, z, quality));
                 *tile_state = TileState::Downloading(finished);
             } 
-        } else if let TileState::Downloading(finished) = tile_state {
-            if *finished.lock().unwrap() {
+        } else if let TileState::Downloading(state) = tile_state {
+            match *state.clone().lock().unwrap() {
+                DownloadState::Done => {
+                    if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
+                        *tile_state = state;
+                    } else {
+                        // set to missing permanently
+                        *tile_state = TileState::Missing;
+                    }
+                }
+                DownloadState::Failed => {
+                    *tile_state = TileState::Missing;
+                },
+                _ => {
+                    *tile_state = TileState::Unknown;
+                }                
+            };
+            /* if *finished.lock().unwrap() {
                 if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
                     *tile_state = state;
                 } else {
                     // set to missing permanently
                     *tile_state = TileState::Missing;
                 }
-            }
+            } */
         }
     }
     pub fn from_data_dir(data_dir: &str, max_x: usize, max_y: usize, max_z: usize, downloader: Downloader) -> VolumeGrid64x4Mapped {
@@ -302,7 +363,7 @@ impl World for VolumeGrid64x4Mapped {
 
                 //println!("tile_x: {} tile_y: {}", tile_x, tile_y);
                 if let TileState::Downloading(finished) = &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
-                    if *finished.lock().unwrap() {
+                    if finished.lock().unwrap().needs_reload() {
                         self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
                     }
                 }
@@ -743,7 +804,7 @@ impl TemplateApp {
     }
     fn load_data(&mut self, data_dir: &str) {
         //self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
-        self.world = Box::new(VolumeGrid64x4Mapped::from_data_dir(data_dir ,78, 78, 200, Downloader::new(data_dir)));
+        self.world = Box::new(VolumeGrid64x4Mapped::from_data_dir(data_dir ,78, 78, 200, Downloader::new(data_dir, self.frame_width, self.frame_height)));
         self.data_dir = data_dir.to_string();
     }
 
@@ -805,8 +866,8 @@ impl TemplateApp {
         xyz[d_coord] = self.coord[d_coord];
 
         const ZOOM_RES_FACTOR: f32 = 2.0; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
-        let min_level = (ZOOM_RES_FACTOR / self.zoom) as i32;
-        let max_level = (min_level + 2).min(3);
+        let min_level = ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
+        let max_level = (min_level + 2).min(4);
         for level in (min_level..=max_level).rev() {
             let sfactor = 1 << level;
             //println!("level: {} factor: {}", level, sfactor);
