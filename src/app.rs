@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -8,7 +9,7 @@ use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
 trait World {
     fn get(&mut self, xyz: [i32; 3]) -> u8;
-    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]);
+    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, sfactor: u8, buffer: &mut [u8]);
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -72,7 +73,7 @@ impl Downloader {
                         let dx = *x as i32 * 128 * f + 64 * f - pos.0;
                         let dy = *y as i32 * 128 * f + 64 * f - pos.1;
                         let dz = *z as i32 * 128 * f + 64 * f - pos.2;
-                        let score = -(dx*dx + dy*dy + dz*dz);
+                        let score = (q.downsampling_factor, -(dx*dx + dy*dy + dz*dz));
                         //println!("{} {} {} {}", x, y, z, score);
                         score
                     });
@@ -88,7 +89,7 @@ impl Downloader {
                         request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
                         
                         let dir = dir.clone();
-                        println!("downloading tile {}/{}/{}", x, y, z);
+                        println!("downloading tile {}/{}/{} f: {}", x, y, z, quality.downsampling_factor);
                         let c2 = count.clone();
                         ehttp::fetch(request, move |response| {
                             if let Ok(res) = response {
@@ -132,7 +133,7 @@ struct VolumeGrid16x16x16Mapped {
     max_y: usize,
     max_z: usize,
     downloader: Downloader,
-    data: Vec<Vec<Vec<TileState>>>,
+    data: HashMap<(usize, usize, usize, usize), TileState>,
 }
 impl VolumeGrid16x16x16Mapped {
     fn map_for(data_dir: &str, x: usize, y: usize, z: usize, quality: Quality) -> Option<TileState> {
@@ -144,8 +145,16 @@ impl VolumeGrid16x16x16Mapped {
         let file = File::open(file_name).ok()?;
         unsafe { MmapOptions::new().map(&file) }.ok().map(|x| TileState::Loaded(x, Quality::Full))
     }
+    fn get_tile_state(&self, x: usize, y: usize, z: usize, downsampling: u8) -> &TileState {
+        let key = (x,y,z,downsampling as usize);
+        self.data.get(&key).unwrap_or(&TileState::Unknown)
+    }
     fn try_loading_tile(&mut self, x: usize, y: usize, z: usize, quality: Quality) {
-        let tile_state = &mut self.data[z][y][x];
+        let key = (x,y,z,quality.downsampling_factor as usize);
+        if !self.data.contains_key(&key) {
+            self.data.insert(key, TileState::Unknown);
+        }
+        let tile_state = self.data.get_mut(&key).unwrap();
         if let TileState::Unknown = tile_state {
             if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
                 *tile_state = state;
@@ -225,7 +234,7 @@ impl VolumeGrid16x16x16Mapped {
             max_y: max_y,
             max_z: max_z,
             downloader,
-            data,
+            data: HashMap::new(),
         }
     }
 }
@@ -246,16 +255,16 @@ impl World for VolumeGrid16x16x16Mapped {
                 
             0
         } else {
-            if let TileState::Downloading(finished) = &self.data[z_tile][y_tile][x_tile] {
+            if let TileState::Downloading(finished) = &self.get_tile_state(x_tile, y_tile, z_tile, 1) {
                 if *finished.lock().unwrap() {
                     self.try_loading_tile(x_tile, y_tile, z_tile, Quality::Full);
                 }
             }
-            if let TileState::Unknown = &self.data[z_tile][y_tile][x_tile] {
+            if let TileState::Unknown = &self.get_tile_state(x_tile, y_tile, z_tile, 1) {
                 self.try_loading_tile(x_tile, y_tile, z_tile, Quality::Full);
             }
             
-            if let TileState::Loaded(tile, quality) = &self.data[z_tile][y_tile][x_tile] {
+            if let TileState::Loaded(tile, quality) = &self.get_tile_state(x_tile, y_tile, z_tile, 1) {
                 //println!("Found tile: {} {} {}", x_tile, y_tile, z_tile);
                 let tx = (xyz[0] & 0x7f) as usize;
                 let ty = (xyz[1] & 0x7f) as usize;
@@ -296,13 +305,13 @@ impl World for VolumeGrid16x16x16Mapped {
             }
         }
     }
-    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]) {
+    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, _sfactor: u8, buffer: &mut [u8]) {
         /* if plane_coord != 2 {
             return;
         } */
         self.downloader.position(xyz[0], xyz[1], xyz[2]);
 
-        let sfactor = Quality::Full.downsampling_factor as i32;
+        let sfactor = _sfactor as i32; //Quality::Full.downsampling_factor as i32;
         let tilesize = 128 * sfactor;
         let blocksize = 16 * sfactor;
 
@@ -340,16 +349,16 @@ impl World for VolumeGrid16x16x16Mapped {
                 }
 
                 //println!("tile_x: {} tile_y: {}", tile_x, tile_y);
-                if let TileState::Downloading(finished) = &self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
+                if let TileState::Downloading(finished) = &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
                     if *finished.lock().unwrap() {
-                        self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality::Full);
+                        self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
                     }
                 }
-                if let TileState::Unknown = &self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
-                    self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality::Full);
+                if let TileState::Unknown = &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
+                    self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
                 }
                 
-                if let TileState::Loaded(tile, quality) = &mut self.data[tile_i[2]][tile_i[1]][tile_i[0]] {
+                if let TileState::Loaded(tile, quality) = self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
                     // iterate over blocks in tile
                     let min_tile_uc = (tile_uc * tilesize).max(min_uc) - tile_uc * tilesize;
                     let max_tile_uc = (tile_uc * tilesize + tilesize).min(max_uc) - tile_uc * tilesize;
@@ -402,7 +411,7 @@ impl World for VolumeGrid16x16x16Mapped {
                                         //let pluscon = ((value as i32 - 70).max(0) * 255 / (255 - 100)).min(255) as u8;
                                         
                                         /* if (u / 128) % 2 == 0 */ {
-                                            buffer[v as usize * width + u as usize] = value;
+                                            buffer[v as usize * width + u as usize] = value;// & 0xf0;
                                         } /* else {
                                             buffer[v as usize * width + u as usize] = (value & 0xf0) + 0x08;//(tile[((off / 8) * 8) as usize] & 0xc0) + 0x20;
                                         } */
@@ -463,7 +472,7 @@ impl World for VolumeGrid4x4x4 {
             0
         }
     }
-    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]) {
+    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, sfactor: u8, buffer: &mut [u8]) {
         if plane_coord != 2 {
             return;
         }
@@ -716,7 +725,7 @@ impl World for MappedVolumeGrid {
             0
         }
     }
-    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]) {
+    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, sfactor: u8, buffer: &mut [u8]) {
 
     }
 }
@@ -724,7 +733,7 @@ impl World for MappedVolumeGrid {
 struct EmptyWorld {}
 impl World for EmptyWorld {
     fn get(&mut self, _xyz: [i32; 3]) -> u8 { 0 }
-    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, buffer: &mut [u8]) {
+    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, sfactor: u8, buffer: &mut [u8]) {
 
     }
 }
@@ -773,8 +782,8 @@ impl TemplateApp {
         } else {
             Default::default()
         };
-        app.frame_height = 750;
         app.frame_width = 750;
+        app.frame_height = 750;
 
         app.load_data(&data_dir.unwrap_or_else(|| app.data_dir.clone()));
 
@@ -843,14 +852,15 @@ impl TemplateApp {
         let mut xyz: [i32; 3] = [0, 0, 0];
         xyz[d_coord] = self.coord[d_coord];
 
-        self.world.paint(self.coord, u_coord, v_coord, d_coord, width, height, &mut pixels);
-        /* for (i, p) in pixels.iter_mut().enumerate() {
-            xyz[u_coord] = (i % width) as i32 + self.coord[u_coord] - (250 as f32 / self.zoom) as i32;
-            xyz[v_coord] = (i / width) as i32 + self.coord[v_coord] - (250 as f32 / self.zoom) as i32;
+        const ZOOM_RES_FACTOR: f32 = 2.0; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+        let min_level = (ZOOM_RES_FACTOR / self.zoom) as i32;
+        let max_level = (min_level + 2).min(3);
+        for level in (min_level..=max_level).rev() {
+            let sfactor = 1 << level;
+            //println!("level: {} factor: {}", level, sfactor);
+            self.world.paint(self.coord, u_coord, v_coord, d_coord, width, height, sfactor, &mut pixels);
+        }
 
-            *p = self.world.get(xyz);
-        } */
-        
         let image = ColorImage::from_gray([width, height], &pixels);
         //println!("Time elapsed before loading in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _start.elapsed());
         // Load the texture only once.
