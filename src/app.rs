@@ -25,7 +25,7 @@ enum TileState {
     Unknown,
     Missing,
     //Exists,
-    Loaded(memmap::Mmap, Quality),
+    Loaded(memmap::Mmap),
     Downloading(Arc<Mutex<bool>>),
 }
 
@@ -70,9 +70,9 @@ impl Downloader {
                 if count.compare_exchange(cur, cur + 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
                     queue.sort_by_key(|(_, x, y, z, q)| {
                         let f = q.downsampling_factor as i32;
-                        let dx = *x as i32 * 128 * f + 64 * f - pos.0;
-                        let dy = *y as i32 * 128 * f + 64 * f - pos.1;
-                        let dz = *z as i32 * 128 * f + 64 * f - pos.2;
+                        let dx = *x as i32 * 64 * f + 32 * f - pos.0;
+                        let dy = *y as i32 * 64 * f + 32 * f - pos.1;
+                        let dz = *z as i32 * 64 * f + 32 * f - pos.2;
                         let score = (q.downsampling_factor, -(dx*dx + dy*dy + dz*dz));
                         //println!("{} {} {} {}", x, y, z, score);
                         score
@@ -83,8 +83,8 @@ impl Downloader {
                         //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                        let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1/volume/20230205180739/download/128-16?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
-                        //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/128-16?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
+                        let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
+                        //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
                         let mut request = ehttp::Request::get(url);
                         request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
                         
@@ -97,8 +97,8 @@ impl Downloader {
                                     println!("got tile {}/{}/{}", x, y, z);
                                     let bytes = res.bytes;
                                     // save bytes to file
-                                    let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
-                                    std::fs::create_dir_all(format!("{}/z{:03}", dir, z)).unwrap();
+                                    let file_name = format!("{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
+                                    std::fs::create_dir_all(format!("{}/64-4/z{:03}", dir, z)).unwrap();
                                     std::fs::write(file_name, bytes).unwrap();
                                 } else {
                                     println!("failed to download tile {}/{}/{}: {}", x, y, z, res.status);
@@ -127,7 +127,7 @@ impl Downloader {
     }
 }
 
-struct VolumeGrid16x16x16Mapped {
+struct VolumeGrid64x4Mapped {
     data_dir: String,
     max_x: usize,
     max_y: usize,
@@ -135,15 +135,15 @@ struct VolumeGrid16x16x16Mapped {
     downloader: Downloader,
     data: HashMap<(usize, usize, usize, usize), TileState>,
 }
-impl VolumeGrid16x16x16Mapped {
+impl VolumeGrid64x4Mapped {
     fn map_for(data_dir: &str, x: usize, y: usize, z: usize, quality: Quality) -> Option<TileState> {
         use memmap::MmapOptions;
         use std::fs::File;
-        let file_name = format!("{}/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", data_dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
+        let file_name = format!("{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", data_dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
         //println!("at {}", file_name);
 
         let file = File::open(file_name).ok()?;
-        unsafe { MmapOptions::new().map(&file) }.ok().map(|x| TileState::Loaded(x, Quality::Full))
+        unsafe { MmapOptions::new().map(&file) }.ok().map(|x| TileState::Loaded(x))
     }
     fn get_tile_state(&self, x: usize, y: usize, z: usize, downsampling: u8) -> &TileState {
         let key = (x,y,z,downsampling as usize);
@@ -174,61 +174,12 @@ impl VolumeGrid16x16x16Mapped {
             }
         }
     }
-    pub fn from_data_dir(data_dir: &str, max_x: usize, max_y: usize, max_z: usize, downloader: Downloader) -> VolumeGrid16x16x16Mapped {
-        // find highest xyz values for files in data_dir named like this format: format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
-        // use regex to match file names
-        /* let mut max_x = 0;
-        let mut max_y = 0;
-        let mut max_z = 0;
-        for entry in std::fs::read_dir(data_dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            let file_name = path.file_name().unwrap().to_str().unwrap();
-            //home/johannes/git/self/_2023/vesuvius-browser/data/blocks/scroll1/20230205180739/128-16/z041/xyz-010-010-041.bin
-            if let Some(captures) = regex::Regex::new(r"xyz-(\d+)-(\d+)-(\d+).bin")
-                .unwrap()
-                .captures(file_name)
-            {
-                println!("Found file: {}", file_name);
-                let x = captures.get(1).unwrap().as_str().parse::<usize>().unwrap();
-                let y = captures.get(2).unwrap().as_str().parse::<usize>().unwrap();
-                let z = captures.get(3).unwrap().as_str().parse::<usize>().unwrap();
-                if x > max_x {
-                    max_x = x;
-                }
-                if y > max_y {
-                    max_y = y;
-                }
-                if z > max_z {
-                    max_z = z;
-                }
-            }
-        } */
+    pub fn from_data_dir(data_dir: &str, max_x: usize, max_y: usize, max_z: usize, downloader: Downloader) -> VolumeGrid64x4Mapped {
         if !std::path::Path::new(data_dir).exists() {
             panic!("Data directory {} does not exist", data_dir);
         }
-        // map_for(data_dir, x, y, z).map_or(TileState::Missing, |x| TileState::Loaded(x))
-        let data: Vec<Vec<Vec<TileState>>> = (0..=max_z)
-            .map(|z| {
-                (0..=max_y)
-                    .map(|y| (0..=max_x)
-                    .map(|x| TileState::Unknown).collect())
-                    .collect()
-            })
-            .collect();
 
-        /* // count number of slices found
-        let slices_found = data.iter().flatten().flatten().flat_map(|x| {
-            if let TileState::Loaded(_) = x {
-                Some(())
-            } else {
-                None
-            }
-        }).count();
-        println!("Found {} cells in {}", slices_found, data_dir);
-        println!("max_x: {}, max_y: {}, max_z: {}", max_x, max_y, max_z); */
-
-        VolumeGrid16x16x16Mapped {
+        VolumeGrid64x4Mapped {
             data_dir: data_dir.to_string(),
             max_x: max_x,
             max_y: max_y,
@@ -238,11 +189,11 @@ impl VolumeGrid16x16x16Mapped {
         }
     }
 }
-impl World for VolumeGrid16x16x16Mapped {
+impl World for VolumeGrid64x4Mapped {
     fn get(&mut self, xyz: [i32; 3]) -> u8 {
-        let x_tile = xyz[0] as usize >> 7;
-        let y_tile = xyz[1] as usize >> 7;
-        let z_tile = xyz[2] as usize >> 7;
+        /* let x_tile = xyz[0] as usize >> 6;
+        let y_tile = xyz[1] as usize >> 6;
+        let z_tile = xyz[2] as usize >> 6;
 
         /* if xyz[0] % 100 == 0 && xyz[1] % 100 == 0 && xyz[2] % 100 == 0 {
             println!("x: {}, y: {}, z: {} x_tile: {} y_tile: {} z_tile: {}", xyz[0], xyz[1], xyz[2], x_tile, y_tile, z_tile);
@@ -302,8 +253,9 @@ impl World for VolumeGrid16x16x16Mapped {
                 } */
 
                 0
-            }
-        }
+            } */
+        0
+    
     }
     fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, _sfactor: u8, buffer: &mut [u8]) {
         /* if plane_coord != 2 {
@@ -312,8 +264,8 @@ impl World for VolumeGrid16x16x16Mapped {
         self.downloader.position(xyz[0], xyz[1], xyz[2]);
 
         let sfactor = _sfactor as i32; //Quality::Full.downsampling_factor as i32;
-        let tilesize = 128 * sfactor;
-        let blocksize = 16 * sfactor;
+        let tilesize = 64 * sfactor;
+        let blocksize = 4 * sfactor;
 
         let min_uc = xyz[u_coord] - width as i32 / 2;
         let max_uc = xyz[u_coord] + width as i32 / 2;
@@ -358,7 +310,7 @@ impl World for VolumeGrid16x16x16Mapped {
                     self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
                 }
                 
-                if let TileState::Loaded(tile, quality) = self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
+                if let TileState::Loaded(tile) = self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
                     // iterate over blocks in tile
                     let min_tile_uc = (tile_uc * tilesize).max(min_uc) - tile_uc * tilesize;
                     let max_tile_uc = (tile_uc * tilesize + tilesize).min(max_uc) - tile_uc * tilesize;
@@ -380,7 +332,7 @@ impl World for VolumeGrid16x16x16Mapped {
                             block_i[u_coord] = block_uc as usize;
                             block_i[v_coord] = block_vc as usize;
                             block_i[plane_coord] = block_pc as usize;
-                            let boff = (block_i[2] << 6) + (block_i[1] << 3) + block_i[0];
+                            let boff = (block_i[2] << 8) + (block_i[1] << 4) + block_i[0];
                             
                             // iterate over pixels in block
                             for vc in 0..blocksize {
@@ -405,7 +357,7 @@ impl World for VolumeGrid16x16x16Mapped {
                                     //let factor = quality.downsampling_factor as usize * quality.downsampling_factor as usize * quality.downsampling_factor as usize;
 
                                     if u >= 0 && u < width as i32 && v >= 0 && v < height as i32 {
-                                        let off = boff * 4096 + offs_i[2] * 256 + offs_i[1] * 16 + offs_i[0];
+                                        let off = boff * 64 + offs_i[2] * 16 + offs_i[1] * 4 + offs_i[0];
                                         let value = tile[off as usize];
 
                                         //let pluscon = ((value as i32 - 70).max(0) * 255 / (255 - 100)).min(255) as u8;
@@ -791,7 +743,7 @@ impl TemplateApp {
     }
     fn load_data(&mut self, data_dir: &str) {
         //self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
-        self.world = Box::new(VolumeGrid16x16x16Mapped::from_data_dir(data_dir ,78, 78, 200, Downloader::new(data_dir)));
+        self.world = Box::new(VolumeGrid64x4Mapped::from_data_dir(data_dir ,78, 78, 200, Downloader::new(data_dir)));
         self.data_dir = data_dir.to_string();
     }
 
