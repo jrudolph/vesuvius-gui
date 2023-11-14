@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
+const ZOOM_RES_FACTOR: f32 = 1.1; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+
 trait World {
     fn get(&mut self, xyz: [i32; 3]) -> u8;
     fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, sfactor: u8, buffer: &mut [u8]);
@@ -90,7 +92,6 @@ impl Downloader {
                 }
 
                 if count.compare_exchange(cur, cur + 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
-                    let higher = 
                     queue.retain(|(state, x, y, z, q)| {
                         let f = q.downsampling_factor as i32;
                         let dx = *x as i32 * 64 * f + 32 * f - pos.0;
@@ -125,7 +126,8 @@ impl Downloader {
                             //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                             //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                             //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                            let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
+                            //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
+                            let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1667/volume/20231107190228/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
                             //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
                             let mut request = ehttp::Request::get(url);
                             request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
@@ -818,9 +820,10 @@ impl TemplateApp {
         if image.hovered() {
             let delta = ui.input(|i| i.scroll_delta);
             if delta.y != 0.0 {
-                let delta = delta.y.signum() * Quality::Full.downsampling_factor as f32;
+                let min_level = 1 << ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
+                let delta = delta.y.signum() * min_level as f32;
                 let m = v(self);
-                *m = (*m + delta as i32) / Quality::Full.downsampling_factor as i32 * Quality::Full.downsampling_factor as i32;
+                *m = (*m + delta as i32) / min_level as i32 * min_level as i32;
                 self.clear_textures();
             }
         }
@@ -865,7 +868,6 @@ impl TemplateApp {
         let mut xyz: [i32; 3] = [0, 0, 0];
         xyz[d_coord] = self.coord[d_coord];
 
-        const ZOOM_RES_FACTOR: f32 = 2.0; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
         let min_level = ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
         let max_level = (min_level + 2).min(4);
         for level in (min_level..=max_level).rev() {
