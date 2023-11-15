@@ -3,11 +3,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
-const ZOOM_RES_FACTOR: f32 = 1.1; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+const ZOOM_RES_FACTOR: f32 = 1.5; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
 trait World {
     fn get(&mut self, xyz: [i32; 3]) -> u8;
@@ -29,6 +29,7 @@ enum DownloadState {
     Downloading,
     Done,
     Failed,
+    Delayed,
     Pruned, // was not in view any more and therefore pruned
 }
 impl DownloadState {
@@ -39,6 +40,7 @@ impl DownloadState {
             DownloadState::Done => true,
             DownloadState::Failed => true,
             DownloadState::Pruned => true,
+            DownloadState::Delayed => true,
         }
     }
 }
@@ -49,13 +51,14 @@ enum TileState {
     //Exists,
     Loaded(memmap::Mmap),
     Downloading(Arc<Mutex<DownloadState>>),
+    TryLater(SystemTime)
 }
 
 type DownloadTask = (Arc<Mutex<DownloadState>>, usize, usize, usize, Quality);
 
 enum DownloadMessage {
     Download(DownloadTask),
-    Position(i32, i32 ,i32),
+    Position(i32, i32 ,i32, usize, usize),
 }
 
 struct Downloader {
@@ -69,21 +72,36 @@ impl Downloader {
 
         let dir = dir.to_string();
         thread::spawn(move || {
-            let larger_edge = frame_width.max(frame_height) as i32;
-
             let mut queue = Vec::new();
-            let mut pos = (0,0,0);
+            let mut pos = (0,0,0, 0 as usize, 0 as usize);
             loop {
                 while let Ok(msg) = receiver.try_recv() {
                     match msg {
                         DownloadMessage::Download(task) => {
                             queue.push(task);
                         }
-                        DownloadMessage::Position(x, y, z) => {
-                            pos = (x, y, z)
+                        DownloadMessage::Position(x, y, z, width, height) => {
+                            pos = (x, y, z, width, height)
                         }
                     }
                 }
+
+                let larger_edge = pos.3.max(pos.4) as i32;
+                queue.retain(|(state, x, y, z, q)| {
+                    let f = q.downsampling_factor as i32;
+                    let dx = *x as i32 * 64 * f + 32 * f - pos.0;
+                    let dy = *y as i32 * 64 * f + 32 * f - pos.1;
+                    let dz = *z as i32 * 64 * f + 32 * f - pos.2;
+
+                    if (dx.abs() > larger_edge / 2 && dy.abs() > larger_edge / 2) && dz.abs() > larger_edge / 2 {
+                        println!("Pruning {} {} {} {} {:?}", x, y, z, q.downsampling_factor, *state.lock().unwrap());
+                        *state.lock().unwrap() = DownloadState::Pruned;
+                        false
+                    } else  {
+                        true
+                    }
+
+                });
 
                 let cur = count.load(Ordering::Acquire);
                 if cur >= 16 || queue.is_empty() {
@@ -92,70 +110,56 @@ impl Downloader {
                 }
 
                 if count.compare_exchange(cur, cur + 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
-                    queue.retain(|(state, x, y, z, q)| {
+                    queue.sort_by_key(|(_, x, y, z, q)| {
                         let f = q.downsampling_factor as i32;
                         let dx = *x as i32 * 64 * f + 32 * f - pos.0;
                         let dy = *y as i32 * 64 * f + 32 * f - pos.1;
                         let dz = *z as i32 * 64 * f + 32 * f - pos.2;
-                        
-
-                        if (dx.abs() > larger_edge / 2 && dy.abs() > larger_edge / 2) && dz.abs() > larger_edge / 2 {
-                            println!("Pruning {} {} {} {}", x, y, z, q.downsampling_factor);
-                            *state.lock().unwrap() = DownloadState::Pruned;
-                            false
-                        } else  {
-                            true
-                        }
-
+                        let score = (q.downsampling_factor, -(dx*dx + dy*dy + dz*dz));
+                        //println!("{} {} {} {}", x, y, z, score);
+                        score
                     });
-                    if !queue.is_empty() {
-                        queue.sort_by_key(|(_, x, y, z, q)| {
-                            let f = q.downsampling_factor as i32;
-                            let dx = *x as i32 * 64 * f + 32 * f - pos.0;
-                            let dy = *y as i32 * 64 * f + 32 * f - pos.1;
-                            let dz = *z as i32 * 64 * f + 32 * f - pos.2;
-                            let score = (q.downsampling_factor, -(dx*dx + dy*dy + dz*dz));
-                            //println!("{} {} {} {}", x, y, z, score);
-                            score
-                        });
+                    
+                    let (state, x, y, z, quality) = queue.pop().unwrap();
+                    {
+                        *state.lock().unwrap() = DownloadState::Downloading;
+                        //println!("Downloading {} {} {}", x, y, z);
+                        //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                        //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                        //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
+                        let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
+                        //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1667/volume/20231107190228/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
+                        //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
+                        let mut request = ehttp::Request::get(url);
+                        request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
                         
-                        let (state, x, y, z, quality) = queue.pop().unwrap();
-                        {
-                            *state.lock().unwrap() = DownloadState::Downloading;
-                            //println!("Downloading {} {} {}", x, y, z);
-                            //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                            //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                            //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                            //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
-                            let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1667/volume/20231107190228/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
-                            //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
-                            let mut request = ehttp::Request::get(url);
-                            request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
-                            
-                            let dir = dir.clone();
-                            println!("downloading tile {}/{}/{} f: {}", x, y, z, quality.downsampling_factor);
-                            let c2 = count.clone();
-                            ehttp::fetch(request, move |response| {
-                                if let Ok(res) = response {
-                                    if res.status == 200 {
-                                        println!("got tile {}/{}/{}", x, y, z);
-                                        let bytes = res.bytes;
-                                        // save bytes to file
-                                        let file_name = format!("{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
-                                        std::fs::create_dir_all(format!("{}/64-4/z{:03}", dir, z)).unwrap();
-                                        std::fs::write(file_name, bytes).unwrap();
-                                        *state.lock().unwrap() = DownloadState::Done;
-                                    } else {
-                                        println!("failed to download tile {}/{}/{}: {}", x, y, z, res.status);
-                                        *state.lock().unwrap() = DownloadState::Failed;
-                                    }
+                        let dir = dir.clone();
+                        println!("downloading tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
+                        let c2 = count.clone();
+                        ehttp::fetch(request, move |response| {
+                            if let Ok(res) = response {
+                                if res.status == 200 {
+                                    println!("got tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
+                                    let bytes = res.bytes;
+                                    // save bytes to file
+                                    let file_name = format!("{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
+                                    std::fs::create_dir_all(format!("{}/64-4/z{:03}", dir, z)).unwrap();
+                                    std::fs::write(file_name, bytes).unwrap();
+                                    *state.lock().unwrap() = DownloadState::Done;
+                                } else if res.status == 420 {
+                                    println!("delayed tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
+                                    *state.lock().unwrap() = DownloadState::Delayed;
                                 } else {
+                                    println!("failed to download tile {}/{}/{} q{}: {}", x, y, z, quality.downsampling_factor, res.status);
                                     *state.lock().unwrap() = DownloadState::Failed;
                                 }
+                            } else {
+                                println!("failed to download tile {}/{}/{} q{}: {}", x, y, z, quality.downsampling_factor, response.err().unwrap());
+                                *state.lock().unwrap() = DownloadState::Failed;
+                            }
 
-                                c2.fetch_sub(1, Ordering::Acquire);
-                            });
-                        }
+                            c2.fetch_sub(1, Ordering::Acquire);
+                        });
                     }
                 }
             }
@@ -169,8 +173,8 @@ impl Downloader {
     fn queue(&self, task: DownloadTask) {
         self.download_queue.send(DownloadMessage::Download(task)).unwrap();
     }
-    fn position(&self, x: i32, y: i32, z: i32) {
-        self.download_queue.send(DownloadMessage::Position(x, y, z)).unwrap();
+    fn position(&self, x: i32, y: i32, z: i32, width: usize, height: usize) {
+        self.download_queue.send(DownloadMessage::Position(x, y, z, width, height)).unwrap();
     }
 }
 
@@ -189,8 +193,19 @@ impl VolumeGrid64x4Mapped {
         let file_name = format!("{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", data_dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
         //println!("at {}", file_name);
 
-        let file = File::open(file_name).ok()?;
-        unsafe { MmapOptions::new().map(&file) }.ok().map(|x| TileState::Loaded(x))
+        let file = File::open(file_name.clone()).ok()?;
+        
+        let map = unsafe { MmapOptions::new().map(&file) }.ok();
+        map
+            .filter(|m| {
+                if m.len() == 64*64*64 {
+                    true
+                } else {
+                    println!("file {} has wrong size {}", file_name, m.len());
+                    false
+                }
+            })
+            .map(|x| TileState::Loaded(x))
     }
     fn get_tile_state(&self, x: usize, y: usize, z: usize, downsampling: u8) -> &TileState {
         let key = (x,y,z,downsampling as usize);
@@ -202,39 +217,46 @@ impl VolumeGrid64x4Mapped {
             self.data.insert(key, TileState::Unknown);
         }
         let tile_state = self.data.get_mut(&key).unwrap();
-        if let TileState::Unknown = tile_state {
-            if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
-                *tile_state = state;
-            } else {
-                let finished = Arc::new(Mutex::new(DownloadState::Queuing));
-                self.downloader.queue((finished.clone(), x, y, z, quality));
-                *tile_state = TileState::Downloading(finished);
-            } 
-        } else if let TileState::Downloading(state) = tile_state {
-            match *state.clone().lock().unwrap() {
-                DownloadState::Done => {
-                    if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
-                        *tile_state = state;
-                    } else {
-                        // set to missing permanently
-                        *tile_state = TileState::Missing;
-                    }
-                }
-                DownloadState::Failed => {
-                    *tile_state = TileState::Missing;
-                },
-                _ => {
-                    *tile_state = TileState::Unknown;
-                }                
-            };
-            /* if *finished.lock().unwrap() {
+        match tile_state {
+            TileState::Unknown => {
                 if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
                     *tile_state = state;
                 } else {
-                    // set to missing permanently
-                    *tile_state = TileState::Missing;
+                    let state = Arc::new(Mutex::new(DownloadState::Queuing));
+                    self.downloader.queue((state.clone(), x, y, z, quality));
+                    *tile_state = TileState::Downloading(state);
+                } 
+            },
+            TileState::TryLater(at) => {
+                if at.elapsed().unwrap() > Duration::from_secs(10) {
+                    println!("resetting tile {}/{}/{} q{} again", x, y, z, quality.downsampling_factor);
+                    *tile_state = TileState::Unknown; // reset
+                    self.try_loading_tile(x, y, z, quality);
                 }
-            } */
+            },
+            TileState::Downloading(state) => {
+                match *state.clone().lock().unwrap() {
+                    DownloadState::Done => {
+                        if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
+                            *tile_state = state;
+                        } else {
+                            // set to missing permanently
+                            println!("failed to load tile from map {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
+                            *tile_state = TileState::Missing;
+                        }
+                    }
+                    DownloadState::Delayed => {
+                        *tile_state = TileState::TryLater(SystemTime::now());
+                    }
+                    DownloadState::Failed => {
+                        *tile_state = TileState::Missing;
+                    },
+                    _ => {
+                        *tile_state = TileState::Unknown;
+                    }                
+                };
+            },
+            _ => {}
         }
     }
     pub fn from_data_dir(data_dir: &str, max_x: usize, max_y: usize, max_z: usize, downloader: Downloader) -> VolumeGrid64x4Mapped {
@@ -324,17 +346,20 @@ impl World for VolumeGrid64x4Mapped {
         /* if plane_coord != 2 {
             return;
         } */
-        self.downloader.position(xyz[0], xyz[1], xyz[2]);
+        self.downloader.position(xyz[0], xyz[1], xyz[2], width, height);
+
+        let center_u = width as i32 / 2;
+        let center_v = height as i32 / 2;
 
         let sfactor = _sfactor as i32; //Quality::Full.downsampling_factor as i32;
         let tilesize = 64 * sfactor;
         let blocksize = 4 * sfactor;
 
-        let min_uc = xyz[u_coord] - width as i32 / 2;
+        let min_uc = (xyz[u_coord] - width as i32 / 2).max(0);
         let max_uc = xyz[u_coord] + width as i32 / 2;
-        let min_vc = xyz[v_coord] - height as i32 / 2;
+        let min_vc = (xyz[v_coord] - height as i32 / 2).max(0);
         let max_vc = xyz[v_coord] + height as i32 / 2;
-        let pc = xyz[plane_coord];
+        let pc = xyz[plane_coord].max(0);
 
         let tile_min_uc = min_uc /tilesize;
         let uc = max_uc / tilesize;
@@ -369,9 +394,20 @@ impl World for VolumeGrid64x4Mapped {
                         self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
                     }
                 }
-                if let TileState::Unknown = &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
+                if let TileState::TryLater(_) = &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
                     self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
                 }
+                if let TileState::Unknown = &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
+                    self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
+                } 
+                /* match self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
+                    TileState::Missing => {},
+                    TileState::Loaded(_) => {},
+                    _ => {
+                        self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
+                    }
+                } */
+                //self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
                 
                 if let TileState::Loaded(tile) = self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
                     // iterate over blocks in tile
@@ -421,12 +457,19 @@ impl World for VolumeGrid64x4Mapped {
 
                                     if u >= 0 && u < width as i32 && v >= 0 && v < height as i32 {
                                         let off = boff * 64 + offs_i[2] * 16 + offs_i[1] * 4 + offs_i[0];
-                                        let value = tile[off as usize];
+                                        if off > tile.len() {
+                                            panic!("off: {} tile.len(): {}", off, tile.len());
+                                        }
+                                        let mut value = tile[off as usize];
 
                                         //let pluscon = ((value as i32 - 70).max(0) * 255 / (255 - 100)).min(255) as u8;
                                         
                                         /* if (u / 128) % 2 == 0 */ {
-                                            buffer[v as usize * width + u as usize] = value;// & 0xf0;
+                                        if u == center_u || v == center_v {
+                                            value = value / 10;
+                                        }
+
+                                        buffer[v as usize * width + u as usize] = value;// & 0xf0;
                                         } /* else {
                                             buffer[v as usize * width + u as usize] = (value & 0xf0) + 0x08;//(tile[((off / 8) * 8) as usize] & 0xc0) + 0x20;
                                         } */
@@ -797,7 +840,7 @@ impl TemplateApp {
         } else {
             Default::default()
         };
-        app.frame_width = 750;
+        app.frame_width = 1000;
         app.frame_height = 750;
 
         app.load_data(&data_dir.unwrap_or_else(|| app.data_dir.clone()));
@@ -868,10 +911,10 @@ impl TemplateApp {
         let mut xyz: [i32; 3] = [0, 0, 0];
         xyz[d_coord] = self.coord[d_coord];
 
-        let min_level = ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
+        let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros()).min(4).max(0);
         let max_level = (min_level + 2).min(4);
         for level in (min_level..=max_level).rev() {
-            let sfactor = 1 << level;
+            let sfactor = 1 << level as u8;
             //println!("level: {} factor: {}", level, sfactor);
             self.world.paint(self.coord, u_coord, v_coord, d_coord, width, height, sfactor, &mut pixels);
         }
@@ -911,7 +954,7 @@ impl eframe::App for TemplateApp {
 
             let _z_sl = ui.add(egui::Slider::new(&mut self.coord[2], 0..=25000).text("z"));
             let zoom_sl = ui.add(
-                egui::Slider::new(&mut self.zoom, 0.1f32..=32f32)
+                egui::Slider::new(&mut self.zoom, 0.1f32..=6f32)
                     .text("zoom")
                     .logarithmic(true),
             );
@@ -949,14 +992,14 @@ impl eframe::App for TemplateApp {
                 ui.horizontal(|ui| {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
                     let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
-                    let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
                     self.add_scroll_handler(&im_xy, ui, |s| &mut s.coord[2]);
                     self.add_scroll_handler(&im_xz, ui, |s| &mut s.coord[1]);
-                    self.add_scroll_handler(&im_yz, ui, |s| &mut s.coord[0]);
-
                     self.add_drag_handler(&im_xy, 0, 1);
                     self.add_drag_handler(&im_xz, 0, 2);
-                    self.add_drag_handler(&im_yz, 2, 1);
+                });
+                let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
+                self.add_scroll_handler(&im_yz, ui, |s| &mut s.coord[0]);
+                self.add_drag_handler(&im_yz, 2, 1);
                     //let size2 = texture.size_vec2();
 
                     /* if im_xy.hovered() {
@@ -983,7 +1026,6 @@ impl eframe::App for TemplateApp {
                           println!("Reset because size changed from {:?} to {:?}", size2, size);
                           self.clear_textures();
                       }; */
-                });
             };
         });
     }
