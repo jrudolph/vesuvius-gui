@@ -28,8 +28,8 @@ impl VolumeGrid64x4Mapped {
         use memmap::MmapOptions;
         use std::fs::File;
         let file_name = format!(
-            "{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin",
-            data_dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor
+            "{}/64-4/d{:02}/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin",
+            data_dir, quality.downsampling_factor, z, x, y, z, quality.bit_mask, quality.downsampling_factor
         );
         //println!("at {}", file_name);
 

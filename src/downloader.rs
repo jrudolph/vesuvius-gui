@@ -131,10 +131,21 @@ impl Downloader {
                                     let bytes = res.bytes;
                                     // save bytes to file
                                     let file_name = format!(
-                                        "{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin",
-                                        dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor
+                                        "{}/64-4/d{:02}/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin",
+                                        dir,
+                                        quality.downsampling_factor,
+                                        z,
+                                        x,
+                                        y,
+                                        z,
+                                        quality.bit_mask,
+                                        quality.downsampling_factor
                                     );
-                                    std::fs::create_dir_all(format!("{}/64-4/z{:03}", dir, z)).unwrap();
+                                    std::fs::create_dir_all(format!(
+                                        "{}/64-4/d{:02}/z{:03}",
+                                        dir, quality.downsampling_factor, z
+                                    ))
+                                    .unwrap();
                                     std::fs::write(file_name, bytes).unwrap();
                                     *state.lock().unwrap() = DownloadState::Done;
                                 } else if res.status == 420 {
