@@ -118,7 +118,7 @@ impl Downloader {
                         let mut request = ehttp::Request::get(url);
                         request.headers.insert(
                             "Authorization".to_string(),
-                            "Basic blip".to_string(),
+                            "Basic cmVnaXN0ZXJlZHVzZXJzOm9ubHk=".to_string(),
                         );
 
                         let dir = dir.clone();

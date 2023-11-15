@@ -1,6 +1,7 @@
 use crate::downloader::*;
 use crate::volume::*;
 
+use egui::Vec2;
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
 const ZOOM_RES_FACTOR: f32 = 1.5; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
@@ -21,6 +22,8 @@ pub struct TemplateApp {
     texture_yz: Option<egui::TextureHandle>,
     #[serde(skip)]
     world: Box<dyn PaintVolume>,
+    #[serde(skip)]
+    last_size: Vec2,
 }
 
 impl Default for TemplateApp {
@@ -35,6 +38,7 @@ impl Default for TemplateApp {
             texture_xz: None,
             texture_yz: None,
             world: Box::new(EmptyVolume {}),
+            last_size: Vec2::ZERO,
         }
     }
 }
@@ -165,6 +169,12 @@ impl eframe::App for TemplateApp {
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            let new_size = ui.available_size();
+            if new_size != self.last_size {
+                self.last_size = new_size;
+                self.clear_textures();
+            }
+
             let x_sl = ui.add(
                 egui::Slider::new(
                     &mut self.coord[0],
@@ -200,10 +210,13 @@ impl eframe::App for TemplateApp {
             let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
 
             // use remaining space for image
-            //let size =ui.available_size();
+            let size = ui.available_size();
             {
-                //self.frame_width = size.x as usize;
-                //self.frame_height = size.y as usize;
+                let new_width = size.x as usize / 2 - 10;
+                let new_height = size.y as usize / 2 - 10;
+
+                self.frame_width = new_width;
+                self.frame_height = new_height;
 
                 let image = Image::new(texture_xy)
                     .max_height(self.frame_height as f32)
