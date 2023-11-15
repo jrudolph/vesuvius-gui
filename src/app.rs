@@ -1,15 +1,5 @@
 use crate::downloader::*;
-use crate::model::*;
 use crate::volume::*;
-use crate::volumes::empty::EmptyWorld;
-use crate::volumes::volume64x4::*;
-
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
@@ -44,7 +34,7 @@ impl Default for TemplateApp {
             texture_xy: None,
             texture_xz: None,
             texture_yz: None,
-            world: Box::new(EmptyWorld {}),
+            world: Box::new(EmptyVolume {}),
         }
     }
 }
@@ -219,32 +209,6 @@ impl eframe::App for TemplateApp {
                 let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
                 self.add_scroll_handler(&im_yz, ui, |s| &mut s.coord[0]);
                 self.add_drag_handler(&im_yz, 2, 1);
-                    //let size2 = texture.size_vec2();
-
-                    /* if im_xy.hovered() {
-                        let delta = ui.input(|i| i.scroll_delta);
-                        if delta.y != 0.0 {
-                            let delta = delta.y.signum() * 1.0;
-                            self.z() = (self.z() as i32 + delta as i32).max(0).min(15000) as usize;
-                            self.clear_textures();
-                        }
-                    } */
-
-                    /* if im_xy.dragged_by(PointerButton::Primary) {
-                        let im2 = im_xy.on_hover_cursor(CursorIcon::Grabbing);
-                        let delta = -im2.drag_delta() / self.zoom;
-                        //println!("delta: {:?} orig delta: {:?}", delta, im2.drag_delta());
-                        //let oldx = self.x();
-                        //let oldy = self.y();
-
-                        self.coord[0] += delta.x as i32;
-                        self.coord[1] += delta.y as i32;
-                        //println!("oldx: {}, oldy: {}, x: {}, y: {}", oldx, oldy, self.x(), self.y());
-                        self.clear_textures();
-                    } */ /* else if size2.x as usize != self.frame_width || size2.y as usize != self.frame_height {
-                          println!("Reset because size changed from {:?} to {:?}", size2, size);
-                          self.clear_textures();
-                      }; */
             };
         });
     }

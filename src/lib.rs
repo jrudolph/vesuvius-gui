@@ -4,5 +4,4 @@ mod app;
 mod downloader;
 mod model;
 mod volume;
-mod volumes;
 pub use app::TemplateApp;

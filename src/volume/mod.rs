@@ -1,3 +1,9 @@
+mod volume64x4;
+mod empty;
+
+pub use volume64x4::VolumeGrid64x4Mapped;
+pub use empty::EmptyVolume;
+
 pub trait VoxelVolume {
     fn get(&mut self, xyz: [i32; 3]) -> u8;
 }
