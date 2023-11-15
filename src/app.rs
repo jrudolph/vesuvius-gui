@@ -58,7 +58,13 @@ impl TemplateApp {
     }
     fn load_data(&mut self, data_dir: &str) {
         //self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
-        self.world = Box::new(VolumeGrid64x4Mapped::from_data_dir(data_dir ,78, 78, 200, Downloader::new(data_dir, self.frame_width, self.frame_height)));
+        self.world = Box::new(VolumeGrid64x4Mapped::from_data_dir(
+            data_dir,
+            78,
+            78,
+            200,
+            Downloader::new(data_dir, self.frame_width, self.frame_height),
+        ));
         self.data_dir = data_dir.to_string();
     }
 
@@ -120,12 +126,23 @@ impl TemplateApp {
         let mut xyz: [i32; 3] = [0, 0, 0];
         xyz[d_coord] = self.coord[d_coord];
 
-        let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros()).min(4).max(0);
+        let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
+            .min(4)
+            .max(0);
         let max_level = (min_level + 2).min(4);
         for level in (min_level..=max_level).rev() {
             let sfactor = 1 << level as u8;
             //println!("level: {} factor: {}", level, sfactor);
-            self.world.paint(self.coord, u_coord, v_coord, d_coord, width, height, sfactor, &mut pixels);
+            self.world.paint(
+                self.coord,
+                u_coord,
+                v_coord,
+                d_coord,
+                width,
+                height,
+                sfactor,
+                &mut pixels,
+            );
         }
 
         let image = ColorImage::from_gray([width, height], &pixels);
@@ -141,7 +158,9 @@ impl TemplateApp {
 
 impl eframe::App for TemplateApp {
     /// Called by the frame work to save state before shutdown.
-    fn save(&mut self, storage: &mut dyn eframe::Storage) { eframe::set_value(storage, eframe::APP_KEY, self); }
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, eframe::APP_KEY, self);
+    }
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -171,7 +190,10 @@ impl eframe::App for TemplateApp {
                 self.clear_textures();
             }
 
-            ui.label(format!("FPS: {}", 1.0 / (_frame.info().cpu_usage.unwrap_or_default() + 1e-6)));
+            ui.label(format!(
+                "FPS: {}",
+                1.0 / (_frame.info().cpu_usage.unwrap_or_default() + 1e-6)
+            ));
 
             let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, |s| &mut s.texture_xy);
             let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);

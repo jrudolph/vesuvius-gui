@@ -1,4 +1,12 @@
-use std::{sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}, mpsc::Sender}, thread, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc::Sender,
+        Arc, Mutex,
+    },
+    thread,
+    time::Duration,
+};
 
 use crate::model::Quality;
 
@@ -28,7 +36,7 @@ type DownloadTask = (Arc<Mutex<DownloadState>>, usize, usize, usize, Quality);
 
 enum DownloadMessage {
     Download(DownloadTask),
-    Position(i32, i32 ,i32, usize, usize),
+    Position(i32, i32, i32, usize, usize),
 }
 
 pub struct Downloader {
@@ -43,16 +51,14 @@ impl Downloader {
         let dir = dir.to_string();
         thread::spawn(move || {
             let mut queue = Vec::new();
-            let mut pos = (0,0,0, 0 as usize, 0 as usize);
+            let mut pos = (0, 0, 0, 0 as usize, 0 as usize);
             loop {
                 while let Ok(msg) = receiver.try_recv() {
                     match msg {
                         DownloadMessage::Download(task) => {
                             queue.push(task);
                         }
-                        DownloadMessage::Position(x, y, z, width, height) => {
-                            pos = (x, y, z, width, height)
-                        }
+                        DownloadMessage::Position(x, y, z, width, height) => pos = (x, y, z, width, height),
                     }
                 }
 
@@ -64,13 +70,19 @@ impl Downloader {
                     let dz = *z as i32 * 64 * f + 32 * f - pos.2;
 
                     if (dx.abs() > larger_edge / 2 && dy.abs() > larger_edge / 2) && dz.abs() > larger_edge / 2 {
-                        println!("Pruning {} {} {} {} {:?}", x, y, z, q.downsampling_factor, *state.lock().unwrap());
+                        println!(
+                            "Pruning {} {} {} {} {:?}",
+                            x,
+                            y,
+                            z,
+                            q.downsampling_factor,
+                            *state.lock().unwrap()
+                        );
                         *state.lock().unwrap() = DownloadState::Pruned;
                         false
-                    } else  {
+                    } else {
                         true
                     }
-
                 });
 
                 let cur = count.load(Ordering::Acquire);
@@ -79,17 +91,20 @@ impl Downloader {
                     continue;
                 }
 
-                if count.compare_exchange(cur, cur + 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
+                if count
+                    .compare_exchange(cur, cur + 1, Ordering::Acquire, Ordering::Acquire)
+                    .is_ok()
+                {
                     queue.sort_by_key(|(_, x, y, z, q)| {
                         let f = q.downsampling_factor as i32;
                         let dx = *x as i32 * 64 * f + 32 * f - pos.0;
                         let dy = *y as i32 * 64 * f + 32 * f - pos.1;
                         let dz = *z as i32 * 64 * f + 32 * f - pos.2;
-                        let score = (q.downsampling_factor, -(dx*dx + dy*dy + dz*dz));
+                        let score = (q.downsampling_factor, -(dx * dx + dy * dy + dz * dz));
                         //println!("{} {} {} {}", x, y, z, score);
                         score
                     });
-                    
+
                     let (state, x, y, z, quality) = queue.pop().unwrap();
                     {
                         *state.lock().unwrap() = DownloadState::Downloading;
@@ -101,8 +116,11 @@ impl Downloader {
                         //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1667/volume/20231107190228/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
                         //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
                         let mut request = ehttp::Request::get(url);
-                        request.headers.insert("Authorization".to_string(), "Basic blip".to_string());
-                        
+                        request.headers.insert(
+                            "Authorization".to_string(),
+                            "Basic blip".to_string(),
+                        );
+
                         let dir = dir.clone();
                         println!("downloading tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
                         let c2 = count.clone();
@@ -112,7 +130,10 @@ impl Downloader {
                                     println!("got tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
                                     let bytes = res.bytes;
                                     // save bytes to file
-                                    let file_name = format!("{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
+                                    let file_name = format!(
+                                        "{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin",
+                                        dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor
+                                    );
                                     std::fs::create_dir_all(format!("{}/64-4/z{:03}", dir, z)).unwrap();
                                     std::fs::write(file_name, bytes).unwrap();
                                     *state.lock().unwrap() = DownloadState::Done;
@@ -120,11 +141,21 @@ impl Downloader {
                                     println!("delayed tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
                                     *state.lock().unwrap() = DownloadState::Delayed;
                                 } else {
-                                    println!("failed to download tile {}/{}/{} q{}: {}", x, y, z, quality.downsampling_factor, res.status);
+                                    println!(
+                                        "failed to download tile {}/{}/{} q{}: {}",
+                                        x, y, z, quality.downsampling_factor, res.status
+                                    );
                                     *state.lock().unwrap() = DownloadState::Failed;
                                 }
                             } else {
-                                println!("failed to download tile {}/{}/{} q{}: {}", x, y, z, quality.downsampling_factor, response.err().unwrap());
+                                println!(
+                                    "failed to download tile {}/{}/{} q{}: {}",
+                                    x,
+                                    y,
+                                    z,
+                                    quality.downsampling_factor,
+                                    response.err().unwrap()
+                                );
                                 *state.lock().unwrap() = DownloadState::Failed;
                             }
 
@@ -134,16 +165,16 @@ impl Downloader {
                 }
             }
         });
-        
-        Downloader {
-            download_queue: sender
-        }
+
+        Downloader { download_queue: sender }
     }
 
     pub fn queue(&self, task: DownloadTask) {
         self.download_queue.send(DownloadMessage::Download(task)).unwrap();
     }
     pub fn position(&self, x: i32, y: i32, z: i32, width: usize, height: usize) {
-        self.download_queue.send(DownloadMessage::Position(x, y, z, width, height)).unwrap();
+        self.download_queue
+            .send(DownloadMessage::Position(x, y, z, width, height))
+            .unwrap();
     }
 }

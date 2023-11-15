@@ -12,7 +12,7 @@ enum TileState {
     //Exists,
     Loaded(memmap::Mmap),
     Downloading(Arc<Mutex<DownloadState>>),
-    TryLater(SystemTime)
+    TryLater(SystemTime),
 }
 
 pub struct VolumeGrid64x4Mapped {
@@ -27,29 +27,31 @@ impl VolumeGrid64x4Mapped {
     fn map_for(data_dir: &str, x: usize, y: usize, z: usize, quality: Quality) -> Option<TileState> {
         use memmap::MmapOptions;
         use std::fs::File;
-        let file_name = format!("{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin", data_dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor);
+        let file_name = format!(
+            "{}/64-4/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin",
+            data_dir, z, x, y, z, quality.bit_mask, quality.downsampling_factor
+        );
         //println!("at {}", file_name);
 
         let file = File::open(file_name.clone()).ok()?;
-        
+
         let map = unsafe { MmapOptions::new().map(&file) }.ok();
-        map
-            .filter(|m| {
-                if m.len() == 64*64*64 {
-                    true
-                } else {
-                    println!("file {} has wrong size {}", file_name, m.len());
-                    false
-                }
-            })
-            .map(|x| TileState::Loaded(x))
+        map.filter(|m| {
+            if m.len() == 64 * 64 * 64 {
+                true
+            } else {
+                println!("file {} has wrong size {}", file_name, m.len());
+                false
+            }
+        })
+        .map(|x| TileState::Loaded(x))
     }
     fn get_tile_state(&self, x: usize, y: usize, z: usize, downsampling: u8) -> &TileState {
-        let key = (x,y,z,downsampling as usize);
+        let key = (x, y, z, downsampling as usize);
         self.data.get(&key).unwrap_or(&TileState::Unknown)
     }
     fn try_loading_tile(&mut self, x: usize, y: usize, z: usize, quality: Quality) {
-        let key = (x,y,z,quality.downsampling_factor as usize);
+        let key = (x, y, z, quality.downsampling_factor as usize);
         if !self.data.contains_key(&key) {
             self.data.insert(key, TileState::Unknown);
         }
@@ -62,15 +64,18 @@ impl VolumeGrid64x4Mapped {
                     let state = Arc::new(Mutex::new(DownloadState::Queuing));
                     self.downloader.queue((state.clone(), x, y, z, quality));
                     *tile_state = TileState::Downloading(state);
-                } 
-            },
+                }
+            }
             TileState::TryLater(at) => {
                 if at.elapsed().unwrap() > Duration::from_secs(10) {
-                    println!("resetting tile {}/{}/{} q{} again", x, y, z, quality.downsampling_factor);
+                    println!(
+                        "resetting tile {}/{}/{} q{} again",
+                        x, y, z, quality.downsampling_factor
+                    );
                     *tile_state = TileState::Unknown; // reset
                     self.try_loading_tile(x, y, z, quality);
                 }
-            },
+            }
             TileState::Downloading(state) => {
                 match *state.clone().lock().unwrap() {
                     DownloadState::Done => {
@@ -78,7 +83,10 @@ impl VolumeGrid64x4Mapped {
                             *tile_state = state;
                         } else {
                             // set to missing permanently
-                            println!("failed to load tile from map {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
+                            println!(
+                                "failed to load tile from map {}/{}/{} q{}",
+                                x, y, z, quality.downsampling_factor
+                            );
                             *tile_state = TileState::Missing;
                         }
                     }
@@ -87,16 +95,22 @@ impl VolumeGrid64x4Mapped {
                     }
                     DownloadState::Failed => {
                         *tile_state = TileState::Missing;
-                    },
+                    }
                     _ => {
                         *tile_state = TileState::Unknown;
-                    }                
+                    }
                 };
-            },
+            }
             _ => {}
         }
     }
-    pub fn from_data_dir(data_dir: &str, max_x: usize, max_y: usize, max_z: usize, downloader: Downloader) -> VolumeGrid64x4Mapped {
+    pub fn from_data_dir(
+        data_dir: &str,
+        max_x: usize,
+        max_y: usize,
+        max_z: usize,
+        downloader: Downloader,
+    ) -> VolumeGrid64x4Mapped {
         if !std::path::Path::new(data_dir).exists() {
             panic!("Data directory {} does not exist", data_dir);
         }
@@ -112,7 +126,17 @@ impl VolumeGrid64x4Mapped {
     }
 }
 impl PaintVolume for VolumeGrid64x4Mapped {
-    fn paint(&mut self, xyz: [i32; 3], u_coord: usize, v_coord: usize, plane_coord: usize, width: usize, height: usize, _sfactor: u8, buffer: &mut [u8]) {
+    fn paint(
+        &mut self,
+        xyz: [i32; 3],
+        u_coord: usize,
+        v_coord: usize,
+        plane_coord: usize,
+        width: usize,
+        height: usize,
+        _sfactor: u8,
+        buffer: &mut [u8],
+    ) {
         /* if plane_coord != 2 {
             return;
         } */
@@ -131,7 +155,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         let max_vc = xyz[v_coord] + height as i32 / 2;
         let pc = xyz[plane_coord].max(0);
 
-        let tile_min_uc = min_uc /tilesize;
+        let tile_min_uc = min_uc / tilesize;
         let uc = max_uc / tilesize;
 
         let tile_min_vc = min_vc / tilesize;
@@ -159,17 +183,43 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                 }
 
                 //println!("tile_x: {} tile_y: {}", tile_x, tile_y);
-                if let TileState::Downloading(finished) = &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
+                if let TileState::Downloading(finished) =
+                    &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8)
+                {
                     if finished.lock().unwrap().needs_reload() {
-                        self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
+                        self.try_loading_tile(
+                            tile_i[0],
+                            tile_i[1],
+                            tile_i[2],
+                            Quality {
+                                bit_mask: 0xff,
+                                downsampling_factor: sfactor as u8,
+                            },
+                        );
                     }
                 }
                 if let TileState::TryLater(_) = &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
-                    self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
+                    self.try_loading_tile(
+                        tile_i[0],
+                        tile_i[1],
+                        tile_i[2],
+                        Quality {
+                            bit_mask: 0xff,
+                            downsampling_factor: sfactor as u8,
+                        },
+                    );
                 }
                 if let TileState::Unknown = &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
-                    self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
-                } 
+                    self.try_loading_tile(
+                        tile_i[0],
+                        tile_i[1],
+                        tile_i[2],
+                        Quality {
+                            bit_mask: 0xff,
+                            downsampling_factor: sfactor as u8,
+                        },
+                    );
+                }
                 /* match self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
                     TileState::Missing => {},
                     TileState::Loaded(_) => {},
@@ -178,7 +228,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                     }
                 } */
                 //self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
-                
+
                 if let TileState::Loaded(tile) = self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
                     // iterate over blocks in tile
                     let min_tile_uc = (tile_uc * tilesize).max(min_uc) - tile_uc * tilesize;
@@ -186,7 +236,6 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                     let min_tile_vc = (tile_vc * tilesize).max(min_vc) - tile_vc * tilesize;
                     let max_tile_vc = (tile_vc * tilesize + tilesize).min(max_vc) - tile_vc * tilesize;
 
-                    
                     let min_block_uc = min_tile_uc / blocksize;
                     let max_block_uc = (max_tile_uc + blocksize - 1) / blocksize;
                     let min_block_vc = min_tile_vc / blocksize;
@@ -202,7 +251,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                             block_i[v_coord] = block_vc as usize;
                             block_i[plane_coord] = block_pc as usize;
                             let boff = (block_i[2] << 8) + (block_i[1] << 4) + block_i[0];
-                            
+
                             // iterate over pixels in block
                             for vc in 0..blocksize {
                                 for uc in 0..blocksize {
@@ -233,16 +282,18 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                                         let mut value = tile[off as usize];
 
                                         //let pluscon = ((value as i32 - 70).max(0) * 255 / (255 - 100)).min(255) as u8;
-                                        
-                                        /* if (u / 128) % 2 == 0 */ {
-                                        if u == center_u || v == center_v {
-                                            value = value / 10;
-                                        }
 
-                                        buffer[v as usize * width + u as usize] = value;// & 0xf0;
+                                        /* if (u / 128) % 2 == 0 */
+                                        {
+                                            if u == center_u || v == center_v {
+                                                value = value / 10;
+                                            }
+
+                                            buffer[v as usize * width + u as usize] = value;
+                                            // & 0xf0;
                                         } /* else {
-                                            buffer[v as usize * width + u as usize] = (value & 0xf0) + 0x08;//(tile[((off / 8) * 8) as usize] & 0xc0) + 0x20;
-                                        } */
+                                              buffer[v as usize * width + u as usize] = (value & 0xf0) + 0x08;//(tile[((off / 8) * 8) as usize] & 0xc0) + 0x20;
+                                          } */
                                     }
                                 }
                             }
