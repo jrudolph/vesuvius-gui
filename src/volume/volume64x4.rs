@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+#[derive(Debug)]
 enum TileState {
     Unknown,
     Missing,
-    //Exists,
     Loaded(memmap::Mmap),
     Downloading(Arc<Mutex<DownloadState>>),
     TryLater(SystemTime),
@@ -50,7 +50,7 @@ impl VolumeGrid64x4Mapped {
         let key = (x, y, z, downsampling as usize);
         self.data.get(&key).unwrap_or(&TileState::Unknown)
     }
-    fn try_loading_tile(&mut self, x: usize, y: usize, z: usize, quality: Quality) {
+    fn try_loading_tile(&mut self, x: usize, y: usize, z: usize, quality: Quality) -> &TileState {
         let key = (x, y, z, quality.downsampling_factor as usize);
         if !self.data.contains_key(&key) {
             self.data.insert(key, TileState::Unknown);
@@ -96,13 +96,16 @@ impl VolumeGrid64x4Mapped {
                     DownloadState::Failed => {
                         *tile_state = TileState::Missing;
                     }
-                    _ => {
+                    DownloadState::Pruned => {
                         *tile_state = TileState::Unknown;
                     }
+                    DownloadState::Queuing => {}
+                    DownloadState::Downloading => {}
                 };
             }
             _ => {}
         }
+        self.data.get(&key).unwrap()
     }
     pub fn from_data_dir(
         data_dir: &str,
@@ -182,54 +185,17 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                     continue;
                 }
 
-                //println!("tile_x: {} tile_y: {}", tile_x, tile_y);
-                if let TileState::Downloading(finished) =
-                    &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8)
-                {
-                    if finished.lock().unwrap().needs_reload() {
-                        self.try_loading_tile(
-                            tile_i[0],
-                            tile_i[1],
-                            tile_i[2],
-                            Quality {
-                                bit_mask: 0xff,
-                                downsampling_factor: sfactor as u8,
-                            },
-                        );
-                    }
-                }
-                if let TileState::TryLater(_) = &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
-                    self.try_loading_tile(
-                        tile_i[0],
-                        tile_i[1],
-                        tile_i[2],
-                        Quality {
-                            bit_mask: 0xff,
-                            downsampling_factor: sfactor as u8,
-                        },
-                    );
-                }
-                if let TileState::Unknown = &self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
-                    self.try_loading_tile(
-                        tile_i[0],
-                        tile_i[1],
-                        tile_i[2],
-                        Quality {
-                            bit_mask: 0xff,
-                            downsampling_factor: sfactor as u8,
-                        },
-                    );
-                }
-                /* match self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
-                    TileState::Missing => {},
-                    TileState::Loaded(_) => {},
-                    _ => {
-                        self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
-                    }
-                } */
-                //self.try_loading_tile(tile_i[0], tile_i[1], tile_i[2], Quality { bit_mask: 0xff, downsampling_factor: sfactor as u8 });
+                let state = self.try_loading_tile(
+                    tile_i[0],
+                    tile_i[1],
+                    tile_i[2],
+                    Quality {
+                        bit_mask: 0xff,
+                        downsampling_factor: sfactor as u8,
+                    },
+                );
 
-                if let TileState::Loaded(tile) = self.get_tile_state(tile_i[0], tile_i[1], tile_i[2], sfactor as u8) {
+                if let TileState::Loaded(tile) = state {
                     // iterate over blocks in tile
                     let min_tile_uc = (tile_uc * tilesize).max(min_uc) - tile_uc * tilesize;
                     let max_tile_uc = (tile_uc * tilesize + tilesize).min(max_uc) - tile_uc * tilesize;
