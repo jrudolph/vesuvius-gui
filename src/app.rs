@@ -1,4 +1,5 @@
 use crate::downloader::*;
+use crate::model::*;
 use crate::volume::*;
 
 use egui::Vec2;
@@ -9,6 +10,7 @@ const ZOOM_RES_FACTOR: f32 = 1.5; // defines which resolution is used for which 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TemplateApp {
+    volume_id: usize,
     coord: [i32; 3],
     zoom: f32,
     frame_width: usize,
@@ -29,6 +31,7 @@ pub struct TemplateApp {
 impl Default for TemplateApp {
     fn default() -> Self {
         Self {
+            volume_id: 0,
             coord: [2800, 2500, 10852],
             zoom: 1f32,
             frame_width: 1000,
@@ -44,6 +47,8 @@ impl Default for TemplateApp {
 }
 
 impl TemplateApp {
+    const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
+
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>, data_dir: Option<String>) -> Self {
         // This is also where you can customize the look and feel of egui using
@@ -56,18 +61,38 @@ impl TemplateApp {
         app.frame_width = 1000;
         app.frame_height = 750;
 
-        app.load_data(&data_dir.unwrap_or_else(|| app.data_dir.clone()));
+        app.load_data(
+            &VolumeReference::VOLUMES[app.volume_id],
+            &data_dir.unwrap_or_else(|| app.data_dir.clone()),
+        );
 
         app
     }
-    fn load_data(&mut self, data_dir: &str) {
-        //self.world = Box::new(MappedVolumeGrid::from_data_dir(data_dir).to_volume_grid());
+    fn load_data_password(data_dir: &str) -> Option<String> {
+        // load data password from <data_dir>/password.txt
+        let mut password = String::new();
+        let mut password_file = std::fs::File::open(format!("{}/password.txt", data_dir)).ok()?;
+        std::io::Read::read_to_string(&mut password_file, &mut password).ok()?;
+        password = password.trim().to_string();
+        Some(password)
+    }
+    fn load_data(&mut self, volume: &'static VolumeReference, data_dir: &str) {
+        let password = TemplateApp::load_data_password(data_dir);
+
+        if !password.is_some() {
+            println!(
+                "No password.txt found in data directory {}, attempting access with no password",
+                data_dir
+            );
+        }
+
+        let volume_dir = volume.sub_dir(data_dir);
         self.world = Box::new(VolumeGrid64x4Mapped::from_data_dir(
-            data_dir,
+            &volume_dir,
             78,
             78,
             200,
-            Downloader::new(data_dir, self.frame_width, self.frame_height),
+            Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password),
         ));
         self.data_dir = data_dir.to_string();
     }

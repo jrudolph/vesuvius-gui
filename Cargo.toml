@@ -19,6 +19,7 @@ ehttp = "0.3.1"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 regex = "1.10.2"
+ base64 = "0.21.5"
 
 
 # native:

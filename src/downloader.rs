@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use crate::model::Quality;
+use crate::model::*;
 
 #[derive(Copy, Clone, Debug)]
 pub enum DownloadState {
@@ -43,11 +43,17 @@ pub struct Downloader {
     download_queue: Sender<DownloadMessage>,
 }
 impl Downloader {
-    pub fn new(dir: &str, frame_width: usize, frame_height: usize) -> Downloader {
+    pub fn new(
+        dir: &str,
+        tile_server_base: &'static str,
+        volume: &'static VolumeReference,
+        authorization: Option<String>,
+    ) -> Downloader {
         let (sender, receiver) = std::sync::mpsc::channel::<DownloadMessage>();
 
         let count = Arc::new(AtomicUsize::new(0));
 
+        std::fs::create_dir_all(dir.to_string()).unwrap();
         let dir = dir.to_string();
         thread::spawn(move || {
             let mut queue = Vec::new();
@@ -112,14 +118,26 @@ impl Downloader {
                         //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
-                        let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
+                        let url = format!(
+                            "{}/tiles/scroll/{}/volume/{}/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}",
+                            tile_server_base,
+                            volume.scroll_id,
+                            volume.volume,
+                            x,
+                            y,
+                            z,
+                            quality.bit_mask,
+                            quality.downsampling_factor
+                        );
                         //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1667/volume/20231107190228/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
                         //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
                         let mut request = ehttp::Request::get(url);
-                        request.headers.insert(
-                            "Authorization".to_string(),
-                            "Basic cmVnaXN0ZXJlZHVzZXJzOm9ubHk=".to_string(),
-                        );
+                        if let Some(authorization) = authorization.clone() {
+                            request.headers.insert(
+                                "Authorization".to_string(),
+                                format!("Basic {}", base64::encode(authorization)),
+                            );
+                        }
 
                         let dir = dir.clone();
                         println!("downloading tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
