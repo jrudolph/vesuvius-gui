@@ -1,3 +1,5 @@
+use std::ops::Index;
+
 use crate::downloader::*;
 use crate::model::*;
 use crate::volume::*;
@@ -5,7 +7,7 @@ use crate::volume::*;
 use egui::Vec2;
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
-const ZOOM_RES_FACTOR: f32 = 1.5; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -60,11 +62,11 @@ impl TemplateApp {
         };
         app.frame_width = 1000;
         app.frame_height = 750;
+        if let Some(dir) = data_dir {
+            app.data_dir = dir;
+        }
 
-        app.load_data(
-            &VolumeReference::VOLUMES[app.volume_id],
-            &data_dir.unwrap_or_else(|| app.data_dir.clone()),
-        );
+        app.select_volume(app.volume_id);
 
         app
     }
@@ -80,7 +82,7 @@ impl TemplateApp {
         let password = TemplateApp::load_data_password(data_dir);
 
         if !password.is_some() {
-            println!(
+            panic!(
                 "No password.txt found in data directory {}, attempting access with no password",
                 data_dir
             );
@@ -89,12 +91,16 @@ impl TemplateApp {
         let volume_dir = volume.sub_dir(data_dir);
         self.world = Box::new(VolumeGrid64x4Mapped::from_data_dir(
             &volume_dir,
-            78,
-            78,
-            200,
             Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password),
         ));
         self.data_dir = data_dir.to_string();
+    }
+
+    fn select_volume(&mut self, id: usize) {
+        self.load_data(&VolumeReference::VOLUMES[id], &self.data_dir.to_string());
+    }
+    fn selected_volume(&self) -> &'static VolumeReference {
+        &VolumeReference::VOLUMES[self.volume_id]
     }
 
     pub fn clear_textures(&mut self) {
@@ -159,6 +165,8 @@ impl TemplateApp {
             .min(4)
             .max(0);
         let max_level = (min_level + 2).min(4);
+        /* let min_level = 0;
+        let max_level = 0; */
         for level in (min_level..=max_level).rev() {
             let sfactor = 1 << level as u8;
             //println!("level: {} factor: {}", level, sfactor);
@@ -199,6 +207,20 @@ impl eframe::App for TemplateApp {
                 self.last_size = new_size;
                 self.clear_textures();
             }
+
+            let combo = egui::ComboBox::from_label("Volume")
+                .selected_text(self.selected_volume().label())
+                .show_ui(ui, |ui| {
+                    // iterate over indices and values of VolumeReference::VOLUMES
+                    for (id, volume) in VolumeReference::VOLUMES.iter().enumerate() {
+                        let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
+                        if res.changed() {
+                            println!("Selected volume: {}", self.volume_id);
+                            self.clear_textures();
+                            self.select_volume(self.volume_id);
+                        }
+                    }
+                });
 
             let x_sl = ui.add(
                 egui::Slider::new(

@@ -17,9 +17,6 @@ enum TileState {
 
 pub struct VolumeGrid64x4Mapped {
     data_dir: String,
-    max_x: usize,
-    max_y: usize,
-    max_z: usize,
     downloader: Downloader,
     data: HashMap<(usize, usize, usize, usize), TileState>,
 }
@@ -58,6 +55,7 @@ impl VolumeGrid64x4Mapped {
         let tile_state = self.data.get_mut(&key).unwrap();
         match tile_state {
             TileState::Unknown => {
+                println!("trying to load tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
                 if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
                     *tile_state = state;
                 } else {
@@ -107,22 +105,13 @@ impl VolumeGrid64x4Mapped {
         }
         self.data.get(&key).unwrap()
     }
-    pub fn from_data_dir(
-        data_dir: &str,
-        max_x: usize,
-        max_y: usize,
-        max_z: usize,
-        downloader: Downloader,
-    ) -> VolumeGrid64x4Mapped {
+    pub fn from_data_dir(data_dir: &str, downloader: Downloader) -> VolumeGrid64x4Mapped {
         if !std::path::Path::new(data_dir).exists() {
             panic!("Data directory {} does not exist", data_dir);
         }
 
         VolumeGrid64x4Mapped {
             data_dir: data_dir.to_string(),
-            max_x: max_x,
-            max_y: max_y,
-            max_z: max_z,
             downloader,
             data: HashMap::new(),
         }
@@ -169,21 +158,12 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         let block_pc = tile_pc_off / blocksize;
         let block_pc_off = tile_pc_off % blocksize;
 
-        //println!("x: {} y: {} z: {}", xyz[0], xyz[1], xyz[2]);
-        //println!("min_x: {} max_x: {} min_y: {} max_y: {} z: {}", min_x, max_x, min_y, max_y, z);
-        //println!("tile_min_x: {} tile_max_x: {} tile_min_y: {} tile_max_y: {} tile_z: {} block_z: {} block_z_off: {}", tile_min_x, tile_max_x, tile_min_y, tile_max_y, tile_z, block_z, block_z_off);
-
-        // iterate over all tiles
         for tile_uc in tile_min_uc..=uc {
             for tile_vc in tile_min_vc..=tile_max_vc {
                 let mut tile_i = [0; 3];
                 tile_i[u_coord] = tile_uc as usize;
                 tile_i[v_coord] = tile_vc as usize;
                 tile_i[plane_coord] = tile_pc as usize;
-
-                if tile_i[0] >= self.max_x || tile_i[1] >= self.max_y || tile_i[2] >= self.max_z {
-                    continue;
-                }
 
                 let state = self.try_loading_tile(
                     tile_i[0],

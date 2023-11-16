@@ -131,7 +131,7 @@ impl Downloader {
                         );
                         //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1667/volume/20231107190228/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
                         //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
-                        let mut request = ehttp::Request::get(url);
+                        let mut request = ehttp::Request::get(url.clone());
                         if let Some(authorization) = authorization.clone() {
                             request.headers.insert(
                                 "Authorization".to_string(),
