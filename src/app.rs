@@ -208,7 +208,7 @@ impl eframe::App for TemplateApp {
                 self.clear_textures();
             }
 
-            let combo = egui::ComboBox::from_label("Volume")
+            egui::ComboBox::from_label("Volume")
                 .selected_text(self.selected_volume().label())
                 .show_ui(ui, |ui| {
                     // iterate over indices and values of VolumeReference::VOLUMES
@@ -225,14 +225,14 @@ impl eframe::App for TemplateApp {
             let x_sl = ui.add(
                 egui::Slider::new(
                     &mut self.coord[0],
-                    -10000..=10000, /* 0..=(self.img_width - self.frame_width - 1) */
+                    -1000..=10000, /* 0..=(self.img_width - self.frame_width - 1) */
                 )
                 .text("x"),
             );
             let y_sl = ui.add(
                 egui::Slider::new(
                     &mut self.coord[1],
-                    -10000..=10000, /* 0..=(self.img_height - self.frame_height - 1) */
+                    -1000..=10000, /* 0..=(self.img_height - self.frame_height - 1) */
                 )
                 .text("y"),
             );
