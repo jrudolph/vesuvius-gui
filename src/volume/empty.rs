@@ -16,6 +16,7 @@ impl PaintVolume for EmptyVolume {
         width: usize,
         height: usize,
         sfactor: u8,
+        paint_zoom: u8,
         buffer: &mut [u8],
     ) {
     }

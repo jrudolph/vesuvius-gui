@@ -124,22 +124,25 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         u_coord: usize,
         v_coord: usize,
         plane_coord: usize,
-        width: usize,
-        height: usize,
+        canvas_width: usize,
+        canvas_height: usize,
         _sfactor: u8,
+        paint_zoom: u8,
         buffer: &mut [u8],
     ) {
+        let width = paint_zoom as usize * canvas_width;
+        let height = paint_zoom as usize * canvas_height;
         /* if plane_coord != 2 {
             return;
         } */
         self.downloader.position(xyz[0], xyz[1], xyz[2], width, height);
 
-        let center_u = width as i32 / 2;
-        let center_v = height as i32 / 2;
+        let center_u = canvas_width as i32 / 2;
+        let center_v = canvas_height as i32 / 2;
 
         let sfactor = _sfactor as i32; //Quality::Full.downsampling_factor as i32;
-        let tilesize = 64 * sfactor;
-        let blocksize = 4 * sfactor;
+        let tilesize = 64 * sfactor as i32;
+        let blocksize = 4 * sfactor as i32;
 
         let min_uc = (xyz[u_coord] - width as i32 / 2).max(0);
         let max_uc = xyz[u_coord] + width as i32 / 2;
@@ -199,10 +202,12 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                             let boff = (block_i[2] << 8) + (block_i[1] << 4) + block_i[0];
 
                             // iterate over pixels in block
-                            for vc in 0..blocksize {
-                                for uc in 0..blocksize {
-                                    let u = (tile_uc * tilesize + block_uc * blocksize + uc) as i32 - min_uc;
-                                    let v = (tile_vc * tilesize + block_vc * blocksize + vc) as i32 - min_vc;
+                            for vc in (0..blocksize).step_by(paint_zoom as usize) {
+                                for uc in (0..blocksize).step_by(paint_zoom as usize) {
+                                    let u = ((tile_uc * tilesize + block_uc * blocksize + uc) as i32 - min_uc)
+                                        / paint_zoom as i32;
+                                    let v = ((tile_vc * tilesize + block_vc * blocksize + vc) as i32 - min_vc)
+                                        / paint_zoom as i32;
                                     if uc == 0 && vc == 0 {
                                         //println!("block_x: {} block_y: {}", block_x, block_y);
                                         //println!("u: {} v: {}", u, v);
@@ -220,7 +225,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                                     } */
                                     //let factor = quality.downsampling_factor as usize * quality.downsampling_factor as usize * quality.downsampling_factor as usize;
 
-                                    if u >= 0 && u < width as i32 && v >= 0 && v < height as i32 {
+                                    if u >= 0 && u < canvas_width as i32 && v >= 0 && v < canvas_height as i32 {
                                         let off = boff * 64 + offs_i[2] * 16 + offs_i[1] * 4 + offs_i[0];
                                         if off > tile.len() {
                                             panic!("off: {} tile.len(): {}", off, tile.len());
@@ -235,7 +240,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                                                 value = value / 10;
                                             }
 
-                                            buffer[v as usize * width + u as usize] = value;
+                                            buffer[v as usize * canvas_width + u as usize] = value;
                                             // & 0xf0;
                                         } /* else {
                                               buffer[v as usize * width + u as usize] = (value & 0xf0) + 0x08;//(tile[((off / 8) * 8) as usize] & 0xc0) + 0x20;

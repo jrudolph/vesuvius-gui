@@ -151,8 +151,19 @@ impl TemplateApp {
         use std::time::Instant;
         let _start = Instant::now();
 
-        let width = (self.frame_width as f32 / self.zoom) as usize;
-        let height = (self.frame_height as f32 / self.zoom) as usize;
+        let (scaling, paint_zoom) = if self.zoom >= 1.0 {
+            (self.zoom, 1 as u8)
+        } else {
+            let next_smaller_pow_of_2 = 2.0f32.powf((self.zoom as f32).log2().floor());
+            (
+                self.zoom / next_smaller_pow_of_2,
+                (1.0 / next_smaller_pow_of_2).round() as u8,
+            )
+        };
+        //println!("scaling: {}, paint_zoom: {}", scaling, paint_zoom);
+
+        let width = (self.frame_width as f32 / scaling) as usize;
+        let height = (self.frame_height as f32 / scaling) as usize;
         let mut pixels = vec![0u8; width * height];
 
         //let q = 1;
@@ -178,6 +189,7 @@ impl TemplateApp {
                 width,
                 height,
                 sfactor,
+                paint_zoom,
                 &mut pixels,
             );
         }
@@ -252,6 +264,13 @@ impl eframe::App for TemplateApp {
                 1.0 / (_frame.info().cpu_usage.unwrap_or_default() + 1e-6)
             ));
 
+            let pane_scaling = if self.zoom >= 1.0 {
+                self.zoom
+            } else {
+                let next_smaller_pow_of_2 = 2.0f32.powf((self.zoom as f32).log2().floor());
+                self.zoom / next_smaller_pow_of_2
+            };
+
             let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, |s| &mut s.texture_xy);
             let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
             let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
@@ -268,17 +287,17 @@ impl eframe::App for TemplateApp {
                 let image = Image::new(texture_xy)
                     .max_height(self.frame_height as f32)
                     .max_width(self.frame_width as f32)
-                    .fit_to_original_size(self.zoom);
+                    .fit_to_original_size(pane_scaling);
 
                 let image_xz = Image::new(texture_xz)
                     .max_height(self.frame_height as f32)
                     .max_width(self.frame_width as f32)
-                    .fit_to_original_size(self.zoom);
+                    .fit_to_original_size(pane_scaling);
 
                 let image_yz = Image::new(texture_yz)
                     .max_height(self.frame_height as f32)
                     .max_width(self.frame_width as f32)
-                    .fit_to_original_size(self.zoom);
+                    .fit_to_original_size(pane_scaling);
 
                 ui.horizontal(|ui| {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
