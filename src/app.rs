@@ -203,6 +203,52 @@ impl TemplateApp {
         //println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
         res
     }
+
+    fn controls(&mut self, _frame: &eframe::Frame, ui: &mut Ui) {
+        ui.label("Volume");
+        egui::ComboBox::from_id_source("Volume")
+            .selected_text(self.selected_volume().label())
+            .show_ui(ui, |ui| {
+                // iterate over indices and values of VolumeReference::VOLUMES
+                for (id, volume) in VolumeReference::VOLUMES.iter().enumerate() {
+                    let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
+                    if res.changed() {
+                        println!("Selected volume: {}", self.volume_id);
+                        self.clear_textures();
+                        self.select_volume(self.volume_id);
+                    }
+                }
+            });
+
+        ui.end_row();
+
+        ui.label("x");
+        let x_sl = ui.add(egui::Slider::new(&mut self.coord[0], -1000..=10000));
+        ui.end_row();
+
+        ui.label("y");
+        let y_sl = ui.add(egui::Slider::new(&mut self.coord[1], -1000..=10000));
+        ui.end_row();
+
+        ui.label("z");
+        let _z_sl = ui.add(egui::Slider::new(&mut self.coord[2], 0..=25000));
+        ui.end_row();
+
+        ui.label("Zoom");
+        let zoom_sl = ui.add(egui::Slider::new(&mut self.zoom, 0.1f32..=6f32).logarithmic(true));
+        ui.end_row();
+
+        if x_sl.changed() || y_sl.changed() || zoom_sl.changed() {
+            self.clear_textures();
+        }
+
+        ui.label("FPS");
+        ui.label(format!(
+            "{}",
+            1.0 / (_frame.info().cpu_usage.unwrap_or_default() + 1e-6)
+        ));
+        ui.end_row();
+    }
 }
 
 impl eframe::App for TemplateApp {
@@ -220,49 +266,13 @@ impl eframe::App for TemplateApp {
                 self.clear_textures();
             }
 
-            egui::ComboBox::from_label("Volume")
-                .selected_text(self.selected_volume().label())
-                .show_ui(ui, |ui| {
-                    // iterate over indices and values of VolumeReference::VOLUMES
-                    for (id, volume) in VolumeReference::VOLUMES.iter().enumerate() {
-                        let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
-                        if res.changed() {
-                            println!("Selected volume: {}", self.volume_id);
-                            self.clear_textures();
-                            self.select_volume(self.volume_id);
-                        }
-                    }
+            egui::Grid::new("my_grid")
+                .num_columns(2)
+                .spacing([40.0, 4.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    self.controls(_frame, ui);
                 });
-
-            let x_sl = ui.add(
-                egui::Slider::new(
-                    &mut self.coord[0],
-                    -1000..=10000, /* 0..=(self.img_width - self.frame_width - 1) */
-                )
-                .text("x"),
-            );
-            let y_sl = ui.add(
-                egui::Slider::new(
-                    &mut self.coord[1],
-                    -1000..=10000, /* 0..=(self.img_height - self.frame_height - 1) */
-                )
-                .text("y"),
-            );
-
-            let _z_sl = ui.add(egui::Slider::new(&mut self.coord[2], 0..=25000).text("z"));
-            let zoom_sl = ui.add(
-                egui::Slider::new(&mut self.zoom, 0.1f32..=6f32)
-                    .text("zoom")
-                    .logarithmic(true),
-            );
-            if x_sl.changed() || y_sl.changed() || zoom_sl.changed() {
-                self.clear_textures();
-            }
-
-            ui.label(format!(
-                "FPS: {}",
-                1.0 / (_frame.info().cpu_usage.unwrap_or_default() + 1e-6)
-            ));
 
             let pane_scaling = if self.zoom >= 1.0 {
                 self.zoom
