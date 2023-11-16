@@ -175,7 +175,7 @@ impl TemplateApp {
         let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
             .min(4)
             .max(0);
-        let max_level = (min_level + 2).min(4);
+        let max_level = (min_level + 1).min(4);
         /* let min_level = 0;
         let max_level = 0; */
         for level in (min_level..=max_level).rev() {
