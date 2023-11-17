@@ -12,7 +12,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "eframe template",
+        "vesuvius-gui",
         native_options,
         Box::new(|cc| Box::new(vesuvius_gui::TemplateApp::new(cc, std::env::args().nth(1)))),
     )
