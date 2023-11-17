@@ -1,4 +1,5 @@
 use std::ops::Index;
+use std::sync::mpsc::Receiver;
 
 use crate::downloader::*;
 use crate::model::*;
@@ -28,6 +29,8 @@ pub struct TemplateApp {
     world: Box<dyn PaintVolume>,
     #[serde(skip)]
     last_size: Vec2,
+    #[serde(skip)]
+    download_notifier: Option<Receiver<()>>,
 }
 
 impl Default for TemplateApp {
@@ -44,6 +47,7 @@ impl Default for TemplateApp {
             texture_yz: None,
             world: Box::new(EmptyVolume {}),
             last_size: Vec2::ZERO,
+            download_notifier: None,
         }
     }
 }
@@ -88,11 +92,12 @@ impl TemplateApp {
             );
         }
 
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.download_notifier = Some(receiver);
+
         let volume_dir = volume.sub_dir(data_dir);
-        self.world = Box::new(VolumeGrid64x4Mapped::from_data_dir(
-            &volume_dir,
-            Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password),
-        ));
+        let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password, sender);
+        self.world = Box::new(VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader));
         self.data_dir = data_dir.to_string();
     }
 
@@ -249,6 +254,10 @@ impl TemplateApp {
         ));
         ui.end_row();
     }
+
+    fn try_recv_from_download_notifier(&mut self) -> bool {
+        self.download_notifier.as_ref().is_some_and(|x| x.try_recv().is_ok())
+    }
 }
 
 impl eframe::App for TemplateApp {
@@ -259,6 +268,12 @@ impl eframe::App for TemplateApp {
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.try_recv_from_download_notifier() {
+            self.clear_textures();
+
+            while self.try_recv_from_download_notifier() {} // clear queue
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let new_size = ui.available_size();
             if new_size != self.last_size {

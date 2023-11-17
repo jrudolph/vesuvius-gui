@@ -48,6 +48,7 @@ impl Downloader {
         tile_server_base: &'static str,
         volume: &'static VolumeReference,
         authorization: Option<String>,
+        download_notifier: Sender<()>,
     ) -> Downloader {
         let (sender, receiver) = std::sync::mpsc::channel::<DownloadMessage>();
 
@@ -139,6 +140,7 @@ impl Downloader {
                             );
                         }
 
+                        let notifier = download_notifier.clone();
                         let dir = dir.clone();
                         //println!("downloading tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
                         let c2 = count.clone();
@@ -166,6 +168,7 @@ impl Downloader {
                                     .unwrap();
                                     std::fs::write(file_name, bytes).unwrap();
                                     *state.lock().unwrap() = DownloadState::Done;
+                                    notifier.send(());
                                 } else if res.status == 420 {
                                     println!("delayed tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
                                     *state.lock().unwrap() = DownloadState::Delayed;
