@@ -281,10 +281,6 @@ impl eframe::App for TemplateApp {
                 self.zoom / next_smaller_pow_of_2
             };
 
-            let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, |s| &mut s.texture_xy);
-            let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
-            let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
-
             // use remaining space for image
             let size = ui.available_size();
             {
@@ -293,6 +289,10 @@ impl eframe::App for TemplateApp {
 
                 self.frame_width = new_width;
                 self.frame_height = new_height;
+
+                let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, |s| &mut s.texture_xy);
+                let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
+                let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
 
                 let image = Image::new(texture_xy)
                     .max_height(self.frame_height as f32)
