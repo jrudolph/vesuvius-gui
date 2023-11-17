@@ -117,11 +117,15 @@ impl TemplateApp {
     fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, v: fn(&mut Self) -> &mut i32) {
         if image.hovered() {
             let delta = ui.input(|i| i.scroll_delta);
+            let zoom_delta = ui.input(|i| i.zoom_delta());
             if delta.y != 0.0 {
                 let min_level = 1 << ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
                 let delta = delta.y.signum() * min_level as f32;
                 let m = v(self);
                 *m = (*m + delta as i32) / min_level as i32 * min_level as i32;
+                self.clear_textures();
+            } else if zoom_delta != 1.0 {
+                self.zoom = (self.zoom * zoom_delta).max(0.1).min(6.0);
                 self.clear_textures();
             }
         }
