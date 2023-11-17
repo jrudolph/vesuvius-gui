@@ -55,7 +55,7 @@ impl VolumeGrid64x4Mapped {
         let tile_state = self.data.get_mut(&key).unwrap();
         match tile_state {
             TileState::Unknown => {
-                println!("trying to load tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
+                // println!("trying to load tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
                 if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
                     *tile_state = state;
                 } else {

@@ -76,14 +76,14 @@ impl Downloader {
                     let dz = *z as i32 * 64 * f + 32 * f - pos.2;
 
                     if (dx.abs() > larger_edge / 2 && dy.abs() > larger_edge / 2) && dz.abs() > larger_edge / 2 {
-                        println!(
+                        /* println!(
                             "Pruning {} {} {} {} {:?}",
                             x,
                             y,
                             z,
                             q.downsampling_factor,
                             *state.lock().unwrap()
-                        );
+                        ); */
                         *state.lock().unwrap() = DownloadState::Pruned;
                         false
                     } else {
@@ -140,12 +140,12 @@ impl Downloader {
                         }
 
                         let dir = dir.clone();
-                        println!("downloading tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
+                        //println!("downloading tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
                         let c2 = count.clone();
                         ehttp::fetch(request, move |response| {
                             if let Ok(res) = response {
                                 if res.status == 200 {
-                                    println!("got tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
+                                    //println!("got tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
                                     let bytes = res.bytes;
                                     // save bytes to file
                                     let file_name = format!(
