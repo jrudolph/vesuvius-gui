@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use super::DrawingConfig;
+
 #[derive(Debug)]
 enum TileState {
     Unknown,
@@ -128,10 +130,14 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         canvas_height: usize,
         _sfactor: u8,
         paint_zoom: u8,
+        config: &DrawingConfig,
         buffer: &mut [u8],
     ) {
         let width = paint_zoom as usize * canvas_width;
         let height = paint_zoom as usize * canvas_height;
+
+        let mask = config.bit_mask();
+        let mask_add = ((0x100 as u16 - mask as u16) >> 1) as u8;
         /* if plane_coord != 2 {
             return;
         } */
@@ -232,7 +238,9 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                                         }
                                         let mut value = tile[off as usize];
 
-                                        //let pluscon = ((value as i32 - 70).max(0) * 255 / (255 - 100)).min(255) as u8;
+                                        let pluscon = ((value as i32 - config.threshold_min as i32).max(0) * 255
+                                            / (255 - (config.threshold_min + config.threshold_max) as i32))
+                                            .min(255) as u8;
 
                                         /* if (u / 128) % 2 == 0 */
                                         {
@@ -240,7 +248,9 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                                                 value = value / 10;
                                             }
 
-                                            buffer[v as usize * canvas_width + u as usize] = value;
+                                            buffer[v as usize * canvas_width + u as usize] =
+                                                (((pluscon & mask) as f32) / (mask as f32) * 255.0) as u8;
+                                            //+ mask_add;
                                             // & 0xf0;
                                         } /* else {
                                               buffer[v as usize * width + u as usize] = (value & 0xf0) + 0x08;//(tile[((off / 8) * 8) as usize] & 0xc0) + 0x20;

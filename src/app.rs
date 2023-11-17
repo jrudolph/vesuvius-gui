@@ -28,6 +28,7 @@ pub struct TemplateApp {
     world: Box<dyn PaintVolume>,
     #[serde(skip)]
     last_size: Vec2,
+    drawing_config: DrawingConfig,
 }
 
 impl Default for TemplateApp {
@@ -44,6 +45,7 @@ impl Default for TemplateApp {
             texture_yz: None,
             world: Box::new(EmptyVolume {}),
             last_size: Vec2::ZERO,
+            drawing_config: Default::default(),
         }
     }
 }
@@ -175,7 +177,7 @@ impl TemplateApp {
         let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
             .min(4)
             .max(0);
-        let max_level = (min_level + 1).min(4);
+        let max_level: u32 = (min_level + 1).min(4);
         /* let min_level = 0;
         let max_level = 0; */
         for level in (min_level..=max_level).rev() {
@@ -190,6 +192,7 @@ impl TemplateApp {
                 height,
                 sfactor,
                 paint_zoom,
+                &self.drawing_config,
                 &mut pixels,
             );
         }
@@ -231,14 +234,39 @@ impl TemplateApp {
         ui.end_row();
 
         ui.label("z");
-        let _z_sl = ui.add(egui::Slider::new(&mut self.coord[2], 0..=25000));
+        let z_sl = ui.add(egui::Slider::new(&mut self.coord[2], 0..=25000));
         ui.end_row();
 
         ui.label("Zoom");
         let zoom_sl = ui.add(egui::Slider::new(&mut self.zoom, 0.1f32..=6f32).logarithmic(true));
         ui.end_row();
 
-        if x_sl.changed() || y_sl.changed() || zoom_sl.changed() {
+        ui.label("Min");
+        let min_sl = ui.add(egui::Slider::new(
+            &mut self.drawing_config.threshold_min,
+            0..=(254 - self.drawing_config.threshold_max),
+        ));
+        ui.end_row();
+
+        ui.label("Max");
+        let max_sl = ui.add(egui::Slider::new(
+            &mut self.drawing_config.threshold_max,
+            0..=(254 - self.drawing_config.threshold_min),
+        ));
+        ui.end_row();
+
+        ui.label("Bits");
+        let bits_sl: Response = ui.add(egui::Slider::new(&mut self.drawing_config.quant, 1..=8));
+        ui.end_row();
+
+        if x_sl.changed()
+            || y_sl.changed()
+            || z_sl.changed()
+            || zoom_sl.changed()
+            || min_sl.changed()
+            || max_sl.changed()
+            || bits_sl.changed()
+        {
             self.clear_textures();
         }
 
@@ -265,14 +293,6 @@ impl eframe::App for TemplateApp {
                 self.last_size = new_size;
                 self.clear_textures();
             }
-
-            egui::Grid::new("my_grid")
-                .num_columns(2)
-                .spacing([40.0, 4.0])
-                .striped(true)
-                .show(ui, |ui| {
-                    self.controls(_frame, ui);
-                });
 
             let pane_scaling = if self.zoom >= 1.0 {
                 self.zoom
@@ -317,9 +337,19 @@ impl eframe::App for TemplateApp {
                     self.add_drag_handler(&im_xy, 0, 1);
                     self.add_drag_handler(&im_xz, 0, 2);
                 });
-                let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
-                self.add_scroll_handler(&im_yz, ui, |s| &mut s.coord[0]);
-                self.add_drag_handler(&im_yz, 2, 1);
+                ui.horizontal(|ui| {
+                    let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
+                    self.add_scroll_handler(&im_yz, ui, |s| &mut s.coord[0]);
+                    self.add_drag_handler(&im_yz, 2, 1);
+
+                    egui::Grid::new("my_grid")
+                        .num_columns(2)
+                        .spacing([40.0, 4.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            self.controls(_frame, ui);
+                        });
+                });
             };
         });
     }
