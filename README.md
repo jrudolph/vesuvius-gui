@@ -10,6 +10,8 @@ It does not require to download any data upfront.
 
 Install required X11 libraries:
   * Ubuntu: `apt install -y libgl1 libxrandr2 libxi6 libxcursor1`
+  * MacOSX: Should work out of the box
+  * Windows: Should work out of the box
 
 Create a data directory and place a file called `password.txt` into it and fill it with the credentials to the blocks
 server.
