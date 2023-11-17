@@ -14,6 +14,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     strategy:
+      fail-fast: false
       matrix:
         # You can add more, for any target you'd like!
         include:
