@@ -4,14 +4,17 @@ A simple browser built with Rust and [egui](https://github.com/emilk/egui) to br
 
 ![demo](https://github.com/jrudolph/vesuvius-gui/assets/9868/261dfc1c-f9d5-41a4-8324-8963eef2afa2)
 
+It does not require to download any data upfront.
+
 ## Usage
 
 Install required X11 libraries:
   * Ubuntu: `apt install -y libgl1 libxrandr2 libxi6 libxcursor1`
 
-Download any number of cells from a [volume_grids folder](http://dl.ash2txt.org/full-scrolls/Scroll1.volpkg/volume_grids/20230205180739/)
-and put them into a directory. Then run the app with `./vesuvius-gui <path-to-directory>` / `cargo run --release <path-to-directory>`. The app will then
-pick up whatever cells is there and display them.
+Create a data directory and place a file called `password.txt` into it and fill it with the credentials to the blocks
+server.
+
+Then run the app with `./vesuvius-gui <path-to-directory>` / `cargo run --release <path-to-directory>`.
 
 ## Data License
 
