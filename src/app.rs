@@ -1,4 +1,5 @@
 use std::ops::Index;
+use std::ops::RangeInclusive;
 use std::sync::mpsc::Receiver;
 
 use crate::downloader::*;
@@ -231,32 +232,20 @@ impl TemplateApp {
 
         ui.end_row();
 
-        ui.label("x");
-        let x_sl = ui.add(egui::Slider::new(&mut self.coord[0], -1000..=10000));
-        ui.end_row();
+        fn slider<T: emath::Numeric>(ui: &mut Ui, label: &str, value: &mut T, range: RangeInclusive<T>) -> Response {
+            ui.label(label);
+            let sl = ui.add(egui::Slider::new(value, range));
+            ui.end_row();
+            sl
+        }
+        let x_sl = slider(ui, "x", &mut self.coord[0], -1000..=10000);
+        let y_sl = slider(ui, "y", &mut self.coord[1], -1000..=10000);
+        let z_sl = slider(ui, "z", &mut self.coord[2], 0..=25000);
+        let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0);
 
-        ui.label("y");
-        let y_sl = ui.add(egui::Slider::new(&mut self.coord[1], -1000..=10000));
-        ui.end_row();
-
-        ui.label("z");
-        let _z_sl = ui.add(egui::Slider::new(&mut self.coord[2], 0..=25000));
-        ui.end_row();
-
-        ui.label("Zoom");
-        let zoom_sl = ui.add(egui::Slider::new(&mut self.zoom, 0.1f32..=6f32).logarithmic(true));
-        ui.end_row();
-
-        if x_sl.changed() || y_sl.changed() || zoom_sl.changed() {
+        if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() {
             self.clear_textures();
         }
-
-        ui.label("FPS");
-        ui.label(format!(
-            "{}",
-            1.0 / (_frame.info().cpu_usage.unwrap_or_default() + 1e-6)
-        ));
-        ui.end_row();
     }
 
     fn try_recv_from_download_notifier(&mut self) -> bool {
@@ -278,13 +267,7 @@ impl eframe::App for TemplateApp {
             while self.try_recv_from_download_notifier() {} // clear queue
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let new_size = ui.available_size();
-            if new_size != self.last_size {
-                self.last_size = new_size;
-                self.clear_textures();
-            }
-
+        egui::Window::new("Controls").show(ctx, |ui| {
             egui::Grid::new("my_grid")
                 .num_columns(2)
                 .spacing([40.0, 4.0])
@@ -292,6 +275,24 @@ impl eframe::App for TemplateApp {
                 .show(ui, |ui| {
                     self.controls(_frame, ui);
                 });
+
+            ui.separator();
+
+            ui.horizontal(|ui| {
+                ui.label("FPS");
+                ui.label(format!(
+                    "{}",
+                    1.0 / (_frame.info().cpu_usage.unwrap_or_default() + 1e-6)
+                ));
+            });
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let new_size = ui.available_size();
+            if new_size != self.last_size {
+                self.last_size = new_size;
+                self.clear_textures();
+            }
 
             let pane_scaling = if self.zoom >= 1.0 {
                 self.zoom
