@@ -232,16 +232,24 @@ impl TemplateApp {
 
         ui.end_row();
 
-        fn slider<T: emath::Numeric>(ui: &mut Ui, label: &str, value: &mut T, range: RangeInclusive<T>) -> Response {
+        fn slider<T: emath::Numeric>(
+            ui: &mut Ui,
+            label: &str,
+            value: &mut T,
+            range: RangeInclusive<T>,
+            logarithmic: bool,
+        ) -> Response {
             ui.label(label);
-            let sl = ui.add(egui::Slider::new(value, range));
+            let slider = egui::Slider::new(value, range).clamp_to_range(true);
+            let slider = if logarithmic { slider.logarithmic(true) } else { slider };
+            let sl = ui.add(slider);
             ui.end_row();
             sl
         }
-        let x_sl = slider(ui, "x", &mut self.coord[0], -1000..=10000);
-        let y_sl = slider(ui, "y", &mut self.coord[1], -1000..=10000);
-        let z_sl = slider(ui, "z", &mut self.coord[2], 0..=25000);
-        let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0);
+        let x_sl = slider(ui, "x", &mut self.coord[0], -1000..=10000, false);
+        let y_sl = slider(ui, "y", &mut self.coord[1], -1000..=10000, false);
+        let z_sl = slider(ui, "z", &mut self.coord[2], 0..=25000, false);
+        let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
 
         if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() {
             self.clear_textures();
