@@ -43,10 +43,6 @@ impl VolumeGrid64x4Mapped {
         })
         .map(|x| TileState::Loaded(x))
     }
-    fn get_tile_state(&self, x: usize, y: usize, z: usize, downsampling: u8) -> &TileState {
-        let key = (x, y, z, downsampling as usize);
-        self.data.get(&key).unwrap_or(&TileState::Unknown)
-    }
     fn try_loading_tile(&mut self, x: usize, y: usize, z: usize, quality: Quality) -> &TileState {
         let key = (x, y, z, quality.downsampling_factor as usize);
         if !self.data.contains_key(&key) {
