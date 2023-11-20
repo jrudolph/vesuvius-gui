@@ -140,20 +140,20 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         let center_u = canvas_width as i32 / 2;
         let center_v = canvas_height as i32 / 2;
 
-        let sfactor = _sfactor as i32; //Quality::Full.downsampling_factor as i32;
+        let sfactor = _sfactor as i32;
         let tilesize = 64 * sfactor as i32;
         let blocksize = 4 * sfactor as i32;
 
-        let min_uc = (xyz[u_coord] - width as i32 / 2).max(0);
+        let min_uc = xyz[u_coord] - width as i32 / 2;
         let max_uc = xyz[u_coord] + width as i32 / 2;
-        let min_vc = (xyz[v_coord] - height as i32 / 2).max(0);
+        let min_vc = xyz[v_coord] - height as i32 / 2;
         let max_vc = xyz[v_coord] + height as i32 / 2;
         let pc = xyz[plane_coord].max(0);
 
-        let tile_min_uc = min_uc / tilesize;
-        let uc = max_uc / tilesize;
+        let tile_min_uc = (min_uc / tilesize).max(0);
+        let tile_max_uc = max_uc / tilesize;
 
-        let tile_min_vc = min_vc / tilesize;
+        let tile_min_vc = (min_vc / tilesize).max(0);
         let tile_max_vc = max_vc / tilesize;
 
         let tile_pc = pc / tilesize;
@@ -161,7 +161,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         let block_pc = tile_pc_off / blocksize;
         let block_pc_off = tile_pc_off % blocksize;
 
-        for tile_uc in tile_min_uc..=uc {
+        for tile_uc in tile_min_uc..=tile_max_uc {
             for tile_vc in tile_min_vc..=tile_max_vc {
                 let mut tile_i = [0; 3];
                 tile_i[u_coord] = tile_uc as usize;
