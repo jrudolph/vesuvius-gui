@@ -218,23 +218,6 @@ impl TemplateApp {
     }
 
     fn controls(&mut self, _frame: &eframe::Frame, ui: &mut Ui) {
-        ui.label("Volume");
-        egui::ComboBox::from_id_source("Volume")
-            .selected_text(self.selected_volume().label())
-            .show_ui(ui, |ui| {
-                // iterate over indices and values of VolumeReference::VOLUMES
-                for (id, volume) in VolumeReference::VOLUMES.iter().enumerate() {
-                    let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
-                    if res.changed() {
-                        println!("Selected volume: {}", self.volume_id);
-                        self.clear_textures();
-                        self.select_volume(self.volume_id);
-                    }
-                }
-            });
-
-        ui.end_row();
-
         fn slider<T: emath::Numeric>(
             ui: &mut Ui,
             label: &str,
@@ -249,46 +232,73 @@ impl TemplateApp {
             ui.end_row();
             sl
         }
-        let x_sl = slider(ui, "x", &mut self.coord[0], -1000..=10000, false);
-        let y_sl = slider(ui, "y", &mut self.coord[1], -1000..=10000, false);
-        let z_sl = slider(ui, "z", &mut self.coord[2], 0..=25000, false);
-        let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
+
+        egui::Grid::new("my_grid")
+            .num_columns(2)
+            .spacing([40.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Volume");
+                egui::ComboBox::from_id_source("Volume")
+                    .selected_text(self.selected_volume().label())
+                    .show_ui(ui, |ui| {
+                        // iterate over indices and values of VolumeReference::VOLUMES
+                        for (id, volume) in VolumeReference::VOLUMES.iter().enumerate() {
+                            let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
+                            if res.changed() {
+                                println!("Selected volume: {}", self.volume_id);
+                                self.clear_textures();
+                                self.select_volume(self.volume_id);
+                            }
+                        }
+                    });
+
+                ui.end_row();
+                let x_sl = slider(ui, "x", &mut self.coord[0], -1000..=10000, false);
+                let y_sl = slider(ui, "y", &mut self.coord[1], -1000..=10000, false);
+                let z_sl = slider(ui, "z", &mut self.coord[2], 0..=25000, false);
+                let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
+
+                if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() {
+                    self.clear_textures();
+                }
+            });
 
         ui.collapsing("Filters", |ui| {
             let enable = ui.checkbox(&mut self.drawing_config.enable_filters, "Enable ('F')");
             ui.add_enabled_ui(self.drawing_config.enable_filters, |ui| {
-                let min_sl = slider(
-                    ui,
-                    "Min",
-                    &mut self.drawing_config.threshold_min,
-                    0..=(254 - self.drawing_config.threshold_max),
-                    false,
-                );
-                let max_sl = slider(
-                    ui,
-                    "Max",
-                    &mut self.drawing_config.threshold_max,
-                    0..=(254 - self.drawing_config.threshold_min),
-                    false,
-                );
-                let bits_sl = slider(ui, "Mask Bits", &mut self.drawing_config.quant, 1..=8, false);
-                let mask_sl = slider(ui, "Mask Shift", &mut self.drawing_config.mask_shift, 0..=7, false);
-                ui.label("Mask");
-                ui.label(format!("{:08b}", self.drawing_config.bit_mask()));
-                ui.end_row();
+                egui::Grid::new("my_grid")
+                    .num_columns(2)
+                    .spacing([40.0, 4.0])
+                    .show(ui, |ui| {
+                        let min_sl = slider(
+                            ui,
+                            "Min",
+                            &mut self.drawing_config.threshold_min,
+                            0..=(254 - self.drawing_config.threshold_max),
+                            false,
+                        );
+                        let max_sl = slider(
+                            ui,
+                            "Max",
+                            &mut self.drawing_config.threshold_max,
+                            0..=(254 - self.drawing_config.threshold_min),
+                            false,
+                        );
+                        let bits_sl = slider(ui, "Mask Bits", &mut self.drawing_config.quant, 1..=8, false);
+                        let mask_sl = slider(ui, "Mask Shift", &mut self.drawing_config.mask_shift, 0..=7, false);
+                        ui.label("Mask");
+                        ui.label(format!("{:08b}", self.drawing_config.bit_mask()));
+                        ui.end_row();
 
-                if min_sl.changed() || max_sl.changed() || bits_sl.changed() || mask_sl.changed() {
-                    self.clear_textures();
-                }
+                        if min_sl.changed() || max_sl.changed() || bits_sl.changed() || mask_sl.changed() {
+                            self.clear_textures();
+                        }
+                    });
             });
             if enable.changed() {
                 self.clear_textures();
             }
         });
-
-        if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() {
-            self.clear_textures();
-        }
     }
 
     fn try_recv_from_download_notifier(&mut self) -> bool {
@@ -318,13 +328,7 @@ impl eframe::App for TemplateApp {
                 }
             });
 
-            egui::Grid::new("my_grid")
-                .num_columns(2)
-                .spacing([40.0, 4.0])
-                .striped(true)
-                .show(ui, |ui| {
-                    self.controls(_frame, ui);
-                });
+            self.controls(_frame, ui);
 
             ui.separator();
 
