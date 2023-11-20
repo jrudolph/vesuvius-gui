@@ -1,4 +1,3 @@
-use std::ops::Index;
 use std::ops::RangeInclusive;
 use std::sync::mpsc::Receiver;
 
@@ -408,8 +407,8 @@ impl TemplateApp {
     fn update_password_entry(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut should_try_auth = false;
 
-        egui::Window::new("Credentials").show(ctx, |ui| {
-            egui::Grid::new("my_grid")
+        egui::Window::new("Login").show(ctx, |ui| {
+            egui::Grid::new("login_grid")
                 .num_columns(2)
                 .spacing([40.0, 4.0])
                 .show(ui, |ui| {
