@@ -7,6 +7,7 @@ pub use volume64x4::VolumeGrid64x4Mapped;
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct DrawingConfig {
+    pub enable_filters: bool,
     pub threshold_min: u8,
     pub threshold_max: u8,
     pub quant: u8,
@@ -14,7 +15,8 @@ pub struct DrawingConfig {
 }
 impl DrawingConfig {
     pub fn filters_active(&self) -> bool {
-        self.threshold_min > 0 || self.threshold_max > 0 || self.quant < 8 || self.mask_shift > 0
+        self.enable_filters
+            && (self.threshold_min > 0 || self.threshold_max > 0 || self.quant < 8 || self.mask_shift > 0)
     }
     pub fn bit_mask(&self) -> u8 {
         (match self.quant {
@@ -33,6 +35,7 @@ impl DrawingConfig {
 impl Default for DrawingConfig {
     fn default() -> Self {
         Self {
+            enable_filters: false,
             threshold_min: 0,
             threshold_max: 0,
             quant: 0xff,
