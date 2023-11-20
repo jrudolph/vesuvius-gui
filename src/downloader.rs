@@ -201,6 +201,38 @@ impl Downloader {
         Downloader { download_queue: sender }
     }
 
+    pub fn check_authorization(tile_server_base: &'static str, authorization: Option<String>) -> bool {
+        // check if request to tile server is authorized
+        let vol1 = VolumeReference::SCROLL1;
+        let url = format!(
+            "{}/tiles/scroll/{}/volume/{}/",
+            tile_server_base, vol1.scroll_id, vol1.volume
+        );
+        let mut request = ehttp::Request::get(url.clone());
+        if let Some(authorization) = authorization {
+            request.headers.insert(
+                "Authorization".to_string(),
+                format!("Basic {}", base64::encode(authorization)),
+            );
+        }
+        match ehttp::fetch_blocking(&request) {
+            Ok(res) => {
+                if res.status == 200 {
+                    return true;
+                } else if res.status == 401 {
+                    return false;
+                } else {
+                    println!("failed to check authorization: {}", res.status);
+                    false
+                }
+            }
+            Err(e) => {
+                println!("Request failed: {}", e);
+                false
+            }
+        }
+    }
+
     pub fn queue(&self, task: DownloadTask) {
         self.download_queue.send(DownloadMessage::Download(task)).unwrap();
     }

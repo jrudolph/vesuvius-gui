@@ -6,6 +6,7 @@ use crate::downloader::*;
 use crate::model::*;
 use crate::volume::*;
 
+use egui::Id;
 use egui::Vec2;
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
@@ -14,6 +15,10 @@ const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TemplateApp {
+    #[serde(skip)]
+    is_authorized: bool,
+    #[serde(skip)]
+    credential_entry: (String, String),
     volume_id: usize,
     coord: [i32; 3],
     zoom: f32,
@@ -38,6 +43,8 @@ pub struct TemplateApp {
 impl Default for TemplateApp {
     fn default() -> Self {
         Self {
+            is_authorized: false,
+            credential_entry: ("".to_string(), "".to_string()),
             volume_id: 0,
             coord: [2800, 2500, 10852],
             zoom: 1f32,
@@ -67,13 +74,20 @@ impl TemplateApp {
         } else {
             Default::default()
         };
-        app.frame_width = 1000;
-        app.frame_height = 750;
         if let Some(dir) = data_dir {
             app.data_dir = dir;
         }
 
-        app.select_volume(app.volume_id);
+        let pass = Self::load_data_password(&app.data_dir);
+        if Downloader::check_authorization(Self::TILE_SERVER, pass) {
+            app.is_authorized = true;
+        } else {
+            app.is_authorized = false;
+        }
+
+        if app.is_authorized {
+            app.select_volume(app.volume_id);
+        }
 
         app
     }
@@ -210,7 +224,9 @@ impl TemplateApp {
         let image = ColorImage::from_gray([width, height], &pixels);
         //println!("Time elapsed before loading in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _start.elapsed());
         // Load the texture only once.
-        let res = ui.ctx().load_texture("my-image-xy", image, Default::default());
+        let res = ui
+            .ctx()
+            .load_texture(format!("{}{}{}", u_coord, v_coord, d_coord), image, Default::default());
 
         let _duration = _start.elapsed();
         //println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
@@ -304,16 +320,8 @@ impl TemplateApp {
     fn try_recv_from_download_notifier(&mut self) -> bool {
         self.download_notifier.as_ref().is_some_and(|x| x.try_recv().is_ok())
     }
-}
 
-impl eframe::App for TemplateApp {
-    /// Called by the frame work to save state before shutdown.
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, self);
-    }
-
-    /// Called each time the UI needs repainting, which may be many times per second.
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update_main(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.try_recv_from_download_notifier() {
             self.clear_textures();
 
@@ -396,5 +404,67 @@ impl eframe::App for TemplateApp {
                 self.add_drag_handler(&im_yz, 2, 1);
             };
         });
+    }
+    fn update_password_entry(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut should_try_auth = false;
+
+        egui::Window::new("Credentials").show(ctx, |ui| {
+            egui::Grid::new("my_grid")
+                .num_columns(2)
+                .spacing([40.0, 4.0])
+                .show(ui, |ui| {
+                    let pass_id = Id::new("pass");
+
+                    ui.label("Username");
+                    let r = ui.add(egui::TextEdit::singleline(&mut self.credential_entry.0));
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if self.credential_entry.1.is_empty() {
+                            ui.memory_mut(|m| m.request_focus(pass_id));
+                        } else {
+                            should_try_auth = true;
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Password");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.credential_entry.1)
+                            .id(pass_id)
+                            .password(true),
+                    );
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if !self.credential_entry.0.is_empty() && !self.credential_entry.1.is_empty() {
+                            should_try_auth = true;
+                        }
+                    }
+                    ui.end_row();
+
+                    should_try_auth = should_try_auth || ui.button("Login").clicked();
+                    if should_try_auth {
+                        let credentials = format!("{}:{}", self.credential_entry.0, self.credential_entry.1);
+                        if Downloader::check_authorization(Self::TILE_SERVER, Some(credentials.clone())) {
+                            std::fs::write(format!("{}/password.txt", self.data_dir), credentials).unwrap();
+                            self.is_authorized = true;
+                            self.select_volume(self.volume_id);
+                        } else {
+                            ui.colored_label(egui::Color32::RED, "Invalid credentials");
+                        }
+                    }
+                });
+        });
+    }
+}
+
+impl eframe::App for TemplateApp {
+    /// Called by the frame work to save state before shutdown.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, eframe::APP_KEY, self);
+    }
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.is_authorized {
+            self.update_main(ctx, frame);
+        } else {
+            self.update_password_entry(ctx, frame);
+        }
     }
 }
