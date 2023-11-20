@@ -5,7 +5,6 @@ use crate::downloader::*;
 use crate::model::*;
 use crate::volume::*;
 
-use egui::Id;
 use egui::Vec2;
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
@@ -18,6 +17,8 @@ pub struct TemplateApp {
     is_authorized: bool,
     #[serde(skip)]
     credential_entry: (String, String),
+    #[serde(skip)]
+    last_login_failed: bool,
     volume_id: usize,
     coord: [i32; 3],
     zoom: f32,
@@ -44,6 +45,7 @@ impl Default for TemplateApp {
         Self {
             is_authorized: false,
             credential_entry: ("".to_string(), "".to_string()),
+            last_login_failed: false,
             volume_id: 0,
             coord: [2800, 2500, 10852],
             zoom: 1f32,
@@ -412,11 +414,19 @@ impl TemplateApp {
                 .num_columns(2)
                 .spacing([40.0, 4.0])
                 .show(ui, |ui| {
+                    use egui::text::CCursor;
+                    use egui::text_edit::CCursorRange;
+                    use egui::Id;
+
+                    let user_id = Id::new("user");
                     let pass_id = Id::new("pass");
 
                     ui.label("Username");
-                    let r = ui.add(egui::TextEdit::singleline(&mut self.credential_entry.0));
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    let mut user_field = egui::TextEdit::singleline(&mut self.credential_entry.0)
+                        .id(user_id)
+                        .show(ui);
+
+                    if user_field.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         if self.credential_entry.1.is_empty() {
                             ui.memory_mut(|m| m.request_focus(pass_id));
                         } else {
@@ -438,16 +448,34 @@ impl TemplateApp {
                     }
                     ui.end_row();
 
+                    ui.label("");
+                    ui.label("Use same crdentials as for the data server");
+                    ui.end_row();
+
                     should_try_auth = should_try_auth || ui.button("Login").clicked();
                     if should_try_auth {
                         let credentials = format!("{}:{}", self.credential_entry.0, self.credential_entry.1);
                         if Downloader::check_authorization(Self::TILE_SERVER, Some(credentials.clone())) {
                             std::fs::write(format!("{}/password.txt", self.data_dir), credentials).unwrap();
                             self.is_authorized = true;
+                            self.last_login_failed = false;
                             self.select_volume(self.volume_id);
                         } else {
-                            ui.colored_label(egui::Color32::RED, "Invalid credentials");
+                            self.last_login_failed = true;
+
+                            ui.memory_mut(|m| m.request_focus(user_id));
+                            user_field.state.set_ccursor_range(Some(CCursorRange::two(
+                                CCursor::new(0),
+                                CCursor::new(self.credential_entry.0.len()),
+                            )));
                         }
+                    }
+                    if self.last_login_failed {
+                        ui.colored_label(egui::Color32::RED, "Login failed.");
+                    }
+
+                    if self.credential_entry.0.is_empty() && self.credential_entry.1.is_empty() {
+                        ui.memory_mut(|m| m.request_focus(user_id));
                     }
                 });
         });
