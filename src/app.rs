@@ -449,7 +449,7 @@ impl TemplateApp {
                     ui.end_row();
 
                     ui.label("");
-                    ui.label("Use same crdentials as for the data server");
+                    ui.label("Use same credentials as for the data server");
                     ui.end_row();
 
                     should_try_auth = should_try_auth || ui.button("Login").clicked();

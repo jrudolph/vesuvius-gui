@@ -13,10 +13,9 @@ Install required X11 libraries:
   * MacOSX: Should work out of the box
   * Windows: Should work out of the box
 
-Create a data directory and place a file called `password.txt` into it and fill it with the credentials to the blocks
-server. Ping `@jrudolph` on the [vesuvius discord](https://discordapp.com/users/786330899125895169) for the credentials.
+Create a data directory, then run the app with `./vesuvius-gui <path-to-directory>` / `cargo run --release <path-to-directory>`.
 
-Then run the app with `./vesuvius-gui <path-to-directory>` / `cargo run --release <path-to-directory>`.
+Credentials are the same as for data server.
 
 ## Data License
 
