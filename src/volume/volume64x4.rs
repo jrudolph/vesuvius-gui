@@ -133,10 +133,8 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         let height = paint_zoom as usize * canvas_height;
 
         let mask = config.bit_mask();
-        let mask_add = ((0x100 as u16 - mask as u16) >> 1) as u8;
-        /* if plane_coord != 2 {
-            return;
-        } */
+        let filters_active = config.filters_active();
+
         self.downloader.position(xyz[0], xyz[1], xyz[2], width, height);
 
         let center_u = canvas_width as i32 / 2;
@@ -232,25 +230,21 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                                         if off > tile.len() {
                                             panic!("off: {} tile.len(): {}", off, tile.len());
                                         }
-                                        let mut value = tile[off as usize];
+                                        let value = tile[off as usize];
 
-                                        let pluscon = ((value as i32 - config.threshold_min as i32).max(0) * 255
-                                            / (255 - (config.threshold_min + config.threshold_max) as i32))
-                                            .min(255) as u8;
-
-                                        /* if (u / 128) % 2 == 0 */
-                                        {
-                                            if u == center_u || v == center_v {
-                                                value = value / 10;
-                                            }
+                                        if u == center_u || v == center_v {
+                                            buffer[v as usize * canvas_width + u as usize] = 0;
+                                        } else if filters_active {
+                                            let pluscon = ((value as i32 - config.threshold_min as i32).max(0) * 255
+                                                / (255 - (config.threshold_min + config.threshold_max) as i32))
+                                                .min(255)
+                                                as u8;
 
                                             buffer[v as usize * canvas_width + u as usize] =
                                                 (((pluscon & mask) as f32) / (mask as f32) * 255.0) as u8;
-                                            //+ mask_add;
-                                            // & 0xf0;
-                                        } /* else {
-                                              buffer[v as usize * width + u as usize] = (value & 0xf0) + 0x08;//(tile[((off / 8) * 8) as usize] & 0xc0) + 0x20;
-                                          } */
+                                        } else {
+                                            buffer[v as usize * canvas_width + u as usize] = value;
+                                        }
                                     }
                                 }
                             }

@@ -254,32 +254,33 @@ impl TemplateApp {
         let z_sl = slider(ui, "z", &mut self.coord[2], 0..=25000, false);
         let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
 
-        ui.label("Min");
-        let min_sl = ui.add(egui::Slider::new(
-            &mut self.drawing_config.threshold_min,
-            0..=(254 - self.drawing_config.threshold_max),
-        ));
-        ui.end_row();
+        ui.collapsing("Filters", |ui| {
+            let min_sl = slider(
+                ui,
+                "Min",
+                &mut self.drawing_config.threshold_min,
+                0..=(254 - self.drawing_config.threshold_max),
+                false,
+            );
+            let max_sl = slider(
+                ui,
+                "Max",
+                &mut self.drawing_config.threshold_max,
+                0..=(254 - self.drawing_config.threshold_min),
+                false,
+            );
+            let bits_sl = slider(ui, "Mask Bits", &mut self.drawing_config.quant, 1..=8, false);
+            let mask_sl = slider(ui, "Mask Shift", &mut self.drawing_config.mask_shift, 0..=7, false);
+            ui.label("Mask");
+            ui.label(format!("{:08b}", self.drawing_config.bit_mask()));
+            ui.end_row();
 
-        ui.label("Max");
-        let max_sl = ui.add(egui::Slider::new(
-            &mut self.drawing_config.threshold_max,
-            0..=(254 - self.drawing_config.threshold_min),
-        ));
-        ui.end_row();
+            if min_sl.changed() || max_sl.changed() || bits_sl.changed() || mask_sl.changed() {
+                self.clear_textures();
+            }
+        });
 
-        ui.label("Bits");
-        let bits_sl: Response = ui.add(egui::Slider::new(&mut self.drawing_config.quant, 1..=8));
-        ui.end_row();
-
-        if x_sl.changed()
-            || y_sl.changed()
-            || z_sl.changed()
-            || zoom_sl.changed()
-            || min_sl.changed()
-            || max_sl.changed()
-            || bits_sl.changed()
-        {
+        if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() {
             self.clear_textures();
         }
     }

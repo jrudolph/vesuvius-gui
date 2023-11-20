@@ -10,10 +10,14 @@ pub struct DrawingConfig {
     pub threshold_min: u8,
     pub threshold_max: u8,
     pub quant: u8,
+    pub mask_shift: u8,
 }
 impl DrawingConfig {
+    pub fn filters_active(&self) -> bool {
+        self.threshold_min > 0 || self.threshold_max > 0 || self.quant < 8 || self.mask_shift > 0
+    }
     pub fn bit_mask(&self) -> u8 {
-        match self.quant {
+        (match self.quant {
             8 => 0xff,
             7 => 0xfe,
             6 => 0xfc,
@@ -23,7 +27,7 @@ impl DrawingConfig {
             2 => 0xc0,
             1 => 0x80,
             _ => 0xff,
-        }
+        }) >> self.mask_shift
     }
 }
 impl Default for DrawingConfig {
@@ -32,6 +36,7 @@ impl Default for DrawingConfig {
             threshold_min: 0,
             threshold_max: 0,
             quant: 0xff,
+            mask_shift: 0,
         }
     }
 }
