@@ -255,7 +255,7 @@ impl TemplateApp {
         let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
 
         ui.collapsing("Filters", |ui| {
-            let enable = ui.checkbox(&mut self.drawing_config.enable_filters, "Enable");
+            let enable = ui.checkbox(&mut self.drawing_config.enable_filters, "Enable ('F')");
             ui.add_enabled_ui(self.drawing_config.enable_filters, |ui| {
                 let min_sl = slider(
                     ui,
@@ -311,6 +311,13 @@ impl eframe::App for TemplateApp {
         }
 
         egui::Window::new("Controls").show(ctx, |ui| {
+            ui.input(|i| {
+                if i.key_pressed(egui::Key::F) {
+                    self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
+                    self.clear_textures();
+                }
+            });
+
             egui::Grid::new("my_grid")
                 .num_columns(2)
                 .spacing([40.0, 4.0])
