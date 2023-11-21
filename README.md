@@ -15,7 +15,7 @@ Install required X11 libraries:
 
 Create a data directory, then run the app with `./vesuvius-gui <path-to-directory>` / `cargo run --release <path-to-directory>`.
 
-Credentials are the same as for data server.
+Credentials are the same as for the data server.
 
 ## Data License
 
