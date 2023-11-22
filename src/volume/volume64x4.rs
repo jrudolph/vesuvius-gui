@@ -314,34 +314,44 @@ impl PaintVolume for PPMVolume {
         buffer: &mut [u8],
     ) {
         let sfactor = _sfactor as usize;
-        if plane_coord != 2 {
+        /* if plane_coord != 2 {
             return;
-        }
+        } */
 
         let mut last_tile: [usize; 4] = [0; 4];
         let mut last_state: &TileState = &TileState::Missing;
 
-        for v in 0..height {
-            for u in 0..width {
-                let gu = u as i32 * paint_zoom as i32 + xyz[0] - width as i32 / 2;
-                let gv = v as i32 * paint_zoom as i32 + xyz[1] - height as i32 / 2;
+        for im_v in 0..height {
+            for im_u in 0..width {
+                let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32;
+                let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32;
+
+                let mut uvw: [i32; 3] = [0; 3];
+                uvw[u_coord] = xyz[u_coord] + im_rel_u;
+                uvw[v_coord] = xyz[v_coord] + im_rel_v;
+                uvw[plane_coord] = xyz[plane_coord];
 
                 /* if u == 300 && v == 300 {
                     println!("u: {} v: {} gu: {} gv: {}", u, v, gu, gv);
                 } */
-                if gu <= 0 || gv <= 0 || gu >= self.ppm.width as i32 || gv >= self.ppm.height as i32 {
+                if uvw[0] <= 0
+                    || uvw[0] >= self.ppm.width as i32
+                    || uvw[1] <= 0
+                    || uvw[1] >= self.ppm.height as i32
+                    || uvw[2].abs() > 60
+                {
                     continue;
                 }
 
-                let [x0, y0, z0, nx, ny, nz] = self.ppm.get(gu as usize, gv as usize);
+                let [x0, y0, z0, nx, ny, nz] = self.ppm.get(uvw[0] as usize, uvw[1] as usize);
 
                 if x0 == 0.0 && y0 == 0.0 && z0 == 0.0 {
                     continue;
                 }
 
-                let x = x0 + xyz[2] as f64 * nx;
-                let y = y0 + xyz[2] as f64 * ny;
-                let z = z0 + xyz[2] as f64 * nz;
+                let x = x0 + uvw[2] as f64 * nx;
+                let y = y0 + uvw[2] as f64 * ny;
+                let z = z0 + uvw[2] as f64 * nz;
 
                 let tile = [
                     x as usize / 64 / sfactor,
@@ -405,7 +415,7 @@ impl PaintVolume for PPMVolume {
                     } */
 
                     if off > 0 && off < tile.len() {
-                        buffer[v * width + u] = tile[off];
+                        buffer[im_v * width + im_u] = tile[off];
                     }
                 }
             }
