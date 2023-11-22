@@ -8,7 +8,7 @@ use crate::volume::*;
 use egui::Vec2;
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
-const ZOOM_RES_FACTOR: f32 = 1.0; //.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]

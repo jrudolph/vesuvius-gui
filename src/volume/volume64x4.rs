@@ -314,7 +314,7 @@ impl PaintVolume for PPMVolume {
         buffer: &mut [u8],
     ) {
         let sfactor = _sfactor as usize;
-        if plane_coord != 2 || sfactor != 1 || paint_zoom != 1 {
+        if plane_coord != 2 || /* sfactor != 1 || */ paint_zoom != 1 {
             return;
         }
 
@@ -333,7 +333,7 @@ impl PaintVolume for PPMVolume {
                     continue;
                 }
 
-                let [x, y, z, _, _, _] = self.ppm.get(gu as usize, gv as usize);
+                let [x, y, z, nx, ny, nz] = self.ppm.get(gu as usize, gv as usize);
 
                 if x == 0.0 && y == 0.0 && z == 0.0 {
                     continue;
@@ -368,9 +368,9 @@ impl PaintVolume for PPMVolume {
                 } */
 
                 if let TileState::Loaded(tile) = state {
-                    let tile_x = x as usize % 64;
-                    let tile_y = y as usize % 64;
-                    let tile_z = z as usize % 64;
+                    let tile_x = (x as usize / sfactor) % 64;
+                    let tile_y = (y as usize / sfactor) as usize % 64;
+                    let tile_z = (z as usize / sfactor) as usize % 64;
 
                     let xblock = tile_x / 4;
                     let yblock = tile_y / 4;
