@@ -333,11 +333,15 @@ impl PaintVolume for PPMVolume {
                     continue;
                 }
 
-                let [x, y, z, nx, ny, nz] = self.ppm.get(gu as usize, gv as usize);
+                let [x0, y0, z0, nx, ny, nz] = self.ppm.get(gu as usize, gv as usize);
 
-                if x == 0.0 && y == 0.0 && z == 0.0 {
+                if x0 == 0.0 && y0 == 0.0 && z0 == 0.0 {
                     continue;
                 }
+
+                let x = x0 + xyz[2] as f64 * nx;
+                let y = y0 + xyz[2] as f64 * ny;
+                let z = z0 + xyz[2] as f64 * nz;
 
                 let tile = [
                     x as usize / 64 / sfactor,
@@ -362,8 +366,15 @@ impl PaintVolume for PPMVolume {
                 };
 
                 /* if u == 300 && v == 300 {
-                    //println!("u: {} v: {} gu: {} gv: {}", u, v, gu, gv);
+                    println!("u: {} v: {} gu: {} gv: {}", u, v, gu, gv);
                     println!("x: {} y: {} z: {}", x, y, z);
+                    println!(
+                        "nx: {} ny: {} nz: {} len: {}",
+                        nx,
+                        ny,
+                        nz,
+                        (nx * nx + ny * ny + nz * nz).sqrt()
+                    );
                     println!("state: {:?}", state);
                 } */
 
