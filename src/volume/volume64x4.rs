@@ -314,7 +314,7 @@ impl PaintVolume for PPMVolume {
         buffer: &mut [u8],
     ) {
         let sfactor = _sfactor as usize;
-        if plane_coord != 2 || /* sfactor != 1 || */ paint_zoom != 1 {
+        if plane_coord != 2 {
             return;
         }
 
@@ -323,8 +323,8 @@ impl PaintVolume for PPMVolume {
 
         for v in 0..height {
             for u in 0..width {
-                let gu = u as i32 + xyz[0] - width as i32 / 2;
-                let gv = v as i32 + xyz[1] - height as i32 / 2;
+                let gu = u as i32 * paint_zoom as i32 + xyz[0] - width as i32 / 2;
+                let gv = v as i32 * paint_zoom as i32 + xyz[1] - height as i32 / 2;
 
                 /* if u == 300 && v == 300 {
                     println!("u: {} v: {} gu: {} gv: {}", u, v, gu, gv);
