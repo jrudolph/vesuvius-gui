@@ -8,7 +8,7 @@ use crate::volume::*;
 use egui::Vec2;
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
-const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+const ZOOM_RES_FACTOR: f32 = 1.0; //.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -100,7 +100,8 @@ impl TemplateApp {
         password = password.trim().to_string();
         Some(password)
     }
-    fn load_data(&mut self, volume: &'static dyn VolumeReference, data_dir: &str) {
+    fn load_data(&mut self, _volume: &'static dyn VolumeReference, data_dir: &str) {
+        let volume = <dyn VolumeReference>::VOLUMES[0];
         let password = TemplateApp::load_data_password(data_dir);
 
         if !password.is_some() {
@@ -115,7 +116,9 @@ impl TemplateApp {
 
         let volume_dir = volume.sub_dir(data_dir);
         let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password, sender);
-        self.world = Box::new(VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader));
+        let vol = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
+        let ppm = PPMVolume::new("/home/johannes/tmp/pap/20230827161847.ppm", 5048, 9163, vol);
+        self.world = Box::new(ppm);
         self.data_dir = data_dir.to_string();
     }
 
@@ -140,7 +143,7 @@ impl TemplateApp {
                 let min_level = 1 << ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
                 let delta = delta.y.signum() * min_level as f32;
                 let m = v(self);
-                *m = (*m + delta as i32) / min_level as i32 * min_level as i32;
+                *m = ((*m + delta as i32) / min_level as i32 * min_level as i32).max(0);
                 self.clear_textures();
             } else if zoom_delta != 1.0 {
                 self.zoom = (self.zoom * zoom_delta).max(0.1).min(6.0);
@@ -270,8 +273,8 @@ impl TemplateApp {
                     });
 
                 ui.end_row();
-                let x_sl = slider(ui, "x", &mut self.coord[0], -1000..=50000, false);
-                let y_sl = slider(ui, "y", &mut self.coord[1], -1000..=50000, false);
+                let x_sl = slider(ui, "x", &mut self.coord[0], 0..=50000, false);
+                let y_sl = slider(ui, "y", &mut self.coord[1], 0..=50000, false);
                 let z_sl = slider(ui, "z", &mut self.coord[2], 0..=25000, false);
                 let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
 

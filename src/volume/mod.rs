@@ -2,6 +2,7 @@ mod empty;
 mod volume64x4;
 
 pub use empty::EmptyVolume;
+pub use volume64x4::PPMVolume;
 pub use volume64x4::VolumeGrid64x4Mapped;
 
 #[derive(serde::Deserialize, serde::Serialize)]

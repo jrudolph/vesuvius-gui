@@ -255,3 +255,149 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         }
     }
 }
+
+pub struct PPMFile {
+    pub width: usize,
+    pub height: usize,
+    map: memmap::Mmap,
+}
+impl PPMFile {
+    pub fn new(file_name: &str, width: usize, height: usize) -> Option<Self> {
+        use memmap::MmapOptions;
+        use std::fs::File;
+
+        let file = File::open(file_name).ok()?;
+        let map = unsafe { MmapOptions::new().offset(73).map(&file) }.ok();
+
+        map.map(|map| Self { width, height, map })
+    }
+    pub fn get(&self, u: usize, v: usize) -> [f64; 6] {
+        let map = unsafe { std::slice::from_raw_parts(self.map.as_ptr() as *const f64, self.map.len() / 8) };
+        let off = (v * self.width + u) * 6;
+        [
+            map[off + 0],
+            map[off + 1],
+            map[off + 2],
+            map[off + 3],
+            map[off + 4],
+            map[off + 5],
+        ]
+    }
+}
+
+pub struct PPMVolume {
+    volume: VolumeGrid64x4Mapped,
+    ppm: PPMFile,
+}
+impl PPMVolume {
+    pub fn new(ppm_file: &str, width: usize, height: usize, base_volume: VolumeGrid64x4Mapped) -> Self {
+        let ppm = PPMFile::new(ppm_file, width, height).unwrap();
+
+        Self {
+            volume: base_volume,
+            ppm,
+        }
+    }
+}
+impl PaintVolume for PPMVolume {
+    fn paint(
+        &mut self,
+        xyz: [i32; 3],
+        u_coord: usize,
+        v_coord: usize,
+        plane_coord: usize,
+        width: usize,
+        height: usize,
+        _sfactor: u8,
+        paint_zoom: u8,
+        config: &DrawingConfig,
+        buffer: &mut [u8],
+    ) {
+        let sfactor = _sfactor as usize;
+        if plane_coord != 2 || sfactor != 1 || paint_zoom != 1 {
+            return;
+        }
+
+        let mut last_tile: [usize; 4] = [0; 4];
+        let mut last_state: &TileState = &TileState::Missing;
+
+        for v in 0..height {
+            for u in 0..width {
+                let gu = u as i32 + xyz[0] - width as i32 / 2;
+                let gv = v as i32 + xyz[1] - height as i32 / 2;
+
+                /* if u == 300 && v == 300 {
+                    println!("u: {} v: {} gu: {} gv: {}", u, v, gu, gv);
+                } */
+                if gu <= 0 || gv <= 0 || gu >= self.ppm.width as i32 || gv >= self.ppm.height as i32 {
+                    continue;
+                }
+
+                let [x, y, z, _, _, _] = self.ppm.get(gu as usize, gv as usize);
+
+                if x == 0.0 && y == 0.0 && z == 0.0 {
+                    continue;
+                }
+
+                let tile = [
+                    x as usize / 64 / sfactor,
+                    y as usize / 64 / sfactor,
+                    z as usize / 64 / sfactor,
+                    sfactor,
+                ];
+                let state = if tile == last_tile {
+                    last_state
+                } else {
+                    last_tile = tile;
+                    last_state = self.volume.try_loading_tile(
+                        tile[0],
+                        tile[1],
+                        tile[2],
+                        Quality {
+                            bit_mask: 0xff,
+                            downsampling_factor: tile[3] as u8,
+                        },
+                    );
+                    last_state
+                };
+
+                /* if u == 300 && v == 300 {
+                    //println!("u: {} v: {} gu: {} gv: {}", u, v, gu, gv);
+                    println!("x: {} y: {} z: {}", x, y, z);
+                    println!("state: {:?}", state);
+                } */
+
+                if let TileState::Loaded(tile) = state {
+                    let tile_x = x as usize % 64;
+                    let tile_y = y as usize % 64;
+                    let tile_z = z as usize % 64;
+
+                    let xblock = tile_x / 4;
+                    let yblock = tile_y / 4;
+                    let zblock = tile_z / 4;
+
+                    let xoff = tile_x % 4;
+                    let yoff = tile_y % 4;
+                    let zoff = tile_z % 4;
+
+                    let block = zblock * 256 + yblock * 16 + xblock;
+                    let block_off = zoff * 16 + yoff * 4 + xoff;
+                    let off = block * 64 + block_off;
+
+                    /* if u == 300 && v == 300 {
+                        println!("tile_x: {} tile_y: {} tile_z: {}", tile_x, tile_y, tile_z);
+                        println!("tile_x: {:06b} tile_y: {:06b} tile_z: {:06b}", tile_x, tile_y, tile_z);
+                        println!("xblock: {} yblock: {} zblock: {}", xblock, yblock, zblock);
+                        println!("xoff: {} yoff: {} zoff: {}", xoff, yoff, zoff);
+                        println!("block: {} block_off: {} off: {}", block, block_off, off);
+                        println!("block: {:b} block_off: {:b} off: {:b}", block, block_off, off);
+                    } */
+
+                    if off > 0 && off < tile.len() {
+                        buffer[v * width + u] = tile[off];
+                    }
+                }
+            }
+        }
+    }
+}
