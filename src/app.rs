@@ -38,6 +38,8 @@ pub struct TemplateApp {
     #[serde(skip)]
     download_notifier: Option<Receiver<()>>,
     drawing_config: DrawingConfig,
+    #[serde(skip)]
+    ranges: [RangeInclusive<i32>; 3],
 }
 
 impl Default for TemplateApp {
@@ -59,6 +61,7 @@ impl Default for TemplateApp {
             last_size: Vec2::ZERO,
             download_notifier: None,
             drawing_config: Default::default(),
+            ranges: [0..=10000, 0..=10000, 0..=15000],
         }
     }
 }
@@ -119,6 +122,7 @@ impl TemplateApp {
         let vol = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
         let ppm = PPMVolume::new("/home/johannes/tmp/pap/20230827161847.ppm", 5048, 9163, vol);
         self.world = Box::new(ppm);
+        self.ranges = [0..=5048, 0..=9163, -60..=60];
         self.data_dir = data_dir.to_string();
     }
 
@@ -135,15 +139,16 @@ impl TemplateApp {
         self.texture_yz = None;
     }
 
-    fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, v: fn(&mut Self) -> &mut i32) {
+    fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, coord: usize) {
         if image.hovered() {
             let delta = ui.input(|i| i.scroll_delta);
             let zoom_delta = ui.input(|i| i.zoom_delta());
             if delta.y != 0.0 {
                 let min_level = 1 << ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
                 let delta = delta.y.signum() * min_level as f32;
-                let m = v(self);
-                *m = ((*m + delta as i32) / min_level as i32 * min_level as i32).max(0);
+                let m = &mut self.coord[coord];
+                *m = ((*m + delta as i32) / min_level as i32 * min_level as i32)
+                    .clamp(*self.ranges[coord].start(), *self.ranges[coord].end());
                 self.clear_textures();
             } else if zoom_delta != 1.0 {
                 self.zoom = (self.zoom * zoom_delta).max(0.1).min(6.0);
@@ -156,8 +161,10 @@ impl TemplateApp {
             //let im2 = image.on_hover_cursor(CursorIcon::Grabbing);
             let delta = -image.drag_delta() / self.zoom;
 
-            self.coord[ucoord] += delta.x as i32;
-            self.coord[vcoord] += delta.y as i32;
+            self.coord[ucoord] =
+                (self.coord[ucoord] + delta.x as i32).clamp(*self.ranges[ucoord].start(), *self.ranges[ucoord].end());
+            self.coord[vcoord] =
+                (self.coord[vcoord] + delta.y as i32).clamp(*self.ranges[vcoord].start(), *self.ranges[vcoord].end());
             self.clear_textures();
         }
     }
@@ -273,9 +280,9 @@ impl TemplateApp {
                     });
 
                 ui.end_row();
-                let x_sl = slider(ui, "x", &mut self.coord[0], 0..=50000, false);
-                let y_sl = slider(ui, "y", &mut self.coord[1], 0..=50000, false);
-                let z_sl = slider(ui, "z", &mut self.coord[2], 0..=25000, false);
+                let x_sl = slider(ui, "x", &mut self.coord[0], self.ranges[0].clone(), false);
+                let y_sl = slider(ui, "y", &mut self.coord[1], self.ranges[1].clone(), false);
+                let z_sl = slider(ui, "z", &mut self.coord[2], self.ranges[2].clone(), false);
                 let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
 
                 if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() {
@@ -398,13 +405,13 @@ impl TemplateApp {
                 ui.horizontal(|ui| {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
                     let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
-                    self.add_scroll_handler(&im_xy, ui, |s| &mut s.coord[2]);
-                    self.add_scroll_handler(&im_xz, ui, |s| &mut s.coord[1]);
+                    self.add_scroll_handler(&im_xy, ui, 2);
+                    self.add_scroll_handler(&im_xz, ui, 1);
                     self.add_drag_handler(&im_xy, 0, 1);
                     self.add_drag_handler(&im_xz, 0, 2);
                 });
                 let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
-                self.add_scroll_handler(&im_yz, ui, |s| &mut s.coord[0]);
+                self.add_scroll_handler(&im_yz, ui, 0);
                 self.add_drag_handler(&im_yz, 2, 1);
             };
         });
