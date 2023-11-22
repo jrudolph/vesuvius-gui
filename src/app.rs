@@ -270,8 +270,8 @@ impl TemplateApp {
                     });
 
                 ui.end_row();
-                let x_sl = slider(ui, "x", &mut self.coord[0], -1000..=10000, false);
-                let y_sl = slider(ui, "y", &mut self.coord[1], -1000..=10000, false);
+                let x_sl = slider(ui, "x", &mut self.coord[0], -1000..=50000, false);
+                let y_sl = slider(ui, "y", &mut self.coord[1], -1000..=50000, false);
                 let z_sl = slider(ui, "z", &mut self.coord[2], 0..=25000, false);
                 let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
 

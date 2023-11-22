@@ -10,12 +10,13 @@ pub trait VolumeReference: Send + Sync {
     fn url_path_base(&self) -> String;
 }
 impl dyn VolumeReference {
-    pub const VOLUMES: [&'static dyn VolumeReference; 5] = [
+    pub const VOLUMES: [&'static dyn VolumeReference; 6] = [
         &FullVolumeReference::SCROLL1,
         &FullVolumeReference::SCROLL2,
         &FullVolumeReference::SCROLL332,
         &FullVolumeReference::SCROLL1667,
         &SurfaceVolumeReference::SEGMENT_20230827161847,
+        &SurfaceVolumeReference::SEGMENT_20231005123335,
     ];
 }
 
@@ -62,6 +63,10 @@ impl SurfaceVolumeReference {
     pub const SEGMENT_20230827161847: SurfaceVolumeReference = SurfaceVolumeReference {
         scroll_id: 1,
         segment_id: "20230827161847",
+    };
+    pub const SEGMENT_20231005123335: SurfaceVolumeReference = SurfaceVolumeReference {
+        scroll_id: 1,
+        segment_id: "20231005123335",
     };
 }
 impl VolumeReference for SurfaceVolumeReference {
