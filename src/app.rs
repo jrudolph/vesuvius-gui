@@ -100,7 +100,7 @@ impl TemplateApp {
         password = password.trim().to_string();
         Some(password)
     }
-    fn load_data(&mut self, volume: &'static VolumeReference, data_dir: &str) {
+    fn load_data(&mut self, volume: &'static dyn VolumeReference, data_dir: &str) {
         let password = TemplateApp::load_data_password(data_dir);
 
         if !password.is_some() {
@@ -120,10 +120,10 @@ impl TemplateApp {
     }
 
     fn select_volume(&mut self, id: usize) {
-        self.load_data(&VolumeReference::VOLUMES[id], &self.data_dir.to_string());
+        self.load_data(<dyn VolumeReference>::VOLUMES[id], &self.data_dir.to_string());
     }
-    fn selected_volume(&self) -> &'static VolumeReference {
-        &VolumeReference::VOLUMES[self.volume_id]
+    fn selected_volume(&self) -> &'static dyn VolumeReference {
+        <dyn VolumeReference>::VOLUMES[self.volume_id]
     }
 
     pub fn clear_textures(&mut self) {
@@ -259,7 +259,7 @@ impl TemplateApp {
                     .selected_text(self.selected_volume().label())
                     .show_ui(ui, |ui| {
                         // iterate over indices and values of VolumeReference::VOLUMES
-                        for (id, volume) in VolumeReference::VOLUMES.iter().enumerate() {
+                        for (id, volume) in <dyn VolumeReference>::VOLUMES.iter().enumerate() {
                             let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
                             if res.changed() {
                                 println!("Selected volume: {}", self.volume_id);

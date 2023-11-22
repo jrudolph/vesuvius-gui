@@ -46,7 +46,7 @@ impl Downloader {
     pub fn new(
         dir: &str,
         tile_server_base: &'static str,
-        volume: &'static VolumeReference,
+        volume: &'static dyn VolumeReference,
         authorization: Option<String>,
         download_notifier: Sender<()>,
     ) -> Downloader {
@@ -56,6 +56,7 @@ impl Downloader {
 
         std::fs::create_dir_all(dir.to_string()).unwrap();
         let dir = dir.to_string();
+        let volume = volume.clone();
         thread::spawn(move || {
             let mut queue = Vec::new();
             let mut pos = (0, 0, 0, 0 as usize, 0 as usize);
@@ -120,10 +121,9 @@ impl Downloader {
                         //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         let url = format!(
-                            "{}/tiles/scroll/{}/volume/{}/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}",
+                            "{}/tiles/{}download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}",
                             tile_server_base,
-                            volume.scroll_id,
-                            volume.volume,
+                            volume.url_path_base(),
                             x,
                             y,
                             z,
@@ -203,7 +203,7 @@ impl Downloader {
 
     pub fn check_authorization(tile_server_base: &'static str, authorization: Option<String>) -> bool {
         // check if request to tile server is authorized
-        let vol1 = VolumeReference::SCROLL1;
+        let vol1 = FullVolumeReference::SCROLL1;
         let url = format!(
             "{}/tiles/scroll/{}/volume/{}/",
             tile_server_base, vol1.scroll_id, vol1.volume
