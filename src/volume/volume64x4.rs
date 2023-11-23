@@ -338,7 +338,7 @@ impl PaintVolume for PPMVolume {
                     || uvw[0] >= self.ppm.width as i32
                     || uvw[1] <= 0
                     || uvw[1] >= self.ppm.height as i32
-                    || uvw[2].abs() > 60
+                    || uvw[2].abs() > 30
                 {
                     continue;
                 }
@@ -354,9 +354,9 @@ impl PaintVolume for PPMVolume {
                 let z = z0 + uvw[2] as f64 * nz;
 
                 let tile = [
-                    x as usize / 64 / sfactor,
-                    y as usize / 64 / sfactor,
-                    z as usize / 64 / sfactor,
+                    x.round() as usize / 64 / sfactor,
+                    y.round() as usize / 64 / sfactor,
+                    z.round() as usize / 64 / sfactor,
                     sfactor,
                 ];
                 let state = if tile == last_tile {
@@ -389,9 +389,9 @@ impl PaintVolume for PPMVolume {
                 } */
 
                 if let TileState::Loaded(tile) = state {
-                    let tile_x = (x as usize / sfactor) % 64;
-                    let tile_y = (y as usize / sfactor) as usize % 64;
-                    let tile_z = (z as usize / sfactor) as usize % 64;
+                    let tile_x = (x.round() as usize / sfactor) % 64;
+                    let tile_y = (y.round() as usize / sfactor) as usize % 64;
+                    let tile_z = (z.round() as usize / sfactor) as usize % 64;
 
                     let xblock = tile_x / 4;
                     let yblock = tile_y / 4;

@@ -8,7 +8,7 @@ use crate::volume::*;
 use egui::Vec2;
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
-const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+const ZOOM_RES_FACTOR: f32 = 1.; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -120,9 +120,11 @@ impl TemplateApp {
         let volume_dir = volume.sub_dir(data_dir);
         let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password, sender);
         let vol = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
-        let ppm = PPMVolume::new("/home/johannes/tmp/pap/20230827161847.ppm", 5048, 9163, vol);
+        let width = 9227i32;
+        let height = 4918i32;
+        let ppm = PPMVolume::new("/home/johannes/tmp/pap/test.ppm", width as usize, height as usize, vol);
         self.world = Box::new(ppm);
-        self.ranges = [0..=5048, 0..=9163, -60..=60];
+        self.ranges = [0..=width, 0..=height, -30..=30];
         self.data_dir = data_dir.to_string();
     }
 
