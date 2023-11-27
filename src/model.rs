@@ -10,7 +10,7 @@ pub trait VolumeReference: Send + Sync {
     fn url_path_base(&self) -> String;
 }
 impl dyn VolumeReference {
-    pub const VOLUMES: [&'static dyn VolumeReference; 10] = [
+    pub const VOLUMES: [&'static dyn VolumeReference; 16] = [
         &FullVolumeReference::SCROLL1,
         &FullVolumeReference::SCROLL2,
         &FullVolumeReference::SCROLL332,
@@ -19,6 +19,12 @@ impl dyn VolumeReference {
         &FullVolumeReference::FRAGMENT_PHerc1667Cr01Fr03,
         &FullVolumeReference::FRAGMENT_1_54keV,
         &FullVolumeReference::FRAGMENT_1_88keV,
+        &FullVolumeReference::FRAGMENT_2_54keV,
+        &FullVolumeReference::FRAGMENT_2_88keV,
+        &FullVolumeReference::FRAGMENT_3_54keV,
+        &FullVolumeReference::FRAGMENT_3_88keV,
+        &FullVolumeReference::FRAGMENT_4_54keV,
+        &FullVolumeReference::FRAGMENT_4_88keV,
         &SurfaceVolumeReference::SEGMENT_20230827161847,
         &SurfaceVolumeReference::SEGMENT_20231005123335,
     ];
@@ -28,6 +34,7 @@ pub struct FullVolumeReference {
     pub scroll_id: &'static str,
     pub volume: &'static str,
 }
+#[allow(non_upper_case_globals)]
 impl FullVolumeReference {
     pub const SCROLL1: FullVolumeReference = FullVolumeReference {
         scroll_id: "1",
@@ -60,6 +67,30 @@ impl FullVolumeReference {
     pub const FRAGMENT_1_88keV: FullVolumeReference = FullVolumeReference {
         scroll_id: "Frag1",
         volume: "20230213100222",
+    };
+    pub const FRAGMENT_2_54keV: FullVolumeReference = FullVolumeReference {
+        scroll_id: "Frag2",
+        volume: "20230216174557",
+    };
+    pub const FRAGMENT_2_88keV: FullVolumeReference = FullVolumeReference {
+        scroll_id: "Frag2",
+        volume: "20230226143835",
+    };
+    pub const FRAGMENT_3_54keV: FullVolumeReference = FullVolumeReference {
+        scroll_id: "Frag3",
+        volume: "20230212182547",
+    };
+    pub const FRAGMENT_3_88keV: FullVolumeReference = FullVolumeReference {
+        scroll_id: "Frag3",
+        volume: "20230215142309",
+    };
+    pub const FRAGMENT_4_54keV: FullVolumeReference = FullVolumeReference {
+        scroll_id: "Frag4",
+        volume: "20230215185642",
+    };
+    pub const FRAGMENT_4_88keV: FullVolumeReference = FullVolumeReference {
+        scroll_id: "Frag4",
+        volume: "20230222173037",
     };
 }
 impl VolumeReference for FullVolumeReference {
