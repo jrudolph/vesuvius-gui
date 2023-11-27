@@ -10,12 +10,15 @@ pub trait VolumeReference: Send + Sync {
     fn url_path_base(&self) -> String;
 }
 impl dyn VolumeReference {
-    pub const VOLUMES: [&'static dyn VolumeReference; 7] = [
+    pub const VOLUMES: [&'static dyn VolumeReference; 10] = [
         &FullVolumeReference::SCROLL1,
         &FullVolumeReference::SCROLL2,
         &FullVolumeReference::SCROLL332,
         &FullVolumeReference::SCROLL1667,
+        &FullVolumeReference::FRAGMENT_PHerc0051Cr04Fr08,
         &FullVolumeReference::FRAGMENT_PHerc1667Cr01Fr03,
+        &FullVolumeReference::FRAGMENT_1_54keV,
+        &FullVolumeReference::FRAGMENT_1_88keV,
         &SurfaceVolumeReference::SEGMENT_20230827161847,
         &SurfaceVolumeReference::SEGMENT_20231005123335,
     ];
@@ -42,9 +45,21 @@ impl FullVolumeReference {
         scroll_id: "1667",
         volume: "20231107190228",
     };
+    pub const FRAGMENT_PHerc0051Cr04Fr08: FullVolumeReference = FullVolumeReference {
+        scroll_id: "PHerc0051Cr04Fr08",
+        volume: "20231121152933",
+    };
     pub const FRAGMENT_PHerc1667Cr01Fr03: FullVolumeReference = FullVolumeReference {
         scroll_id: "PHerc1667Cr01Fr03",
         volume: "20231121133215",
+    };
+    pub const FRAGMENT_1_54keV: FullVolumeReference = FullVolumeReference {
+        scroll_id: "Frag1",
+        volume: "20230205142449",
+    };
+    pub const FRAGMENT_1_88keV: FullVolumeReference = FullVolumeReference {
+        scroll_id: "Frag1",
+        volume: "20230213100222",
     };
 }
 impl VolumeReference for FullVolumeReference {
