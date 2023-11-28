@@ -265,6 +265,7 @@ impl TemplateApp {
                                 println!("Selected volume: {}", self.volume_id);
                                 self.clear_textures();
                                 self.select_volume(self.volume_id);
+                                self.zoom = 0.25;
                             }
                         }
                     });
