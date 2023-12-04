@@ -120,11 +120,13 @@ impl TemplateApp {
         let volume_dir = volume.sub_dir(data_dir);
         let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password, sender);
         let vol = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
-        let width = 9227i32;
-        let height = 4918i32;
-        let ppm = PPMVolume::new("/home/johannes/tmp/pap/test.ppm", width as usize, height as usize, vol);
+        let ppm = PPMVolume::new("/tmp/PerPixelMap.ppm", vol);
+        let width = ppm.width() as i32;
+        let height = ppm.height() as i32;
+
         self.world = Box::new(ppm);
         self.ranges = [0..=width, 0..=height, -30..=30];
+        self.coord = [width / 2, height / 2, 0];
         self.data_dir = data_dir.to_string();
     }
 

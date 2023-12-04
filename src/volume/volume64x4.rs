@@ -2,7 +2,6 @@ use crate::downloader::*;
 use crate::model::Quality;
 use crate::volume::PaintVolume;
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -262,12 +261,36 @@ pub struct PPMFile {
     map: memmap::Mmap,
 }
 impl PPMFile {
-    pub fn new(file_name: &str, width: usize, height: usize) -> Option<Self> {
+    pub fn new(file_name: &str) -> Option<Self> {
         use memmap::MmapOptions;
+        use std::collections::HashMap;
         use std::fs::File;
+        use std::io::{BufRead, Seek, SeekFrom};
 
         let file = File::open(file_name).ok()?;
-        let map = unsafe { MmapOptions::new().offset(73).map(&file) }.ok();
+        let mut reader = std::io::BufReader::new(&file);
+
+        let mut header_map = HashMap::new();
+        let mut line = String::new();
+
+        let mut end_pos = 0;
+        while let Ok(len) = reader.read_line(&mut line) {
+            if line.starts_with("<>\n") {
+                end_pos = reader.seek(SeekFrom::Current(0)).ok()?;
+                break;
+            }
+            println!("line: '{}' len: {}", line, len);
+            let mut split = line[..len].split(": ");
+            let key = split.next()?.trim().to_string();
+            let value = split.next()?.trim().to_string();
+            header_map.insert(key, value);
+            line.clear();
+        }
+        println!("header_map: {:?} pos: {}", header_map, end_pos);
+        let width = header_map.get("width")?.parse::<usize>().ok()?;
+        let height = header_map.get("height")?.parse::<usize>().ok()?;
+
+        let map = unsafe { MmapOptions::new().offset(end_pos as u64).map(&file) }.ok();
 
         map.map(|map| Self { width, height, map })
     }
@@ -290,13 +313,19 @@ pub struct PPMVolume {
     ppm: PPMFile,
 }
 impl PPMVolume {
-    pub fn new(ppm_file: &str, width: usize, height: usize, base_volume: VolumeGrid64x4Mapped) -> Self {
-        let ppm = PPMFile::new(ppm_file, width, height).unwrap();
+    pub fn new(ppm_file: &str, base_volume: VolumeGrid64x4Mapped) -> Self {
+        let ppm = PPMFile::new(ppm_file).unwrap();
 
         Self {
             volume: base_volume,
             ppm,
         }
+    }
+    pub fn width(&self) -> usize {
+        self.ppm.width
+    }
+    pub fn height(&self) -> usize {
+        self.ppm.height
     }
 }
 impl PaintVolume for PPMVolume {
