@@ -8,7 +8,7 @@ use crate::volume::*;
 use egui::Vec2;
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
-const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+const ZOOM_RES_FACTOR: f32 = 1.; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -38,6 +38,10 @@ pub struct TemplateApp {
     #[serde(skip)]
     download_notifier: Option<Receiver<()>>,
     drawing_config: DrawingConfig,
+    #[serde(skip)]
+    ranges: [RangeInclusive<i32>; 3],
+    #[serde(skip)]
+    is_ppm_mode: bool,
 }
 
 impl Default for TemplateApp {
@@ -59,6 +63,8 @@ impl Default for TemplateApp {
             last_size: Vec2::ZERO,
             download_notifier: None,
             drawing_config: Default::default(),
+            ranges: [0..=10000, 0..=10000, 0..=15000],
+            is_ppm_mode: false,
         }
     }
 }
@@ -67,7 +73,7 @@ impl TemplateApp {
     const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
 
     /// Called once before the first frame.
-    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: Option<String>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: Option<String>, ppm_file: Option<String>) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
         let mut app: TemplateApp = if let Some(storage) = cc.storage {
@@ -87,7 +93,13 @@ impl TemplateApp {
         }
 
         if app.is_authorized {
-            app.select_volume(app.volume_id);
+            if ppm_file.is_some() {
+                app.volume_id = 0;
+                app.is_ppm_mode = true;
+                app.load_data(&FullVolumeReference::SCROLL1, ppm_file);
+            } else {
+                app.select_volume(app.volume_id);
+            }
         }
 
         app
@@ -100,27 +112,39 @@ impl TemplateApp {
         password = password.trim().to_string();
         Some(password)
     }
-    fn load_data(&mut self, volume: &'static dyn VolumeReference, data_dir: &str) {
-        let password = TemplateApp::load_data_password(data_dir);
+    fn load_data(&mut self, volume: &'static dyn VolumeReference, ppm_file: Option<String>) {
+        let password = TemplateApp::load_data_password(&self.data_dir);
 
         if !password.is_some() {
             panic!(
                 "No password.txt found in data directory {}, attempting access with no password",
-                data_dir
+                self.data_dir
             );
         }
 
         let (sender, receiver) = std::sync::mpsc::channel();
         self.download_notifier = Some(receiver);
 
-        let volume_dir = volume.sub_dir(data_dir);
+        let volume_dir = volume.sub_dir(&self.data_dir);
         let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password, sender);
-        self.world = Box::new(VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader));
-        self.data_dir = data_dir.to_string();
+        let vol0 = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
+
+        if let Some(ppm_file) = ppm_file {
+            let ppm = PPMVolume::new(&ppm_file, vol0);
+            let width = ppm.width() as i32;
+            let height = ppm.height() as i32;
+            println!("Loaded PPM volume with size {}x{}", width, height);
+
+            self.world = Box::new(ppm);
+            self.ranges = [0..=width, 0..=height, -30..=30];
+            self.coord = [width / 2, height / 2, 0];
+        } else {
+            self.world = Box::new(vol0);
+        }
     }
 
     fn select_volume(&mut self, id: usize) {
-        self.load_data(<dyn VolumeReference>::VOLUMES[id], &self.data_dir.to_string());
+        self.load_data(<dyn VolumeReference>::VOLUMES[id], None);
     }
     fn selected_volume(&self) -> &'static dyn VolumeReference {
         <dyn VolumeReference>::VOLUMES[self.volume_id]
@@ -132,15 +156,16 @@ impl TemplateApp {
         self.texture_yz = None;
     }
 
-    fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, v: fn(&mut Self) -> &mut i32) {
+    fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, coord: usize) {
         if image.hovered() {
             let delta = ui.input(|i| i.scroll_delta);
             let zoom_delta = ui.input(|i| i.zoom_delta());
             if delta.y != 0.0 {
                 let min_level = 1 << ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
                 let delta = delta.y.signum() * min_level as f32;
-                let m = v(self);
-                *m = (*m + delta as i32) / min_level as i32 * min_level as i32;
+                let m = &mut self.coord[coord];
+                *m = ((*m + delta as i32) / min_level as i32 * min_level as i32)
+                    .clamp(*self.ranges[coord].start(), *self.ranges[coord].end());
                 self.clear_textures();
             } else if zoom_delta != 1.0 {
                 self.zoom = (self.zoom * zoom_delta).max(0.1).min(6.0);
@@ -153,8 +178,10 @@ impl TemplateApp {
             //let im2 = image.on_hover_cursor(CursorIcon::Grabbing);
             let delta = -image.drag_delta() / self.zoom;
 
-            self.coord[ucoord] += delta.x as i32;
-            self.coord[vcoord] += delta.y as i32;
+            self.coord[ucoord] =
+                (self.coord[ucoord] + delta.x as i32).clamp(*self.ranges[ucoord].start(), *self.ranges[ucoord].end());
+            self.coord[vcoord] =
+                (self.coord[vcoord] + delta.y as i32).clamp(*self.ranges[vcoord].start(), *self.ranges[vcoord].end());
             self.clear_textures();
         }
     }
@@ -255,25 +282,32 @@ impl TemplateApp {
             .spacing([40.0, 4.0])
             .show(ui, |ui| {
                 ui.label("Volume");
-                egui::ComboBox::from_id_source("Volume")
-                    .selected_text(self.selected_volume().label())
-                    .show_ui(ui, |ui| {
-                        // iterate over indices and values of VolumeReference::VOLUMES
-                        for (id, volume) in <dyn VolumeReference>::VOLUMES.iter().enumerate() {
-                            let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
-                            if res.changed() {
-                                println!("Selected volume: {}", self.volume_id);
-                                self.clear_textures();
-                                self.select_volume(self.volume_id);
-                                self.zoom = 0.25;
+                ui.add_enabled_ui(!self.is_ppm_mode, |ui| {
+                    egui::ComboBox::from_id_source("Volume")
+                        .selected_text(self.selected_volume().label())
+                        .show_ui(ui, |ui| {
+                            // iterate over indices and values of VolumeReference::VOLUMES
+                            for (id, volume) in <dyn VolumeReference>::VOLUMES.iter().enumerate() {
+                                let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
+                                if res.changed() {
+                                    println!("Selected volume: {}", self.volume_id);
+                                    self.clear_textures();
+                                    self.select_volume(self.volume_id);
+                                    self.zoom = 0.25;
+                                }
                             }
-                        }
-                    });
-
+                        });
+                });
                 ui.end_row();
-                let x_sl = slider(ui, "x", &mut self.coord[0], -1000..=50000, false);
-                let y_sl = slider(ui, "y", &mut self.coord[1], -1000..=50000, false);
-                let z_sl = slider(ui, "z", &mut self.coord[2], 0..=25000, false);
+                if self.is_ppm_mode {
+                    ui.label("");
+                    ui.label("Fixed to Scroll 1 in PPM mode");
+                    ui.end_row();
+                }
+
+                let x_sl = slider(ui, "x", &mut self.coord[0], self.ranges[0].clone(), false);
+                let y_sl = slider(ui, "y", &mut self.coord[1], self.ranges[1].clone(), false);
+                let z_sl = slider(ui, "z", &mut self.coord[2], self.ranges[2].clone(), false);
                 let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
 
                 if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() {
@@ -396,13 +430,13 @@ impl TemplateApp {
                 ui.horizontal(|ui| {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
                     let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
-                    self.add_scroll_handler(&im_xy, ui, |s| &mut s.coord[2]);
-                    self.add_scroll_handler(&im_xz, ui, |s| &mut s.coord[1]);
+                    self.add_scroll_handler(&im_xy, ui, 2);
+                    self.add_scroll_handler(&im_xz, ui, 1);
                     self.add_drag_handler(&im_xy, 0, 1);
                     self.add_drag_handler(&im_xz, 0, 2);
                 });
                 let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
-                self.add_scroll_handler(&im_yz, ui, |s| &mut s.coord[0]);
+                self.add_scroll_handler(&im_yz, ui, 0);
                 self.add_drag_handler(&im_yz, 2, 1);
             };
         });

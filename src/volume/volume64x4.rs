@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use super::DrawingConfig;
 
 #[derive(Debug)]
-enum TileState {
+pub(crate) enum TileState {
     Unknown,
     Missing,
     Loaded(memmap::Mmap),
@@ -45,7 +45,7 @@ impl VolumeGrid64x4Mapped {
         })
         .map(|x| TileState::Loaded(x))
     }
-    fn try_loading_tile(&mut self, x: usize, y: usize, z: usize, quality: Quality) -> &TileState {
+    pub(crate) fn try_loading_tile(&mut self, x: usize, y: usize, z: usize, quality: Quality) -> &TileState {
         let key = (x, y, z, quality.downsampling_factor as usize);
         if !self.data.contains_key(&key) {
             self.data.insert(key, TileState::Unknown);

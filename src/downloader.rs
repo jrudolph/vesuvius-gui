@@ -70,7 +70,7 @@ impl Downloader {
                     }
                 }
 
-                let larger_edge = pos.3.max(pos.4) as i32;
+                /*let larger_edge = pos.3.max(pos.4) as i32;
                 queue.retain(|(state, x, y, z, q)| {
                     let f = q.downsampling_factor as i32;
                     let dx = *x as i32 * 64 * f + 32 * f - pos.0;
@@ -91,7 +91,7 @@ impl Downloader {
                     } else {
                         true
                     }
-                });
+                }); */
 
                 let cur = count.load(Ordering::Acquire);
                 if cur >= 16 || queue.is_empty() {
@@ -116,7 +116,7 @@ impl Downloader {
                     let (state, x, y, z, quality) = queue.pop().unwrap();
                     {
                         *state.lock().unwrap() = DownloadState::Downloading;
-                        //println!("Downloading {} {} {}", x, y, z);
+                        println!("Downloading {} {} {} {}", x, y, z, quality.downsampling_factor);
                         //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
