@@ -41,7 +41,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     ranges: [RangeInclusive<i32>; 3],
     #[serde(skip)]
-    is_ppm_mode: bool,
+    ppm_file: Option<String>,
 }
 
 impl Default for TemplateApp {
@@ -64,7 +64,7 @@ impl Default for TemplateApp {
             download_notifier: None,
             drawing_config: Default::default(),
             ranges: [0..=10000, 0..=10000, 0..=15000],
-            is_ppm_mode: false,
+            ppm_file: None,
         }
     }
 }
@@ -84,6 +84,7 @@ impl TemplateApp {
         if let Some(dir) = data_dir {
             app.data_dir = dir;
         }
+        app.ppm_file = ppm_file;
 
         let pass = Self::load_data_password(&app.data_dir);
         if Downloader::check_authorization(Self::TILE_SERVER, pass) {
@@ -93,13 +94,7 @@ impl TemplateApp {
         }
 
         if app.is_authorized {
-            if ppm_file.is_some() {
-                app.volume_id = 0;
-                app.is_ppm_mode = true;
-                app.load_data(&FullVolumeReference::SCROLL1, ppm_file);
-            } else {
-                app.select_volume(app.volume_id);
-            }
+            app.select_volume(app.volume_id);
         }
 
         app
@@ -112,7 +107,7 @@ impl TemplateApp {
         password = password.trim().to_string();
         Some(password)
     }
-    fn load_data(&mut self, volume: &'static dyn VolumeReference, ppm_file: Option<String>) {
+    fn load_data(&mut self, volume: &'static dyn VolumeReference) {
         let password = TemplateApp::load_data_password(&self.data_dir);
 
         if !password.is_some() {
@@ -129,7 +124,7 @@ impl TemplateApp {
         let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password, sender);
         let vol0 = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
 
-        if let Some(ppm_file) = ppm_file {
+        if let Some(ppm_file) = &self.ppm_file {
             let ppm = PPMVolume::new(&ppm_file, vol0);
             let width = ppm.width() as i32;
             let height = ppm.height() as i32;
@@ -142,9 +137,18 @@ impl TemplateApp {
             self.world = Box::new(vol0);
         }
     }
+    pub fn is_ppm_mode(&self) -> bool {
+        self.ppm_file.is_some()
+    }
 
     fn select_volume(&mut self, id: usize) {
-        self.load_data(<dyn VolumeReference>::VOLUMES[id], None);
+        if self.ppm_file.is_some() {
+            self.volume_id = 0;
+            self.load_data(&FullVolumeReference::SCROLL1);
+        } else {
+            self.volume_id = id;
+            self.load_data(<dyn VolumeReference>::VOLUMES[id]);
+        }
     }
     fn selected_volume(&self) -> &'static dyn VolumeReference {
         <dyn VolumeReference>::VOLUMES[self.volume_id]
@@ -282,7 +286,7 @@ impl TemplateApp {
             .spacing([40.0, 4.0])
             .show(ui, |ui| {
                 ui.label("Volume");
-                ui.add_enabled_ui(!self.is_ppm_mode, |ui| {
+                ui.add_enabled_ui(!self.is_ppm_mode(), |ui| {
                     egui::ComboBox::from_id_source("Volume")
                         .selected_text(self.selected_volume().label())
                         .show_ui(ui, |ui| {
@@ -299,7 +303,7 @@ impl TemplateApp {
                         });
                 });
                 ui.end_row();
-                if self.is_ppm_mode {
+                if self.is_ppm_mode() {
                     ui.label("");
                     ui.label("Fixed to Scroll 1 in PPM mode");
                     ui.end_row();
