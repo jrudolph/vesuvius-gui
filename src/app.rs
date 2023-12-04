@@ -40,6 +40,8 @@ pub struct TemplateApp {
     drawing_config: DrawingConfig,
     #[serde(skip)]
     ranges: [RangeInclusive<i32>; 3],
+    #[serde(skip)]
+    is_ppm_mode: bool,
 }
 
 impl Default for TemplateApp {
@@ -62,6 +64,7 @@ impl Default for TemplateApp {
             download_notifier: None,
             drawing_config: Default::default(),
             ranges: [0..=10000, 0..=10000, 0..=15000],
+            is_ppm_mode: false,
         }
     }
 }
@@ -91,6 +94,8 @@ impl TemplateApp {
 
         if app.is_authorized {
             if ppm_file.is_some() {
+                app.volume_id = 0;
+                app.is_ppm_mode = true;
                 app.load_data(&FullVolumeReference::SCROLL1, ppm_file);
             } else {
                 app.select_volume(app.volume_id);
@@ -277,21 +282,28 @@ impl TemplateApp {
             .spacing([40.0, 4.0])
             .show(ui, |ui| {
                 ui.label("Volume");
-                egui::ComboBox::from_id_source("Volume")
-                    .selected_text(self.selected_volume().label())
-                    .show_ui(ui, |ui| {
-                        // iterate over indices and values of VolumeReference::VOLUMES
-                        for (id, volume) in <dyn VolumeReference>::VOLUMES.iter().enumerate() {
-                            let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
-                            if res.changed() {
-                                println!("Selected volume: {}", self.volume_id);
-                                self.clear_textures();
-                                self.select_volume(self.volume_id);
+                ui.add_enabled_ui(!self.is_ppm_mode, |ui| {
+                    egui::ComboBox::from_id_source("Volume")
+                        .selected_text(self.selected_volume().label())
+                        .show_ui(ui, |ui| {
+                            // iterate over indices and values of VolumeReference::VOLUMES
+                            for (id, volume) in <dyn VolumeReference>::VOLUMES.iter().enumerate() {
+                                let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
+                                if res.changed() {
+                                    println!("Selected volume: {}", self.volume_id);
+                                    self.clear_textures();
+                                    self.select_volume(self.volume_id);
+                                }
                             }
-                        }
-                    });
-
+                        });
+                });
                 ui.end_row();
+                if self.is_ppm_mode {
+                    ui.label("");
+                    ui.label("Fixed to Scroll 1 in PPM mode");
+                    ui.end_row();
+                }
+
                 let x_sl = slider(ui, "x", &mut self.coord[0], self.ranges[0].clone(), false);
                 let y_sl = slider(ui, "y", &mut self.coord[1], self.ranges[1].clone(), false);
                 let z_sl = slider(ui, "z", &mut self.coord[2], self.ranges[2].clone(), false);
