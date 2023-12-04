@@ -70,7 +70,7 @@ impl TemplateApp {
     const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
 
     /// Called once before the first frame.
-    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: Option<String>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: Option<String>, ppm_file: Option<String>) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
         let mut app: TemplateApp = if let Some(storage) = cc.storage {
@@ -90,7 +90,11 @@ impl TemplateApp {
         }
 
         if app.is_authorized {
-            app.select_volume(app.volume_id);
+            if ppm_file.is_some() {
+                app.load_data(&FullVolumeReference::SCROLL1, ppm_file);
+            } else {
+                app.select_volume(app.volume_id);
+            }
         }
 
         app
@@ -103,36 +107,39 @@ impl TemplateApp {
         password = password.trim().to_string();
         Some(password)
     }
-    fn load_data(&mut self, _volume: &'static dyn VolumeReference, data_dir: &str) {
-        let volume = <dyn VolumeReference>::VOLUMES[0];
-        let password = TemplateApp::load_data_password(data_dir);
+    fn load_data(&mut self, volume: &'static dyn VolumeReference, ppm_file: Option<String>) {
+        let password = TemplateApp::load_data_password(&self.data_dir);
 
         if !password.is_some() {
             panic!(
                 "No password.txt found in data directory {}, attempting access with no password",
-                data_dir
+                self.data_dir
             );
         }
 
         let (sender, receiver) = std::sync::mpsc::channel();
         self.download_notifier = Some(receiver);
 
-        let volume_dir = volume.sub_dir(data_dir);
+        let volume_dir = volume.sub_dir(&self.data_dir);
         let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password, sender);
-        let vol = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
-        let ppm = PPMVolume::new("/tmp/PerPixelMap.ppm", vol);
-        let width = ppm.width() as i32;
-        let height = ppm.height() as i32;
-        println!("Loaded PPM volume with size {}x{}", width, height);
+        let vol0 = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
 
-        self.world = Box::new(ppm);
-        self.ranges = [0..=width, 0..=height, -30..=30];
-        self.coord = [width / 2, height / 2, 0];
-        self.data_dir = data_dir.to_string();
+        if let Some(ppm_file) = ppm_file {
+            let ppm = PPMVolume::new(&ppm_file, vol0);
+            let width = ppm.width() as i32;
+            let height = ppm.height() as i32;
+            println!("Loaded PPM volume with size {}x{}", width, height);
+
+            self.world = Box::new(ppm);
+            self.ranges = [0..=width, 0..=height, -30..=30];
+            self.coord = [width / 2, height / 2, 0];
+        } else {
+            self.world = Box::new(vol0);
+        }
     }
 
     fn select_volume(&mut self, id: usize) {
-        self.load_data(<dyn VolumeReference>::VOLUMES[id], &self.data_dir.to_string());
+        self.load_data(<dyn VolumeReference>::VOLUMES[id], None);
     }
     fn selected_volume(&self) -> &'static dyn VolumeReference {
         <dyn VolumeReference>::VOLUMES[self.volume_id]
