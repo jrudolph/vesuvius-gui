@@ -123,6 +123,7 @@ impl TemplateApp {
         let ppm = PPMVolume::new("/tmp/PerPixelMap.ppm", vol);
         let width = ppm.width() as i32;
         let height = ppm.height() as i32;
+        println!("Loaded PPM volume with size {}x{}", width, height);
 
         self.world = Box::new(ppm);
         self.ranges = [0..=width, 0..=height, -30..=30];
