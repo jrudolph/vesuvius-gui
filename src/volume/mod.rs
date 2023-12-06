@@ -5,6 +5,7 @@ mod ppmvolume;
 mod volume64x4;
 
 pub use empty::EmptyVolume;
+pub use generic::AutoPaintVolume;
 pub use grid500::VolumeGrid500Mapped;
 pub use ppmvolume::PPMVolume;
 pub use volume64x4::VolumeGrid64x4Mapped;
@@ -50,7 +51,7 @@ impl Default for DrawingConfig {
 }
 
 pub trait VoxelVolume {
-    fn get(&mut self, xyz: [i32; 3]) -> u8;
+    fn get(&mut self, xyz: [i32; 3], downsampling: i32) -> u8;
 }
 
 pub trait PaintVolume {

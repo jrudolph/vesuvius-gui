@@ -1,4 +1,4 @@
-use super::VoxelVolume;
+use super::{AutoPaintVolume, VoxelVolume};
 
 pub struct VolumeGrid500Mapped {
     max_x: usize,
@@ -76,7 +76,8 @@ impl VolumeGrid500Mapped {
     }
 }
 impl VoxelVolume for VolumeGrid500Mapped {
-    fn get(&mut self, xyz: [i32; 3]) -> u8 {
+    fn get(&mut self, _xyz: [i32; 3], downsampling: i32) -> u8 {
+        let xyz = [_xyz[0] * downsampling, _xyz[1] * downsampling, _xyz[2] * downsampling];
         let x_tile = xyz[0] as usize / 500;
         let y_tile = xyz[1] as usize / 500;
         let z_tile = xyz[2] as usize / 500;
@@ -101,3 +102,5 @@ impl VoxelVolume for VolumeGrid500Mapped {
         }
     }
 }
+
+impl AutoPaintVolume for VolumeGrid500Mapped {}

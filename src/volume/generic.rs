@@ -1,6 +1,9 @@
 use super::{DrawingConfig, PaintVolume, VoxelVolume};
 
-impl<T: VoxelVolume> PaintVolume for T {
+// marker trait for volumes that do not want to provide a specific PaintVolume implementation
+pub trait AutoPaintVolume {}
+
+impl<T: VoxelVolume + AutoPaintVolume> PaintVolume for T {
     fn paint(
         &mut self,
         xyz: [i32; 3],
@@ -11,25 +14,36 @@ impl<T: VoxelVolume> PaintVolume for T {
         height: usize,
         _sfactor: u8,
         paint_zoom: u8,
-        config: &DrawingConfig,
+        _config: &DrawingConfig,
         buffer: &mut [u8],
     ) {
         let sfactor = _sfactor as usize;
-        /* if plane_coord != 2 {
-            return;
-        } */
+        let fi32 = _sfactor as i32;
 
-        for im_v in 0..height {
-            for im_u in 0..width {
-                let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32; // / sfactor as i32;
-                let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32; // / sfactor as i32;
+        for im_v in (0..height).step_by(sfactor) {
+            for im_u in (0..width).step_by(sfactor) {
+                let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32;
+                let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32;
 
                 let mut uvw: [i32; 3] = [0; 3];
-                uvw[u_coord] = xyz[u_coord] + im_rel_u;
-                uvw[v_coord] = xyz[v_coord] + im_rel_v;
-                uvw[plane_coord] = xyz[plane_coord];
+                uvw[u_coord] = (xyz[u_coord] + im_rel_u) / fi32;
+                uvw[v_coord] = (xyz[v_coord] + im_rel_v) / fi32;
+                uvw[plane_coord] = (xyz[plane_coord]) / fi32;
 
-                buffer[im_v * width + im_u] = self.get(uvw);
+                let v = self.get(uvw, fi32);
+
+                if v != 0 {
+                    for im_v_f in 0..sfactor {
+                        for im_u_f in 0..sfactor {
+                            let im_u = im_u + im_u_f;
+                            let im_v = im_v + im_v_f;
+
+                            if im_u < width && im_v < height {
+                                buffer[im_v * width + im_u] = v;
+                            }
+                        }
+                    }
+                }
             }
         }
     }

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use super::DrawingConfig;
+use super::{DrawingConfig, VoxelVolume};
 
 #[derive(Debug)]
 pub(crate) enum TileState {
@@ -115,6 +115,49 @@ impl VolumeGrid64x4Mapped {
         }
     }
 }
+
+impl VoxelVolume for VolumeGrid64x4Mapped {
+    fn get(&mut self, xyz: [i32; 3], downsampling: i32) -> u8 {
+        let x = xyz[0] as usize;
+        let y = xyz[1] as usize;
+        let z = xyz[2] as usize;
+
+        let tile_x = x / 64;
+        let tile_y = y / 64;
+        let tile_z = z / 64;
+
+        if let TileState::Loaded(tile) = self.try_loading_tile(
+            tile_x,
+            tile_y,
+            tile_z,
+            Quality {
+                downsampling_factor: downsampling as u8,
+                bit_mask: 0xff,
+            },
+        ) {
+            let tx = x & 63;
+            let ty = y & 63;
+            let tz = z & 63;
+
+            let bx = tx / 4;
+            let by = ty / 4;
+            let bz = tz / 4;
+
+            let block = bz * 256 + by * 16 + bx;
+
+            let off_x = tx & 3;
+            let off_y = ty & 3;
+            let off_z = tz & 3;
+
+            let index = off_x + off_y * 4 + off_z * 16 + block * 64;
+
+            tile[index]
+        } else {
+            0
+        }
+    }
+}
+
 impl PaintVolume for VolumeGrid64x4Mapped {
     fn paint(
         &mut self,

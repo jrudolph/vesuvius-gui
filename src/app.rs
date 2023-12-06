@@ -125,7 +125,7 @@ impl TemplateApp {
         let vol0 = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
 
         if let Some(ppm_file) = &self.ppm_file {
-            let ppm = PPMVolume::new(&ppm_file, vol0);
+            let ppm = PPMVolume::new(&ppm_file, Box::new(vol0));
             let width = ppm.width() as i32;
             let height = ppm.height() as i32;
             println!("Loaded PPM volume with size {}x{}", width, height);
