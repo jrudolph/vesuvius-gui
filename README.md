@@ -30,6 +30,9 @@ Credentials are the same as for the data server.
 If you pass a path to a ppm file, the app will use that to calculate a surface volume on the fly from the data in the ppm file. This is currently
 limited to Scroll 1 automatically.
 
+Alternatively, you can provide a path to a directory containing volume grid files of the format `cell_yxz_`. In that case, the app will
+only show local data without attempting to download from the blocks server.
+
 To run directly from sources run `cargo run --release -- <path-to-directory> <optional-path-to-ppm>`.
 
 ## Data License
