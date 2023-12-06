@@ -3,6 +3,12 @@ pub struct Quality {
     pub bit_mask: u8,
     pub downsampling_factor: u8,
 }
+impl Quality {
+    pub const FULL: Quality = Quality {
+        bit_mask: 0xff,
+        downsampling_factor: 1,
+    };
+}
 
 pub trait VolumeReference: Send + Sync {
     fn sub_dir(&self, data_dir: &str) -> String;

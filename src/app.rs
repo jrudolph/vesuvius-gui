@@ -32,7 +32,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     texture_yz: Option<egui::TextureHandle>,
     #[serde(skip)]
-    world: Box<dyn PaintVolume>,
+    world: Box<dyn VoxelPaintVolume>,
     #[serde(skip)]
     last_size: Vec2,
     #[serde(skip)]
@@ -42,6 +42,8 @@ pub struct TemplateApp {
     ranges: [RangeInclusive<i32>; 3],
     #[serde(skip)]
     ppm_file: Option<String>,
+    #[serde(skip)]
+    cell_mode: bool,
 }
 
 impl Default for TemplateApp {
@@ -65,6 +67,7 @@ impl Default for TemplateApp {
             drawing_config: Default::default(),
             ranges: [0..=10000, 0..=10000, 0..=15000],
             ppm_file: None,
+            cell_mode: false,
         }
     }
 }
@@ -86,15 +89,33 @@ impl TemplateApp {
         }
         app.ppm_file = ppm_file;
 
-        let pass = Self::load_data_password(&app.data_dir);
-        if Downloader::check_authorization(Self::TILE_SERVER, pass) {
-            app.is_authorized = true;
+        let contains_cell_files = std::fs::read_dir(&app.data_dir).unwrap().any(|entry| {
+            let p = entry.unwrap().path();
+            let name = p.file_name().unwrap().to_str().unwrap_or("");
+            name.starts_with("cell_yxz_") && name.ends_with(".tif")
+        });
+
+        let needs_authorization = !contains_cell_files;
+
+        if needs_authorization {
+            let pass = Self::load_data_password(&app.data_dir);
+            if Downloader::check_authorization(Self::TILE_SERVER, pass) {
+                app.is_authorized = true;
+            } else {
+                app.is_authorized = false;
+            }
         } else {
-            app.is_authorized = false;
+            app.is_authorized = true;
         }
 
         if app.is_authorized {
-            app.select_volume(app.volume_id);
+            if contains_cell_files {
+                app.cell_mode = true;
+                app.load_from_cells();
+                app.transform_volume();
+            } else {
+                app.select_volume(app.volume_id);
+            }
         }
 
         app
@@ -121,11 +142,27 @@ impl TemplateApp {
         self.download_notifier = Some(receiver);
 
         let volume_dir = volume.sub_dir(&self.data_dir);
-        let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password, sender);
-        let vol0 = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
 
+        self.world = {
+            let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password, sender);
+            let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
+            Box::new(v)
+        };
+
+        self.transform_volume();
+    }
+    pub fn is_ppm_mode(&self) -> bool {
+        self.ppm_file.is_some()
+    }
+    fn load_from_cells(&mut self) {
+        let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
+        self.world = Box::new(v);
+    }
+
+    fn transform_volume(&mut self) {
         if let Some(ppm_file) = &self.ppm_file {
-            let ppm = PPMVolume::new(&ppm_file, Box::new(vol0));
+            let old = std::mem::replace(&mut self.world, Box::new(EmptyVolume {}));
+            let ppm = PPMVolume::new(&ppm_file, old);
             let width = ppm.width() as i32;
             let height = ppm.height() as i32;
             println!("Loaded PPM volume with size {}x{}", width, height);
@@ -133,12 +170,7 @@ impl TemplateApp {
             self.world = Box::new(ppm);
             self.ranges = [0..=width, 0..=height, -30..=30];
             self.coord = [width / 2, height / 2, 0];
-        } else {
-            self.world = Box::new(vol0);
         }
-    }
-    pub fn is_ppm_mode(&self) -> bool {
-        self.ppm_file.is_some()
     }
 
     fn select_volume(&mut self, id: usize) {
@@ -285,28 +317,32 @@ impl TemplateApp {
             .num_columns(2)
             .spacing([40.0, 4.0])
             .show(ui, |ui| {
-                ui.label("Volume");
-                ui.add_enabled_ui(!self.is_ppm_mode(), |ui| {
-                    egui::ComboBox::from_id_source("Volume")
-                        .selected_text(self.selected_volume().label())
-                        .show_ui(ui, |ui| {
-                            // iterate over indices and values of VolumeReference::VOLUMES
-                            for (id, volume) in <dyn VolumeReference>::VOLUMES.iter().enumerate() {
-                                let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
-                                if res.changed() {
-                                    println!("Selected volume: {}", self.volume_id);
-                                    self.clear_textures();
-                                    self.select_volume(self.volume_id);
-                                    self.zoom = 0.25;
-                                }
-                            }
-                        });
-                });
                 ui.end_row();
+
+                ui.label("Volume");
                 if self.is_ppm_mode() {
-                    ui.label("");
                     ui.label("Fixed to Scroll 1 in PPM mode");
                     ui.end_row();
+                } else if self.cell_mode {
+                    ui.label(format!("Browsing cells in {}", self.data_dir));
+                    ui.end_row();
+                } else {
+                    ui.add_enabled_ui(!self.is_ppm_mode(), |ui| {
+                        egui::ComboBox::from_id_source("Volume")
+                            .selected_text(self.selected_volume().label())
+                            .show_ui(ui, |ui| {
+                                // iterate over indices and values of VolumeReference::VOLUMES
+                                for (id, volume) in <dyn VolumeReference>::VOLUMES.iter().enumerate() {
+                                    let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
+                                    if res.changed() {
+                                        println!("Selected volume: {}", self.volume_id);
+                                        self.clear_textures();
+                                        self.select_volume(self.volume_id);
+                                        self.zoom = 0.25;
+                                    }
+                                }
+                            });
+                    });
                 }
 
                 let x_sl = slider(ui, "x", &mut self.coord[0], self.ranges[0].clone(), false);

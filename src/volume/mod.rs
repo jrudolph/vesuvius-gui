@@ -69,3 +69,6 @@ pub trait PaintVolume {
         buffer: &mut [u8],
     );
 }
+
+pub trait VoxelPaintVolume: PaintVolume + VoxelVolume {}
+impl<T: PaintVolume + VoxelVolume> VoxelPaintVolume for T {}

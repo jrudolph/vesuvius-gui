@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, Seek, SeekFrom};
 
-use super::{AutoPaintVolume, VoxelVolume};
+use super::{AutoPaintVolume, VoxelPaintVolume, VoxelVolume};
 
 pub struct PPMFile {
     pub width: usize,
@@ -52,11 +52,11 @@ impl PPMFile {
 }
 
 pub struct PPMVolume {
-    volume: Box<dyn VoxelVolume>,
+    volume: Box<dyn VoxelPaintVolume>,
     ppm: PPMFile,
 }
 impl PPMVolume {
-    pub fn new(ppm_file: &str, base_volume: Box<dyn VoxelVolume>) -> Self {
+    pub fn new(ppm_file: &str, base_volume: Box<dyn VoxelPaintVolume>) -> Self {
         let ppm = PPMFile::new(ppm_file).unwrap();
 
         Self {
