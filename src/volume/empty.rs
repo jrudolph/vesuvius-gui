@@ -8,19 +8,3 @@ impl VoxelVolume for EmptyVolume {
         0
     }
 }
-impl PaintVolume for EmptyVolume {
-    fn paint(
-        &mut self,
-        xyz: [i32; 3],
-        u_coord: usize,
-        v_coord: usize,
-        plane_coord: usize,
-        width: usize,
-        height: usize,
-        sfactor: u8,
-        paint_zoom: u8,
-        config: &DrawingConfig,
-        buffer: &mut [u8],
-    ) {
-    }
-}

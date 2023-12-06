@@ -1,8 +1,11 @@
 mod empty;
+mod generic;
+mod grid500;
 mod ppmvolume;
 mod volume64x4;
 
 pub use empty::EmptyVolume;
+pub use grid500::VolumeGrid500Mapped;
 pub use ppmvolume::PPMVolume;
 pub use volume64x4::VolumeGrid64x4Mapped;
 
