@@ -17,11 +17,10 @@ impl<T: VoxelVolume + AutoPaintVolume> PaintVolume for T {
         _config: &DrawingConfig,
         buffer: &mut [u8],
     ) {
-        let sfactor = _sfactor as usize;
         let fi32 = _sfactor as i32;
 
-        for im_v in (0..height).step_by(sfactor) {
-            for im_u in (0..width).step_by(sfactor) {
+        for im_v in 0..height {
+            for im_u in 0..width {
                 let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32;
                 let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32;
 
@@ -31,19 +30,7 @@ impl<T: VoxelVolume + AutoPaintVolume> PaintVolume for T {
                 uvw[plane_coord] = (xyz[plane_coord]) / fi32;
 
                 let v = self.get(uvw, fi32);
-
-                if v != 0 {
-                    for im_v_f in 0..sfactor {
-                        for im_u_f in 0..sfactor {
-                            let im_u = im_u + im_u_f;
-                            let im_v = im_v + im_v_f;
-
-                            if im_u < width && im_v < height {
-                                buffer[im_v * width + im_u] = v;
-                            }
-                        }
-                    }
-                }
+                buffer[im_v * width + im_u] = v;
             }
         }
     }
