@@ -3,6 +3,8 @@ use crate::model::Quality;
 use crate::volume::PaintVolume;
 
 use std::collections::HashMap;
+use std::ops::Deref;
+use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -20,7 +22,9 @@ pub(crate) enum TileState {
 pub struct VolumeGrid64x4Mapped {
     data_dir: String,
     downloader: Downloader,
-    data: HashMap<(usize, usize, usize, usize), TileState>,
+    data: HashMap<(usize, usize, usize, usize), Rc<TileState>>,
+    last_tile_key: (usize, usize, usize, usize),
+    last_tile: Weak<TileState>,
 }
 impl VolumeGrid64x4Mapped {
     fn map_for(data_dir: &str, x: usize, y: usize, z: usize, quality: Quality) -> Option<TileState> {
@@ -45,12 +49,12 @@ impl VolumeGrid64x4Mapped {
         })
         .map(|x| TileState::Loaded(x))
     }
-    pub(crate) fn try_loading_tile(&mut self, x: usize, y: usize, z: usize, quality: Quality) -> &TileState {
+    pub(crate) fn try_loading_tile(&mut self, x: usize, y: usize, z: usize, quality: Quality) -> Rc<TileState> {
         let key = (x, y, z, quality.downsampling_factor as usize);
         if !self.data.contains_key(&key) {
-            self.data.insert(key, TileState::Unknown);
+            self.data.insert(key, TileState::Unknown.into());
         }
-        let tile_state = self.data.get_mut(&key).unwrap();
+        let tile_state = Rc::get_mut(self.data.get_mut(&key).unwrap()).unwrap();
         match tile_state {
             TileState::Unknown => {
                 // println!("trying to load tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
@@ -101,7 +105,7 @@ impl VolumeGrid64x4Mapped {
             }
             _ => {}
         }
-        self.data.get(&key).unwrap()
+        self.data.get(&key).unwrap().clone()
     }
     pub fn from_data_dir(data_dir: &str, downloader: Downloader) -> VolumeGrid64x4Mapped {
         if !std::path::Path::new(data_dir).exists() {
@@ -112,6 +116,8 @@ impl VolumeGrid64x4Mapped {
             data_dir: data_dir.to_string(),
             downloader,
             data: HashMap::new(),
+            last_tile_key: (0, 0, 0, 0),
+            last_tile: Weak::new(),
         }
     }
 }
@@ -126,32 +132,42 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
         let tile_y = y / 64;
         let tile_z = z / 64;
 
-        if let TileState::Loaded(tile) = self.try_loading_tile(
-            tile_x,
-            tile_y,
-            tile_z,
-            Quality {
-                downsampling_factor: downsampling as u8,
-                bit_mask: 0xff,
-            },
-        ) {
-            let tx = x & 63;
-            let ty = y & 63;
-            let tz = z & 63;
+        let key = (tile_x, tile_y, tile_z, downsampling as usize);
+        if key != self.last_tile_key {
+            self.last_tile_key = key;
+            self.last_tile = Rc::downgrade(&self.try_loading_tile(
+                tile_x,
+                tile_y,
+                tile_z,
+                Quality {
+                    downsampling_factor: downsampling as u8,
+                    bit_mask: 0xff,
+                },
+            ));
+        }
 
-            let bx = tx / 4;
-            let by = ty / 4;
-            let bz = tz / 4;
+        if let Some(r) = self.last_tile.upgrade() {
+            if let TileState::Loaded(tile) = r.deref() {
+                let tx = x & 63;
+                let ty = y & 63;
+                let tz = z & 63;
 
-            let block = bz * 256 + by * 16 + bx;
+                let bx = tx / 4;
+                let by = ty / 4;
+                let bz = tz / 4;
 
-            let off_x = tx & 3;
-            let off_y = ty & 3;
-            let off_z = tz & 3;
+                let block = bz * 256 + by * 16 + bx;
 
-            let index = off_x + off_y * 4 + off_z * 16 + block * 64;
+                let off_x = tx & 3;
+                let off_y = ty & 3;
+                let off_z = tz & 3;
 
-            tile[index]
+                let index = off_x + off_y * 4 + off_z * 16 + block * 64;
+
+                tile[index]
+            } else {
+                0
+            }
         } else {
             0
         }
@@ -221,7 +237,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                     },
                 );
 
-                if let TileState::Loaded(tile) = state {
+                if let TileState::Loaded(tile) = state.deref() {
                     // iterate over blocks in tile
                     let min_tile_uc = (tile_uc * tilesize).max(min_uc) - tile_uc * tilesize;
                     let max_tile_uc = (tile_uc * tilesize + tilesize).min(max_uc) - tile_uc * tilesize;
