@@ -317,15 +317,11 @@ impl TemplateApp {
             .num_columns(2)
             .spacing([40.0, 4.0])
             .show(ui, |ui| {
-                ui.end_row();
-
                 ui.label("Volume");
                 if self.is_ppm_mode() {
                     ui.label("Fixed to Scroll 1 in PPM mode");
-                    ui.end_row();
                 } else if self.cell_mode {
                     ui.label(format!("Browsing cells in {}", self.data_dir));
-                    ui.end_row();
                 } else {
                     ui.add_enabled_ui(!self.is_ppm_mode(), |ui| {
                         egui::ComboBox::from_id_source("Volume")
@@ -344,6 +340,7 @@ impl TemplateApp {
                             });
                     });
                 }
+                ui.end_row();
 
                 let x_sl = slider(ui, "x", &mut self.coord[0], self.ranges[0].clone(), false);
                 let y_sl = slider(ui, "y", &mut self.coord[1], self.ranges[1].clone(), false);
