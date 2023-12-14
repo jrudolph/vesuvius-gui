@@ -123,7 +123,7 @@ impl VolumeGrid64x4Mapped {
 }
 
 impl VoxelVolume for VolumeGrid64x4Mapped {
-    fn get(&mut self, xyz: [i32; 3], downsampling: i32) -> u8 {
+    fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
         let x = xyz[0] as usize;
         let y = xyz[1] as usize;
         let z = xyz[2] as usize;

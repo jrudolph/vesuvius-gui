@@ -76,8 +76,12 @@ impl VolumeGrid500Mapped {
     }
 }
 impl VoxelVolume for VolumeGrid500Mapped {
-    fn get(&mut self, _xyz: [i32; 3], downsampling: i32) -> u8 {
-        let xyz = [_xyz[0] * downsampling, _xyz[1] * downsampling, _xyz[2] * downsampling];
+    fn get(&mut self, _xyz: [f64; 3], downsampling: i32) -> u8 {
+        let xyz = [
+            _xyz[0] as i32 * downsampling,
+            _xyz[1] as i32 * downsampling,
+            _xyz[2] as i32 * downsampling,
+        ];
         let x_tile = xyz[0] as usize / 500;
         let y_tile = xyz[1] as usize / 500;
         let z_tile = xyz[2] as usize / 500;

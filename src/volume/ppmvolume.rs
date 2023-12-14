@@ -73,8 +73,12 @@ impl PPMVolume {
 }
 
 impl VoxelVolume for PPMVolume {
-    fn get(&mut self, xyz: [i32; 3], downsampling: i32) -> u8 {
-        let uvw: [i32; 3] = [xyz[0] * downsampling, xyz[1] * downsampling, xyz[2] * downsampling];
+    fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        let uvw: [i32; 3] = [
+            xyz[0] as i32 * downsampling,
+            xyz[1] as i32 * downsampling,
+            xyz[2] as i32 * downsampling,
+        ];
 
         if uvw[0] <= 0
             || uvw[0] >= self.ppm.width as i32
@@ -96,9 +100,9 @@ impl VoxelVolume for PPMVolume {
         let z = z0 + uvw[2] as f64 * nz;
         self.volume.get(
             [
-                x as i32 / downsampling,
-                y as i32 / downsampling,
-                z as i32 / downsampling,
+                x / downsampling as f64,
+                y / downsampling as f64,
+                z / downsampling as f64,
             ],
             downsampling,
         )

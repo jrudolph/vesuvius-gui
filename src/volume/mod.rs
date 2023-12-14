@@ -51,7 +51,7 @@ impl Default for DrawingConfig {
 }
 
 pub trait VoxelVolume {
-    fn get(&mut self, xyz: [i32; 3], downsampling: i32) -> u8;
+    fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8;
 }
 
 pub trait PaintVolume {

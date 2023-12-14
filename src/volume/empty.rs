@@ -4,7 +4,7 @@ use super::DrawingConfig;
 
 pub struct EmptyVolume {}
 impl VoxelVolume for EmptyVolume {
-    fn get(&mut self, _xyz: [i32; 3], _downsampling: i32) -> u8 {
+    fn get(&mut self, _xyz: [f64; 3], _downsampling: i32) -> u8 {
         0
     }
 }

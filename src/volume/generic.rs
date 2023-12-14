@@ -17,19 +17,19 @@ impl<T: VoxelVolume + AutoPaintVolume> PaintVolume for T {
         _config: &DrawingConfig,
         buffer: &mut [u8],
     ) {
-        let fi32 = _sfactor as i32;
+        let fi32 = _sfactor as f64;
 
         for im_v in 0..height {
             for im_u in 0..width {
                 let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32;
                 let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32;
 
-                let mut uvw: [i32; 3] = [0; 3];
-                uvw[u_coord] = (xyz[u_coord] + im_rel_u) / fi32;
-                uvw[v_coord] = (xyz[v_coord] + im_rel_v) / fi32;
-                uvw[plane_coord] = (xyz[plane_coord]) / fi32;
+                let mut uvw: [f64; 3] = [0.; 3];
+                uvw[u_coord] = (xyz[u_coord] + im_rel_u) as f64 / fi32;
+                uvw[v_coord] = (xyz[v_coord] + im_rel_v) as f64 / fi32;
+                uvw[plane_coord] = (xyz[plane_coord]) as f64 / fi32;
 
-                let v = self.get(uvw, fi32);
+                let v = self.get(uvw, _sfactor as i32);
                 buffer[im_v * width + im_u] = v;
             }
         }
