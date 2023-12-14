@@ -21,6 +21,7 @@ pub struct TemplateApp {
     last_login_failed: bool,
     volume_id: usize,
     coord: [i32; 3],
+    trilinear_interpolation: bool,
     zoom: f32,
     frame_width: usize,
     frame_height: usize,
@@ -54,6 +55,7 @@ impl Default for TemplateApp {
             last_login_failed: false,
             volume_id: 0,
             coord: [2800, 2500, 10852],
+            trilinear_interpolation: false,
             zoom: 1f32,
             frame_width: 1000,
             frame_height: 1000,
@@ -162,14 +164,26 @@ impl TemplateApp {
     fn transform_volume(&mut self) {
         if let Some(ppm_file) = &self.ppm_file {
             let old = std::mem::replace(&mut self.world, Box::new(EmptyVolume {}));
-            let ppm = PPMVolume::new(&ppm_file, old);
+            let base = if self.trilinear_interpolation {
+                Box::new(TrilinearInterpolatedVolume { base: old })
+            } else {
+                old
+            };
+            let ppm = PPMVolume::new(&ppm_file, base);
             let width = ppm.width() as i32;
             let height = ppm.height() as i32;
             println!("Loaded PPM volume with size {}x{}", width, height);
 
             self.world = Box::new(ppm);
             self.ranges = [0..=width, 0..=height, -30..=30];
-            self.coord = [width / 2, height / 2, 0];
+
+            if self.coord[0] < 0 || self.coord[0] > width {}
+            if !self.ranges[0].contains(&self.coord[0])
+                || !self.ranges[1].contains(&self.coord[1])
+                || !self.ranges[2].contains(&self.coord[2])
+            {
+                self.coord = [width / 2, height / 2, 0];
+            }
         }
     }
 
@@ -341,11 +355,20 @@ impl TemplateApp {
                     });
                 }
                 ui.end_row();
-
                 let x_sl = slider(ui, "x", &mut self.coord[0], self.ranges[0].clone(), false);
                 let y_sl = slider(ui, "y", &mut self.coord[1], self.ranges[1].clone(), false);
                 let z_sl = slider(ui, "z", &mut self.coord[2], self.ranges[2].clone(), false);
                 let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
+
+                if self.is_ppm_mode() {
+                    ui.label("Trilinear interpolation ('I')");
+                    let c = ui.checkbox(&mut self.trilinear_interpolation, "");
+                    if c.changed() {
+                        self.load_data(self.selected_volume());
+                        self.clear_textures();
+                    }
+                    ui.end_row()
+                }
 
                 if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() {
                     self.clear_textures();
@@ -405,6 +428,11 @@ impl TemplateApp {
             ui.input(|i| {
                 if i.key_pressed(egui::Key::F) {
                     self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
+                    self.clear_textures();
+                }
+                if i.key_pressed(egui::Key::I) {
+                    self.trilinear_interpolation = !self.trilinear_interpolation;
+                    self.load_data(self.selected_volume());
                     self.clear_textures();
                 }
             });
