@@ -1,12 +1,14 @@
 mod empty;
 mod generic;
 mod grid500;
+mod interpolated;
 mod ppmvolume;
 mod volume64x4;
 
 pub use empty::EmptyVolume;
 pub use generic::AutoPaintVolume;
 pub use grid500::VolumeGrid500Mapped;
+pub use interpolated::TrilinearInterpolatedVolume;
 pub use ppmvolume::PPMVolume;
 pub use volume64x4::VolumeGrid64x4Mapped;
 
