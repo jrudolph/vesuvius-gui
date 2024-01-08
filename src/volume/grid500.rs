@@ -1,7 +1,5 @@
 use std::io::{Read, Seek};
 
-use tiff::tags::CompressionMethod;
-
 use super::{AutoPaintVolume, VoxelVolume};
 
 struct Cell {
