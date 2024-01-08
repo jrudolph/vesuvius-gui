@@ -2,25 +2,28 @@ use vesuvius_gui::downloader::Downloader;
 use vesuvius_gui::gui::TemplateApp;
 use vesuvius_gui::model::VolumeReference;
 use vesuvius_gui::model::{self, FullVolumeReference};
-use vesuvius_gui::volume::{self, PPMVolume, TrilinearInterpolatedVolume, VoxelVolume};
+use vesuvius_gui::volume::{self, PPMVolume, TrilinearInterpolatedVolume, VolumeGrid500Mapped, VoxelVolume};
 
 fn main() {
-    const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
+    //const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
     // TODO: use proper command line argument parsing
     let data_dir = std::env::args().nth(1).unwrap();
     let ppm = std::env::args().nth(2).unwrap();
 
-    let password = TemplateApp::load_data_password(&data_dir).unwrap();
+    //let password = TemplateApp::load_data_password(&data_dir).unwrap();
 
-    let (sender, receiver) = std::sync::mpsc::channel();
+    //let (sender, receiver) = std::sync::mpsc::channel();
     //self.download_notifier = Some(receiver);
-    let volume: &'static FullVolumeReference = &model::FullVolumeReference::SCROLL1667_7_91_UM;
+    //let volume: &'static FullVolumeReference = &model::FullVolumeReference::SCROLL1667_7_91_UM;
+    //let volume_dir = volume.sub_dir(&data_dir);
 
-    let volume_dir = volume.sub_dir(&data_dir);
-
-    let world = {
+    /* let world = {
         let downloader = Downloader::new(&volume_dir, TILE_SERVER, volume, Some(password), sender);
         let v = volume::VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
+        Box::new(v)
+    }; */
+    let world = {
+        let v = VolumeGrid500Mapped::from_data_dir(&data_dir);
         Box::new(v)
     };
 
