@@ -2,13 +2,14 @@ use std::io::{Read, Seek};
 
 use super::{AutoPaintVolume, VoxelVolume};
 
-struct Cell {
+struct Layer {
     data: memmap::Mmap,
-    strip_spacing: usize,
+    width: usize,
+    height: usize,
 }
-impl Cell {
-    fn get(&self, x: usize, y: usize, z: usize) -> u8 {
-        let off = self.strip_spacing * z + (y * 500 + x) * 2;
+impl Layer {
+    fn get(&self, x: usize, y: usize) -> u8 {
+        let off = (y * self.width + x) * 2;
 
         // off + 1 because we select the higher order bits of little endian 16 bit values
         if off + 1 >= self.data.len() {
@@ -19,47 +20,34 @@ impl Cell {
     }
 }
 
-pub struct VolumeGrid500Mapped {
+pub struct LayersMappedVolume {
     max_x: usize,
     max_y: usize,
     max_z: usize,
-    data: Vec<Vec<Vec<Option<Cell>>>>,
+    data: Vec<Option<Layer>>,
 }
-impl VolumeGrid500Mapped {
+impl LayersMappedVolume {
     pub fn from_data_dir(data_dir: &str) -> Self {
         use memmap::MmapOptions;
         use std::fs::File;
 
         // find highest xyz values for files in data_dir named like this format: format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
         // use regex to match file names
-        let mut max_x = 0;
-        let mut max_y = 0;
         let mut max_z = 0;
         for entry in std::fs::read_dir(data_dir).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
             let file_name = path.file_name().unwrap().to_str().unwrap();
-            if let Some(captures) = regex::Regex::new(r"cell_yxz_(\d+)_(\d+)_(\d+)\.tif")
-                .unwrap()
-                .captures(file_name)
-            {
+            if let Some(captures) = regex::Regex::new(r"(\d{5})\.tif").unwrap().captures(file_name) {
                 //println!("Found file: {}", file_name);
-                let x = captures.get(2).unwrap().as_str().parse::<usize>().unwrap();
-                let y = captures.get(1).unwrap().as_str().parse::<usize>().unwrap();
-                let z = captures.get(3).unwrap().as_str().parse::<usize>().unwrap();
-                if x > max_x {
-                    max_x = x;
-                }
-                if y > max_y {
-                    max_y = y;
-                }
+                let z = captures.get(1).unwrap().as_str().parse::<usize>().unwrap();
                 if z > max_z {
                     max_z = z;
                 }
             }
         }
-        fn cell_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<Cell> {
-            let file_name = format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
+        fn layer_for(data_dir: &str, z: usize) -> Option<Layer> {
+            let file_name = format!("{}/{:05}.tif", data_dir, z);
 
             let file = File::open(file_name.clone()).ok()?;
             let mut decoder = tiff::decoder::Decoder::new(file).ok()?;
@@ -79,8 +67,9 @@ impl VolumeGrid500Mapped {
                 }
             }
 
-            assume(&mut decoder, Tag::ImageWidth, 500)?;
-            assume(&mut decoder, Tag::ImageLength, 500)?;
+            let width = decoder.get_tag_u32(Tag::ImageWidth).ok()? as usize;
+            let height = decoder.get_tag_u32(Tag::ImageLength).ok()? as usize;
+
             assume(&mut decoder, Tag::BitsPerSample, 16)?;
             assume(&mut decoder, Tag::Compression, 1 /* None */)?;
             assume(&mut decoder, Tag::PlanarConfiguration, 2 /* Planar */)?;
@@ -93,16 +82,12 @@ impl VolumeGrid500Mapped {
             }
             let first_offset = offsets[0] as usize;
 
-            decoder.next_image().ok()?;
-            let next_offset = decoder.get_tag_u32_vec(Tag::StripOffsets).ok()?[0] as usize;
-            let spacing = next_offset - first_offset;
-            // FIXME: we still assume that the spacing is the same between all layers (i.e. images inside of the same file)
-
             let file = File::open(file_name).ok()?;
             if let Ok(mmap) = unsafe { MmapOptions::new().offset(first_offset as u64).map(&file) } {
-                Some(Cell {
+                Some(Layer {
                     data: mmap,
-                    strip_spacing: spacing,
+                    width,
+                    height,
                 })
             } else {
                 None
@@ -117,17 +102,13 @@ impl VolumeGrid500Mapped {
                 data: vec![],
             };
         }
-        let data: Vec<Vec<Vec<Option<Cell>>>> = (1..=max_z)
-            .map(|z| {
-                (1..=max_y)
-                    .map(|y| (1..=max_x).map(|x| cell_for(data_dir, x, y, z)).collect())
-                    .collect()
-            })
-            .collect();
+        let data: Vec<Option<Layer>> = (0..=max_z).map(|z| layer_for(data_dir, z)).collect();
 
         // count number of slices found
-        let slices_found = data.iter().flatten().flatten().flatten().count();
-        println!("Found {} cells in {}", slices_found, data_dir);
+        let layers_found = data.iter().flatten().count();
+        let max_x = data.iter().flatten().map(|l| l.width).min().unwrap_or(0);
+        let max_y = data.iter().flatten().map(|l| l.height).min().unwrap_or(0);
+        println!("Found {} layers in {}", layers_found, data_dir);
         println!("max_x: {}, max_y: {}, max_z: {}", max_x, max_y, max_z);
 
         Self {
@@ -138,30 +119,29 @@ impl VolumeGrid500Mapped {
         }
     }
 }
-impl VoxelVolume for VolumeGrid500Mapped {
+impl VoxelVolume for LayersMappedVolume {
     fn get(&mut self, _xyz: [f64; 3], downsampling: i32) -> u8 {
         let xyz = [
             _xyz[0] as i32 * downsampling,
             _xyz[1] as i32 * downsampling,
             _xyz[2] as i32 * downsampling,
         ];
-        let x_tile = xyz[0] as usize / 500;
-        let y_tile = xyz[1] as usize / 500;
-        let z_tile = xyz[2] as usize / 500;
 
-        if xyz[0] < 0 || xyz[1] < 0 || xyz[2] < 0 || x_tile > self.max_x || y_tile > self.max_y || z_tile > self.max_z {
+        if xyz[0] < 0
+            || xyz[1] < 0
+            || xyz[2] < 0
+            || xyz[0] > self.max_x as i32
+            || xyz[1] > self.max_y as i32
+            || xyz[2] > self.max_z as i32
+        {
             //println!("out of bounds: {:?}", xyz);
             0
-        } else if let Some(tile) = &self.data[z_tile][y_tile][x_tile] {
-            tile.get(
-                (xyz[0] as usize) % 500,
-                (xyz[1] as usize) % 500,
-                (xyz[2] as usize) % 500,
-            )
+        } else if let Some(layer) = &self.data[xyz[2] as usize] {
+            layer.get(xyz[0] as usize, xyz[1] as usize)
         } else {
             0
         }
     }
 }
 
-impl AutoPaintVolume for VolumeGrid500Mapped {}
+impl AutoPaintVolume for LayersMappedVolume {}

@@ -6,9 +6,16 @@ use crate::model::*;
 use crate::volume::*;
 
 use egui::Vec2;
-use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
+use egui::{ColorImage, Image, PointerButton, Response, Ui};
 
 const ZOOM_RES_FACTOR: f32 = 1.; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+
+#[derive(PartialEq, Eq)]
+enum Mode {
+    Blocks,
+    Cells,
+    Layers,
+}
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -44,7 +51,9 @@ pub struct TemplateApp {
     #[serde(skip)]
     ppm_file: Option<String>,
     #[serde(skip)]
-    cell_mode: bool,
+    mode: Mode,
+    #[serde(skip)]
+    extra_resolutions: u32,
 }
 
 impl Default for TemplateApp {
@@ -69,7 +78,8 @@ impl Default for TemplateApp {
             drawing_config: Default::default(),
             ranges: [0..=10000, 0..=10000, 0..=15000],
             ppm_file: None,
-            cell_mode: false,
+            mode: Mode::Blocks,
+            extra_resolutions: 1,
         }
     }
 }
@@ -96,8 +106,13 @@ impl TemplateApp {
             let name = p.file_name().unwrap().to_str().unwrap_or("");
             name.starts_with("cell_yxz_") && name.ends_with(".tif")
         });
+        let contains_layer_files = std::fs::read_dir(&app.data_dir).unwrap().any(|entry| {
+            let p = entry.unwrap().path();
+            let name = p.file_name().unwrap().to_str().unwrap_or("");
+            regex::Regex::new(r"(\d{5})\.tif").unwrap().captures(name).is_some()
+        });
 
-        let needs_authorization = !contains_cell_files;
+        let needs_authorization = !contains_cell_files && !contains_layer_files;
 
         if needs_authorization {
             let pass = Self::load_data_password(&app.data_dir);
@@ -112,8 +127,12 @@ impl TemplateApp {
 
         if app.is_authorized {
             if contains_cell_files {
-                app.cell_mode = true;
+                app.mode = Mode::Cells;
                 app.load_from_cells();
+                app.transform_volume();
+            } else if contains_layer_files {
+                app.mode = Mode::Layers;
+                app.load_from_layers();
                 app.transform_volume();
             } else {
                 app.select_volume(app.volume_id);
@@ -159,6 +178,12 @@ impl TemplateApp {
     fn load_from_cells(&mut self) {
         let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
         self.world = Box::new(v);
+        self.extra_resolutions = 0;
+    }
+    fn load_from_layers(&mut self) {
+        let v = LayersMappedVolume::from_data_dir(&self.data_dir);
+        self.world = Box::new(v);
+        self.extra_resolutions = 0;
     }
 
     fn transform_volume(&mut self) {
@@ -279,7 +304,7 @@ impl TemplateApp {
         let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
             .min(4)
             .max(0);
-        let max_level: u32 = (min_level + 1).min(4);
+        let max_level: u32 = (min_level + self.extra_resolutions).min(4);
         /* let min_level = 0;
         let max_level = 0; */
         for level in (min_level..=max_level).rev() {
@@ -334,8 +359,10 @@ impl TemplateApp {
                 ui.label("Volume");
                 if self.is_ppm_mode() {
                     ui.label("Fixed to Scroll 1 in PPM mode");
-                } else if self.cell_mode {
+                } else if self.mode == Mode::Cells {
                     ui.label(format!("Browsing cells in {}", self.data_dir));
+                } else if self.mode == Mode::Layers {
+                    ui.label(format!("Browsing layers in {}", self.data_dir));
                 } else {
                     ui.add_enabled_ui(!self.is_ppm_mode(), |ui| {
                         egui::ComboBox::from_id_source("Volume")
