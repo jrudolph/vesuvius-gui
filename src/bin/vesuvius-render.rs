@@ -29,10 +29,10 @@ fn main() {
 
     let mut world = transform_volume(&ppm, world, true);
 
-    /* let width = world.width();
-    let height = world.height(); */
-    let width = 1000;
+    let width = world.width();
     let height = world.height();
+    /* let width = 1000;
+    let height = world.height(); */
 
     let mut buf = vec![0u8; width * height];
     for y in 0..height {
