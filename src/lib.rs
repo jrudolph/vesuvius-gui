@@ -1,6 +1,6 @@
 #![warn(clippy::all, rust_2018_idioms)]
 
-mod downloader;
+pub mod downloader;
 pub mod gui;
-mod model;
-mod volume;
+pub mod model;
+pub mod volume;

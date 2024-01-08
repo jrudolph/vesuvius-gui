@@ -22,6 +22,7 @@ serde = { version = "1", features = ["derive"] }
 regex = "1.10.2"
 base64 = "0.21.5"
 libm = "0.2.8"
+image = "0.24.7"
 
 
 # native:

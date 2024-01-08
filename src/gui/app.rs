@@ -122,7 +122,7 @@ impl TemplateApp {
 
         app
     }
-    fn load_data_password(data_dir: &str) -> Option<String> {
+    pub fn load_data_password(data_dir: &str) -> Option<String> {
         // load data password from <data_dir>/password.txt
         let mut password = String::new();
         let mut password_file = std::fs::File::open(format!("{}/password.txt", data_dir)).ok()?;
