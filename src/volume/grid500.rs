@@ -1,10 +1,27 @@
 use super::{AutoPaintVolume, VoxelVolume};
 
+struct Cell {
+    data: memmap::Mmap,
+    strip_spacing: usize,
+}
+impl Cell {
+    fn get(&self, x: usize, y: usize, z: usize) -> u8 {
+        let off = self.strip_spacing * z + (y * 500 + x) * 2;
+
+        // off + 1 because we select the higher order bits of little endian 16 bit values
+        if off + 1 >= self.data.len() {
+            0
+        } else {
+            self.data[off + 1]
+        }
+    }
+}
+
 pub struct VolumeGrid500Mapped {
     max_x: usize,
     max_y: usize,
     max_z: usize,
-    data: Vec<Vec<Vec<Option<memmap::Mmap>>>>,
+    data: Vec<Vec<Vec<Option<Cell>>>>,
 }
 impl VolumeGrid500Mapped {
     pub fn from_data_dir(data_dir: &str) -> Self {
@@ -39,11 +56,18 @@ impl VolumeGrid500Mapped {
                 }
             }
         }
-        fn map_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<memmap::Mmap> {
+        fn cell_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<Cell> {
             let file_name = format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
 
             let file = File::open(file_name).ok()?;
-            unsafe { MmapOptions::new().offset(8).map(&file) }.ok()
+            if let Ok(mmap) = unsafe { MmapOptions::new().offset(8).map(&file) } {
+                Some(Cell {
+                    data: mmap,
+                    strip_spacing: 500147,
+                })
+            } else {
+                None
+            }
         }
         if !std::path::Path::new(data_dir).exists() {
             println!("Data directory {} does not exist", data_dir);
@@ -54,10 +78,10 @@ impl VolumeGrid500Mapped {
                 data: vec![],
             };
         }
-        let data: Vec<Vec<Vec<Option<memmap::Mmap>>>> = (1..=max_z)
+        let data: Vec<Vec<Vec<Option<Cell>>>> = (1..=max_z)
             .map(|z| {
                 (1..=max_y)
-                    .map(|y| (1..=max_x).map(|x| map_for(data_dir, x, y, z)).collect())
+                    .map(|y| (1..=max_x).map(|x| cell_for(data_dir, x, y, z)).collect())
                     .collect()
             })
             .collect();
@@ -90,17 +114,11 @@ impl VoxelVolume for VolumeGrid500Mapped {
             //println!("out of bounds: {:?}", xyz);
             0
         } else if let Some(tile) = &self.data[z_tile][y_tile][x_tile] {
-            let off =
-                500147 * ((xyz[2] % 500) as usize) + ((xyz[1] % 500) as usize * 500 + (xyz[0] % 500) as usize) * 2;
-
-            //println!("xyz: {:?}, off: {}, tile: {:?}", xyz, off, tile);
-
-            // off + 1 because we select the higher order bits of little endian 16 bit values
-            if off + 1 >= tile.len() {
-                0
-            } else {
-                tile[off + 1]
-            }
+            tile.get(
+                (xyz[0] as usize) % 500,
+                (xyz[1] as usize) % 500,
+                (xyz[2] as usize) % 500,
+            )
         } else {
             0
         }
