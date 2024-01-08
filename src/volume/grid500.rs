@@ -1,3 +1,7 @@
+use std::io::{Read, Seek};
+
+use tiff::tags::CompressionMethod;
+
 use super::{AutoPaintVolume, VoxelVolume};
 
 struct Cell {
@@ -59,11 +63,48 @@ impl VolumeGrid500Mapped {
         fn cell_for(data_dir: &str, x: usize, y: usize, z: usize) -> Option<Cell> {
             let file_name = format!("{}/cell_yxz_{:03}_{:03}_{:03}.tif", data_dir, y, x, z);
 
+            let file = File::open(file_name.clone()).ok()?;
+            let mut decoder = tiff::decoder::Decoder::new(file).ok()?;
+
+            use tiff::tags::Tag;
+            fn assume<T: Seek + Read>(decoder: &mut tiff::decoder::Decoder<T>, tag: Tag, value: u32) -> Option<()> {
+                if let Ok(v) = decoder.get_tag_u32(tag) {
+                    if v != value {
+                        println!("Expected {:?} to be {} but was {}", tag, value, v);
+                        None
+                    } else {
+                        Some(())
+                    }
+                } else {
+                    // ok if not found
+                    Some(())
+                }
+            }
+
+            assume(&mut decoder, Tag::ImageWidth, 500)?;
+            assume(&mut decoder, Tag::ImageLength, 500)?;
+            assume(&mut decoder, Tag::BitsPerSample, 16)?;
+            assume(&mut decoder, Tag::Compression, 1 /* None */)?;
+            assume(&mut decoder, Tag::PlanarConfiguration, 2 /* Planar */)?;
+
+            // get offsets
+            let offsets = decoder.get_tag_u32_vec(Tag::StripOffsets).ok()?;
+            if offsets.len() != 1 {
+                println!("Expected 1 strip offset: {}", offsets.len());
+                return None;
+            }
+            let first_offset = offsets[0] as usize;
+
+            decoder.next_image().ok()?;
+            let next_offset = decoder.get_tag_u32_vec(Tag::StripOffsets).ok()?[0] as usize;
+            let spacing = next_offset - first_offset;
+            // FIXME: we still assume that the spacing is the same between all layers (i.e. images inside of the same file)
+
             let file = File::open(file_name).ok()?;
             if let Ok(mmap) = unsafe { MmapOptions::new().offset(8).map(&file) } {
                 Some(Cell {
                     data: mmap,
-                    strip_spacing: 500147,
+                    strip_spacing: spacing,
                 })
             } else {
                 None
