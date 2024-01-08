@@ -52,6 +52,8 @@ pub struct TemplateApp {
     ppm_file: Option<String>,
     #[serde(skip)]
     mode: Mode,
+    #[serde(skip)]
+    extra_resolutions: u32,
 }
 
 impl Default for TemplateApp {
@@ -77,6 +79,7 @@ impl Default for TemplateApp {
             ranges: [0..=10000, 0..=10000, 0..=15000],
             ppm_file: None,
             mode: Mode::Blocks,
+            extra_resolutions: 1,
         }
     }
 }
@@ -175,10 +178,12 @@ impl TemplateApp {
     fn load_from_cells(&mut self) {
         let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
         self.world = Box::new(v);
+        self.extra_resolutions = 0;
     }
     fn load_from_layers(&mut self) {
         let v = LayersMappedVolume::from_data_dir(&self.data_dir);
         self.world = Box::new(v);
+        self.extra_resolutions = 0;
     }
 
     fn transform_volume(&mut self) {
@@ -299,7 +304,7 @@ impl TemplateApp {
         let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
             .min(4)
             .max(0);
-        let max_level: u32 = (min_level + 1).min(4);
+        let max_level: u32 = (min_level + self.extra_resolutions).min(4);
         /* let min_level = 0;
         let max_level = 0; */
         for level in (min_level..=max_level).rev() {
