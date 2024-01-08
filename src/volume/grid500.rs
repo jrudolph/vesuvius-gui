@@ -99,7 +99,7 @@ impl VolumeGrid500Mapped {
             // FIXME: we still assume that the spacing is the same between all layers (i.e. images inside of the same file)
 
             let file = File::open(file_name).ok()?;
-            if let Ok(mmap) = unsafe { MmapOptions::new().offset(8).map(&file) } {
+            if let Ok(mmap) = unsafe { MmapOptions::new().offset(first_offset as u64).map(&file) } {
                 Some(Cell {
                     data: mmap,
                     strip_spacing: spacing,
