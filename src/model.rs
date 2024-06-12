@@ -16,8 +16,9 @@ pub trait VolumeReference: Send + Sync {
     fn url_path_base(&self) -> String;
 }
 impl dyn VolumeReference {
-    pub const VOLUMES: [&'static dyn VolumeReference; 17] = [
+    pub const VOLUMES: [&'static dyn VolumeReference; 18] = [
         &FullVolumeReference::SCROLL1,
+        &FullVolumeReference::SCROLL1B,
         &FullVolumeReference::SCROLL2,
         &FullVolumeReference::SCROLL332,
         &FullVolumeReference::SCROLL1667,
@@ -46,6 +47,10 @@ impl FullVolumeReference {
     pub const SCROLL1: FullVolumeReference = FullVolumeReference {
         scroll_id: "1",
         volume: "20230205180739",
+    };
+    pub const SCROLL1B: FullVolumeReference = FullVolumeReference {
+        scroll_id: "1",
+        volume: "20230206171837",
     };
     pub const SCROLL2: FullVolumeReference = FullVolumeReference {
         scroll_id: "2",
@@ -105,16 +110,10 @@ impl FullVolumeReference {
     };
 }
 impl VolumeReference for FullVolumeReference {
-    fn sub_dir(&self, data_dir: &str) -> String {
-        format!("{}/scroll{}/{}/", data_dir, self.scroll_id, self.volume)
-    }
-    fn label(&self) -> String {
-        format!("Scroll {} / {}", self.scroll_id, self.volume)
-    }
+    fn sub_dir(&self, data_dir: &str) -> String { format!("{}/scroll{}/{}/", data_dir, self.scroll_id, self.volume) }
+    fn label(&self) -> String { format!("Scroll {} / {}", self.scroll_id, self.volume) }
 
-    fn url_path_base(&self) -> String {
-        format!("scroll/{}/volume/{}/", self.scroll_id, self.volume)
-    }
+    fn url_path_base(&self) -> String { format!("scroll/{}/volume/{}/", self.scroll_id, self.volume) }
 }
 
 pub struct SurfaceVolumeReference {
@@ -135,11 +134,7 @@ impl VolumeReference for SurfaceVolumeReference {
     fn sub_dir(&self, data_dir: &str) -> String {
         format!("{}/scroll{}/segment/{}/", data_dir, self.scroll_id, self.segment_id)
     }
-    fn label(&self) -> String {
-        format!("Scroll {} / Segment {}", self.scroll_id, self.segment_id)
-    }
+    fn label(&self) -> String { format!("Scroll {} / Segment {}", self.scroll_id, self.segment_id) }
 
-    fn url_path_base(&self) -> String {
-        format!("scroll/{}/segment/{}/", self.scroll_id, self.segment_id)
-    }
+    fn url_path_base(&self) -> String { format!("scroll/{}/segment/{}/", self.scroll_id, self.segment_id) }
 }
