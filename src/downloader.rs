@@ -105,10 +105,19 @@ impl Downloader {
                                     let dir = dir.clone();
                                     //println!("downloading tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
                                     let c2 = count.clone();
+                                    let start = std::time::Instant::now();
                                     ehttp::fetch(request, move |response| {
                                         if let Ok(res) = response {
                                             if res.status == 200 {
-                                                //println!("got tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
+                                                println!(
+                                                    "got tile {}/{}/{} q{} after {} ms (downloading: {})",
+                                                    x,
+                                                    y,
+                                                    z,
+                                                    quality.downsampling_factor,
+                                                    start.elapsed().as_millis(),
+                                                    c2.load(Ordering::Acquire) - 1
+                                                );
                                                 let bytes = res.bytes;
                                                 // save bytes to file
                                                 let file_name = format!(
