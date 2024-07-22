@@ -233,9 +233,7 @@ impl Downloader {
         }
     }
 
-    pub fn queue(&self, task: DownloadTask) {
-        self.download_queue.send(DownloadMessage::Download(task)).unwrap();
-    }
+    pub fn queue(&self, task: DownloadTask) { self.download_queue.send(DownloadMessage::Download(task)).unwrap(); }
     pub fn position(&self, x: i32, y: i32, z: i32, width: usize, height: usize) {
         self.download_queue
             .send(DownloadMessage::Position(x, y, z, width, height))

@@ -153,9 +153,7 @@ impl TemplateApp {
 
         self.transform_volume();
     }
-    pub fn is_ppm_mode(&self) -> bool {
-        self.ppm_file.is_some()
-    }
+    pub fn is_ppm_mode(&self) -> bool { self.ppm_file.is_some() }
     fn load_from_cells(&mut self) {
         let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
         self.world = Box::new(v);
@@ -196,9 +194,7 @@ impl TemplateApp {
             self.load_data(<dyn VolumeReference>::VOLUMES[id]);
         }
     }
-    fn selected_volume(&self) -> &'static dyn VolumeReference {
-        <dyn VolumeReference>::VOLUMES[self.volume_id]
-    }
+    fn selected_volume(&self) -> &'static dyn VolumeReference { <dyn VolumeReference>::VOLUMES[self.volume_id] }
 
     pub fn clear_textures(&mut self) {
         self.texture_xy = None;
@@ -584,9 +580,7 @@ impl TemplateApp {
 
 impl eframe::App for TemplateApp {
     /// Called by the frame work to save state before shutdown.
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, self);
-    }
+    fn save(&mut self, storage: &mut dyn eframe::Storage) { eframe::set_value(storage, eframe::APP_KEY, self); }
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.is_authorized {
             self.update_main(ctx, frame);
