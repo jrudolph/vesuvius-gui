@@ -64,12 +64,8 @@ impl PPMVolume {
             ppm,
         }
     }
-    pub fn width(&self) -> usize {
-        self.ppm.width
-    }
-    pub fn height(&self) -> usize {
-        self.ppm.height
-    }
+    pub fn width(&self) -> usize { self.ppm.width }
+    pub fn height(&self) -> usize { self.ppm.height }
 }
 
 impl VoxelVolume for PPMVolume {
@@ -84,7 +80,7 @@ impl VoxelVolume for PPMVolume {
             || uvw[0] >= self.ppm.width as i32
             || uvw[1] <= 0
             || uvw[1] >= self.ppm.height as i32
-            || uvw[2].abs() > 30
+            || uvw[2].abs() > 45
         {
             return 0;
         }

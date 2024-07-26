@@ -8,7 +8,7 @@ use crate::volume::*;
 use egui::Vec2;
 use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
 
-const ZOOM_RES_FACTOR: f32 = 1.; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+const ZOOM_RES_FACTOR: f32 = 0.08f32; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -76,6 +76,7 @@ impl Default for TemplateApp {
 
 impl TemplateApp {
     const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
+    //const TILE_SERVER: &'static str = "http://localhost:8095";
 
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>, data_dir: Option<String>, ppm_file: Option<String>) -> Self {
@@ -173,7 +174,7 @@ impl TemplateApp {
             println!("Loaded PPM volume with size {}x{}", width, height);
 
             self.world = Box::new(ppm);
-            self.ranges = [0..=width, 0..=height, -30..=30];
+            self.ranges = [0..=width, 0..=height, -43..=43];
 
             if self.coord[0] < 0 || self.coord[0] > width {}
             if !self.ranges[0].contains(&self.coord[0])
@@ -188,7 +189,7 @@ impl TemplateApp {
     fn select_volume(&mut self, id: usize) {
         if self.ppm_file.is_some() {
             self.volume_id = 0;
-            self.load_data(&FullVolumeReference::SCROLL1);
+            self.load_data(&FullVolumeReference::FRAGMENT_PHerc1667Cr01Fr03);
         } else {
             self.volume_id = id;
             self.load_data(<dyn VolumeReference>::VOLUMES[id]);
@@ -275,7 +276,7 @@ impl TemplateApp {
         let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
             .min(4)
             .max(0);
-        let max_level: u32 = (min_level + 1).min(4);
+        let max_level: u32 = (min_level).min(4);
         /* let min_level = 0;
         let max_level = 0; */
         for level in (min_level..=max_level).rev() {

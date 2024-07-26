@@ -94,7 +94,7 @@ impl Downloader {
                 }); */
 
                 let cur = count.load(Ordering::Acquire);
-                if cur >= 16 || queue.is_empty() {
+                if cur >= 32 || queue.is_empty() {
                     thread::sleep(Duration::from_millis(50));
                     continue;
                 }
@@ -116,7 +116,6 @@ impl Downloader {
                     let (state, x, y, z, quality) = queue.pop().unwrap();
                     {
                         *state.lock().unwrap() = DownloadState::Downloading;
-                        println!("Downloading {} {} {} {}", x, y, z, quality.downsampling_factor);
                         //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                         //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
@@ -130,6 +129,7 @@ impl Downloader {
                             quality.bit_mask,
                             quality.downsampling_factor
                         );
+                        println!("Downloading {} {} {} {}", x, y, z, quality.downsampling_factor);
                         //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/1667/volume/20231107190228/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
                         //let url = format!("http://localhost:8095/tiles/scroll/1/volume/20230205180739/download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}", x, y, z, quality.bit_mask, quality.downsampling_factor);
                         let mut request = ehttp::Request::get(url.clone());
