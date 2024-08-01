@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, Seek, SeekFrom};
 
 use super::{AutoPaintVolume, VoxelPaintVolume, VoxelVolume};
+use libm::modf;
 
 pub struct PPMFile {
     pub width: usize,
@@ -54,6 +55,8 @@ impl PPMFile {
 pub struct PPMVolume {
     volume: Box<dyn VoxelPaintVolume>,
     ppm: PPMFile,
+    /// should the volume use bilinear interpolation
+    interpolate: bool,
 }
 impl PPMVolume {
     pub fn new(ppm_file: &str, base_volume: Box<dyn VoxelPaintVolume>) -> Self {
@@ -62,8 +65,10 @@ impl PPMVolume {
         Self {
             volume: base_volume,
             ppm,
+            interpolate: false,
         }
     }
+    pub fn enable_bilinear_interpolation(&mut self) { self.interpolate = true; }
     pub fn width(&self) -> usize { self.ppm.width }
     pub fn height(&self) -> usize { self.ppm.height }
 }
@@ -85,7 +90,31 @@ impl VoxelVolume for PPMVolume {
             return 0;
         }
 
-        let [x0, y0, z0, nx, ny, nz] = self.ppm.get(uvw[0] as usize, uvw[1] as usize);
+        let [x0, y0, z0, nx, ny, nz] = if self.interpolate {
+            let (du, u0) = modf(xyz[0]);
+            let u1 = u0 + 1.0;
+            let (dv, v0) = modf(xyz[1]);
+            let v1 = v0 + 1.0;
+
+            let [x00, y00, z00, nx00, ny00, nz00] = self.ppm.get(u0 as usize, v0 as usize);
+            let [x10, y10, z10, nx10, ny10, nz10] = self.ppm.get(u1 as usize, v0 as usize);
+            let [x01, y01, z01, nx01, ny01, nz01] = self.ppm.get(u0 as usize, v1 as usize);
+            let [x11, y11, z11, nx11, ny11, nz11] = self.ppm.get(u1 as usize, v1 as usize);
+
+            fn interpolate(x00: f64, x10: f64, x01: f64, x11: f64, dx: f64, dy: f64) -> f64 {
+                x00 * (1.0 - dx) * (1.0 - dy) + x10 * dx * (1.0 - dy) + x01 * (1.0 - dx) * dy + x11 * dx * dy
+            }
+            [
+                interpolate(x00, x10, x01, x11, du, dv),
+                interpolate(y00, y10, y01, y11, du, dv),
+                interpolate(z00, z10, z01, z11, du, dv),
+                interpolate(nx00, nx10, nx01, nx11, du, dv),
+                interpolate(ny00, ny10, ny01, ny11, du, dv),
+                interpolate(nz00, nz10, nz01, nz11, du, dv),
+            ]
+        } else {
+            self.ppm.get(uvw[0] as usize, uvw[1] as usize)
+        };
 
         if x0 == 0.0 && y0 == 0.0 && z0 == 0.0 {
             return 0;
