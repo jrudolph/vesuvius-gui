@@ -491,10 +491,10 @@ impl TemplateApp {
 
                 ui.horizontal(|ui| {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
-                    let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
                     self.add_scroll_handler(&im_xy, ui, 2);
-                    self.add_scroll_handler(&im_xz, ui, 1);
                     self.add_drag_handler(&im_xy, 0, 1);
+                    let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
+                    self.add_scroll_handler(&im_xz, ui, 1);
                     self.add_drag_handler(&im_xz, 0, 2);
                 });
                 let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
