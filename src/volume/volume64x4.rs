@@ -165,6 +165,14 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
                 let index = off_x + off_y * 4 + off_z * 16 + block * 64;
 
                 tile[index]
+            } else if let TileState::Downloading(state) = r.deref() {
+                /* match *state.lock().unwrap() {
+                    DownloadState::Downloading => 255,
+                    DownloadState::Queuing => 160,
+                    DownloadState::Delayed => 100,
+                    _ => 0,
+                } */
+                0
             } else {
                 0
             }
