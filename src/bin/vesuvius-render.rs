@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use vesuvius_gui::downloader::Downloader;
 use vesuvius_gui::gui::TemplateApp;
 use vesuvius_gui::model::VolumeReference;
@@ -12,30 +13,65 @@ fn main() {
 
     let password = TemplateApp::load_data_password(&data_dir).unwrap();
 
-    let (sender, _receiver) = std::sync::mpsc::channel();
     //self.download_notifier = Some(receiver);
     let volume: &'static FullVolumeReference = &model::FullVolumeReference::FRAGMENT_PHerc1667Cr01Fr03;
 
     let volume_dir = volume.sub_dir(&data_dir);
 
-    let world = {
-        let downloader = Downloader::new(&volume_dir, TILE_SERVER, volume, Some(password), sender);
-        let v = volume::VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
-        Box::new(v)
-    };
-
-    let mut world = transform_volume(&ppm, world, true);
+    fn create_world(
+        volume: &'static FullVolumeReference,
+        password: String,
+        volume_dir: String,
+        ppm: String,
+    ) -> Box<PPMVolume> {
+        let world = {
+            let (sender, _receiver) = std::sync::mpsc::channel();
+            let downloader = Downloader::new(&volume_dir, TILE_SERVER, volume, Some(password), sender);
+            let v = volume::VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
+            Box::new(v)
+        };
+        let mut world = transform_volume(&ppm, world, true);
+        world.enable_bilinear_interpolation();
+        world
+    }
 
     // 3.24um original resolution
     // want to rescale to 7.91um
 
     let factor = 7.91f64 / 3.24f64;
 
-    let width = ((world.width() as f64) / factor) as usize;
-    let height = ((world.height() as f64) / factor) as usize;
-
     let mid_z = 32;
-    for z in 15..=49 {
+
+    use rayon::prelude::*;
+
+    #[derive(Clone)]
+    struct WorldSetup {
+        password: String,
+        volume_dir: String,
+        ppm: String,
+    }
+    let setup = WorldSetup {
+        password: password.clone(),
+        volume_dir: volume_dir.clone(),
+        ppm: ppm.clone(),
+    };
+    let setup = Arc::new(setup);
+
+    //for z in 15..=49 {
+    (15..=49).into_par_iter().for_each(move |z| {
+        let mut world = {
+            let setup = setup.clone();
+            create_world(
+                &volume,
+                setup.password.clone(),
+                setup.volume_dir.clone(),
+                setup.ppm.clone(),
+            )
+        };
+        let width = ((world.width() as f64) / factor) as usize;
+        let height = ((world.height() as f64) / factor) as usize;
+        println!("Rescaling layer z:{} to {}x{}", z, width, height);
+
         let mut buf = vec![0u8; width * height];
         for y in 0..height {
             if y % 500 == 0 {
@@ -48,7 +84,7 @@ fn main() {
         }
         let image = image::GrayImage::from_raw(width as u32, height as u32, buf).unwrap();
         image.save(format!("rescaled-layers/{:02}.png", z)).unwrap();
-    }
+    });
 }
 
 fn transform_volume(

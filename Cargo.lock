@@ -2022,6 +2022,7 @@ dependencies = [
  "libm",
  "log",
  "memmap",
+ "rayon",
  "regex",
  "serde",
 ]
