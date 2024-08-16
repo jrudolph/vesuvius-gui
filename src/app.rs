@@ -119,31 +119,14 @@ impl TemplateApp {
         }
         app
     }
-    fn load_data_password(data_dir: &str) -> Option<String> {
-        // load data password from <data_dir>/password.txt
-        let mut password = String::new();
-        let mut password_file = std::fs::File::open(format!("{}/password.txt", data_dir)).ok()?;
-        std::io::Read::read_to_string(&mut password_file, &mut password).ok()?;
-        password = password.trim().to_string();
-        Some(password)
-    }
     fn load_data(&mut self, volume: &'static dyn VolumeReference) {
-        let password = TemplateApp::load_data_password(&self.data_dir);
-
-        if !password.is_some() {
-            panic!(
-                "No password.txt found in data directory {}, attempting access with no password",
-                self.data_dir
-            );
-        }
-
         let (sender, receiver) = std::sync::mpsc::channel();
         self.download_notifier = Some(receiver);
 
         let volume_dir = volume.sub_dir(&self.data_dir);
 
         self.world = {
-            let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password, sender);
+            let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, None, sender);
             let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
             Box::new(v)
         };
