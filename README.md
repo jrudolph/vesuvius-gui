@@ -8,24 +8,23 @@ It does not require to download any data upfront.
 
 All the published volumes published so far are supported:
 
- * Scroll 1
- * Scroll 2
- * Scroll 0332
- * Scroll 1667
- * Fragments 1 - 4 (from the Kaggle competition)
- * Fragment PHerc0051Cr04Fr08
- * Fragment PHerc1667Cr01Fr03
+- Scroll 1
+- Scroll 2
+- Scroll 0332
+- Scroll 1667
+- Fragments 1 - 4 (from the Kaggle competition)
+- Fragment PHerc0051Cr04Fr08
+- Fragment PHerc1667Cr01Fr03
 
 ## Usage
 
 Install required X11 libraries:
-  * Ubuntu: `apt install -y libgl1 libxrandr2 libxi6 libxcursor1`
-  * MacOSX: Should work out of the box
-  * Windows: Should work out of the box
+
+- Ubuntu: `apt install -y libgl1 libxrandr2 libxi6 libxcursor1`
+- MacOSX: Should work out of the box
+- Windows: Should work out of the box
 
 Create a data directory, then run the app with `./vesuvius-gui <path-to-directory> <optional-path-to-ppm>`.
-
-Credentials are the same as for the data server.
 
 If you pass a path to a ppm file, the app will use that to calculate a surface volume on the fly from the data in the ppm file. This is currently
 limited to Scroll 1 automatically.

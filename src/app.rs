@@ -21,10 +21,6 @@ enum Mode {
 #[serde(default)]
 pub struct TemplateApp {
     #[serde(skip)]
-    is_authorized: bool,
-    #[serde(skip)]
-    credential_entry: (String, String),
-    #[serde(skip)]
     last_login_failed: bool,
     volume_id: usize,
     coord: [i32; 3],
@@ -59,8 +55,6 @@ pub struct TemplateApp {
 impl Default for TemplateApp {
     fn default() -> Self {
         Self {
-            is_authorized: false,
-            credential_entry: ("".to_string(), "".to_string()),
             last_login_failed: false,
             volume_id: 0,
             coord: [2800, 2500, 10852],
@@ -112,33 +106,17 @@ impl TemplateApp {
             regex::Regex::new(r"(\d{5})\.tif").unwrap().captures(name).is_some()
         });
 
-        let needs_authorization = !contains_cell_files && !contains_layer_files;
-
-        if needs_authorization {
-            let pass = Self::load_data_password(&app.data_dir);
-            if Downloader::check_authorization(Self::TILE_SERVER, pass) {
-                app.is_authorized = true;
-            } else {
-                app.is_authorized = false;
-            }
+        if contains_cell_files {
+            app.mode = Mode::Cells;
+            app.load_from_cells();
+            app.transform_volume();
+        } else if contains_layer_files {
+            app.mode = Mode::Layers;
+            app.load_from_layers();
+            app.transform_volume();
         } else {
-            app.is_authorized = true;
+            app.select_volume(app.volume_id);
         }
-
-        if app.is_authorized {
-            if contains_cell_files {
-                app.mode = Mode::Cells;
-                app.load_from_cells();
-                app.transform_volume();
-            } else if contains_layer_files {
-                app.mode = Mode::Layers;
-                app.load_from_layers();
-                app.transform_volume();
-            } else {
-                app.select_volume(app.volume_id);
-            }
-        }
-
         app
     }
     fn load_data_password(data_dir: &str) -> Option<String> {
@@ -530,90 +508,10 @@ impl TemplateApp {
             };
         });
     }
-    fn update_password_entry(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let mut should_try_auth = false;
-
-        egui::Window::new("Login").show(ctx, |ui| {
-            egui::Grid::new("login_grid")
-                .num_columns(2)
-                .spacing([40.0, 4.0])
-                .show(ui, |ui| {
-                    use egui::text::CCursor;
-                    use egui::text::CCursorRange;
-                    use egui::Id;
-
-                    let user_id = Id::new("user");
-                    let pass_id = Id::new("pass");
-
-                    ui.label("Username");
-                    let mut user_field = egui::TextEdit::singleline(&mut self.credential_entry.0)
-                        .id(user_id)
-                        .show(ui);
-
-                    if user_field.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        if self.credential_entry.1.is_empty() {
-                            ui.memory_mut(|m| m.request_focus(pass_id));
-                        } else {
-                            should_try_auth = true;
-                        }
-                    }
-                    ui.end_row();
-
-                    ui.label("Password");
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut self.credential_entry.1)
-                            .id(pass_id)
-                            .password(true),
-                    );
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        if !self.credential_entry.0.is_empty() && !self.credential_entry.1.is_empty() {
-                            should_try_auth = true;
-                        }
-                    }
-                    ui.end_row();
-
-                    ui.label("");
-                    ui.label("Use same credentials as for the data server");
-                    ui.end_row();
-
-                    should_try_auth = should_try_auth || ui.button("Login").clicked();
-                    if should_try_auth {
-                        let credentials = format!("{}:{}", self.credential_entry.0, self.credential_entry.1);
-                        if Downloader::check_authorization(Self::TILE_SERVER, Some(credentials.clone())) {
-                            std::fs::write(format!("{}/password.txt", self.data_dir), credentials).unwrap();
-                            self.is_authorized = true;
-                            self.last_login_failed = false;
-                            self.select_volume(self.volume_id);
-                        } else {
-                            self.last_login_failed = true;
-
-                            ui.memory_mut(|m| m.request_focus(user_id));
-                            user_field.state.set_ccursor_range(Some(CCursorRange::two(
-                                CCursor::new(0),
-                                CCursor::new(self.credential_entry.0.len()),
-                            )));
-                        }
-                    }
-                    if self.last_login_failed {
-                        ui.colored_label(egui::Color32::RED, "Login failed.");
-                    }
-
-                    if self.credential_entry.0.is_empty() && self.credential_entry.1.is_empty() {
-                        ui.memory_mut(|m| m.request_focus(user_id));
-                    }
-                });
-        });
-    }
 }
 
 impl eframe::App for TemplateApp {
     /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) { eframe::set_value(storage, eframe::APP_KEY, self); }
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        if self.is_authorized {
-            self.update_main(ctx, frame);
-        } else {
-            self.update_password_entry(ctx, frame);
-        }
-    }
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) { self.update_main(ctx, frame); }
 }
