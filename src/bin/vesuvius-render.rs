@@ -40,7 +40,7 @@ fn main() {
 
     let factor = 7.91f64 / 3.24f64;
 
-    let mid_z = 32;
+    let mid_w = 32;
 
     use rayon::prelude::*;
 
@@ -57,8 +57,9 @@ fn main() {
     };
     let setup = Arc::new(setup);
 
-    //for z in 15..=49 {
-    (15..=49).into_par_iter().for_each(move |z| {
+    let w_range = 15..=49;
+
+    (w_range).into_par_iter().for_each(move |w| {
         let mut world = {
             let setup = setup.clone();
             create_world(
@@ -70,20 +71,20 @@ fn main() {
         };
         let width = ((world.width() as f64) / factor) as usize;
         let height = ((world.height() as f64) / factor) as usize;
-        println!("Rescaling layer z:{} to {}x{}", z, width, height);
+        println!("Rescaling layer w:{} to {}x{}", w, width, height);
 
         let mut buf = vec![0u8; width * height];
-        for y in 0..height {
-            if y % 500 == 0 {
-                println!("Layer z:{} v:{} / {}", z, y, height);
+        for v in 0..height {
+            if v % 500 == 0 {
+                println!("Layer z:{} v:{} / {}", w, v, height);
             }
-            for x in 0..width {
-                let v = world.get([x as f64 * factor, y as f64 * factor, ((z - mid_z) as f64) * factor], 1);
-                buf[y * width + x] = v;
+            for u in 0..width {
+                let value = world.get([u as f64 * factor, v as f64 * factor, ((w - mid_w) as f64) * factor], 1);
+                buf[v * width + u] = value;
             }
         }
         let image = image::GrayImage::from_raw(width as u32, height as u32, buf).unwrap();
-        image.save(format!("rescaled-layers/{:02}.png", z)).unwrap();
+        image.save(format!("rescaled-layers/{:02}.png", w)).unwrap();
     });
 }
 
