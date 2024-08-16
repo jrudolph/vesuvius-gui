@@ -6,15 +6,15 @@ rust-version = "1.70"
 
 [dependencies]
 base64 = { version = "0.22" }
-eframe = { version = "0.27", default-features = false, features = [
+eframe = { version = "0.28", default-features = false, features = [
     #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     #"default_fonts", # Embed the default egui fonts.
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
     "persistence",   # Enable restoring app state when restarting the app.
 ] }
-egui   = { version = "0.27" }
+egui   = { version = "0.28" }
 ehttp  = { version = "0.5" }
-emath  = { version = "0.27"}
+emath  = { version = "0.28"}
 image  = { version = "0.25", default-features=false, features = ["png","tiff"] }
 libm   = { version = "0.2" }
 log    = { version = "0.4" }

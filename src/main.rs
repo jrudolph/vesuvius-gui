@@ -11,11 +11,11 @@ fn main() -> eframe::Result<()> {
         "vesuvius-gui",
         native_options,
         Box::new(|cc| {
-            Box::new(vesuvius_gui::TemplateApp::new(
+            Ok(Box::new(vesuvius_gui::TemplateApp::new(
                 cc,
                 std::env::args().nth(1),
                 std::env::args().nth(2),
-            ))
+            )))
         }),
     )
 }
