@@ -1814,6 +1814,7 @@ name = "vesuvius-gui"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "directories",
  "eframe",
  "egui",
  "ehttp",

@@ -13,8 +13,8 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             Ok(Box::new(vesuvius_gui::TemplateApp::new(
                 cc,
-                std::env::args().nth(1),
                 std::env::args().nth(2),
+                std::env::args().nth(1),
             )))
         }),
     )

@@ -5,6 +5,7 @@ use crate::downloader::*;
 use crate::model::*;
 use crate::volume::*;
 
+use directories::BaseDirs;
 use egui::Vec2;
 use egui::{ColorImage, Image, PointerButton, Response, Ui};
 
@@ -92,6 +93,13 @@ impl TemplateApp {
         };
         if let Some(dir) = data_dir {
             app.data_dir = dir;
+        } else {
+            let dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
+            app.data_dir = dir.to_str().unwrap().to_string();
+            println!("Using default data directory: {}", app.data_dir);
+
+            // make sure dir exists
+            std::fs::create_dir_all(&app.data_dir).unwrap();
         }
         app.ppm_file = ppm_file;
 

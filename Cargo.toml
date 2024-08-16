@@ -6,6 +6,7 @@ rust-version = "1.70"
 
 [dependencies]
 base64 = { version = "0.22" }
+directories = { version = "5" }
 eframe = { version = "0.28", default-features = false, features = [
     #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     #"default_fonts", # Embed the default egui fonts.
@@ -18,7 +19,7 @@ emath  = { version = "0.28"}
 image  = { version = "0.25", default-features=false, features = ["png","tiff"] }
 libm   = { version = "0.2" }
 log    = { version = "0.4" }
-regex  = { version = "1.10", default-features=false, features = ["unicode-perl"] }
+regex  = { version = "1", default-features=false, features = ["unicode-perl"] }
 serde  = { version = "1", features = ["derive"] }
 tiff   = { version = "0.9" }
 
