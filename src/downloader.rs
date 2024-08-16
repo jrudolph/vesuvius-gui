@@ -1,3 +1,6 @@
+use crate::model::*;
+use base64::prelude::BASE64_STANDARD as base64;
+use base64::Engine as _;
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -5,10 +8,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
 };
-
-use crate::model::*;
 
 #[derive(Copy, Clone, Debug)]
 pub enum DownloadState {
@@ -56,14 +56,13 @@ impl Downloader {
 
         std::fs::create_dir_all(dir.to_string()).unwrap();
         let dir = dir.to_string();
-        let volume = volume.clone();
         thread::spawn(move || {
-            let mut pos = (0, 0, 0, 0 as usize, 0 as usize);
+            let mut _pos = (0, 0, 0, 0 as usize, 0 as usize);
             loop {
                 // FIXME: handle broken channel
                 while let Ok(msg) = receiver.recv() {
                     match msg {
-                        DownloadMessage::Position(x, y, z, width, height) => pos = (x, y, z, width, height),
+                        DownloadMessage::Position(x, y, z, width, height) => _pos = (x, y, z, width, height),
                         DownloadMessage::Download((state, x, y, z, quality)) => {
                             let cur = count.load(Ordering::Acquire);
                             if cur >= 16 {
@@ -97,7 +96,7 @@ impl Downloader {
                                     if let Some(authorization) = authorization.clone() {
                                         request.headers.insert(
                                             "Authorization".to_string(),
-                                            format!("Basic {}", base64::encode(authorization)),
+                                            format!("Basic {}", base64.encode(authorization)),
                                         );
                                     }
 
@@ -138,7 +137,7 @@ impl Downloader {
                                                 .unwrap();
                                                 std::fs::write(file_name, bytes).unwrap();
                                                 *state.lock().unwrap() = DownloadState::Done;
-                                                notifier.send(());
+                                                let _ = notifier.send(());
                                             } else if res.status == 420 {
                                                 println!(
                                                     "delayed tile {}/{}/{} q{}",
@@ -188,7 +187,7 @@ impl Downloader {
         if let Some(authorization) = authorization {
             request.headers.insert(
                 "Authorization".to_string(),
-                format!("Basic {}", base64::encode(authorization)),
+                format!("Basic {}", base64.encode(authorization)),
             );
         }
         match ehttp::fetch_blocking(&request) {
