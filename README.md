@@ -16,6 +16,10 @@ All the published volumes published so far are supported:
 - Fragment PHerc0051Cr04Fr08
 - Fragment PHerc1667Cr01Fr03
 
+## Installation
+
+Grab a binary from [the latest release](https://github.com/jrudolph/vesuvius-gui/releases).
+
 ## Usage
 
 Install required X11 libraries:
