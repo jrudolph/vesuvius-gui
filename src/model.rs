@@ -16,13 +16,14 @@ pub trait VolumeReference: Send + Sync {
     fn url_path_base(&self) -> String;
 }
 impl dyn VolumeReference {
-    pub const VOLUMES: [&'static dyn VolumeReference; 20] = [
+    pub const VOLUMES: [&'static dyn VolumeReference; 21] = [
         &FullVolumeReference::SCROLL1,
         &FullVolumeReference::SCROLL1B,
         &FullVolumeReference::SCROLL2,
         &FullVolumeReference::SCROLL2B,
         &FullVolumeReference::SCROLL2_88keV,
-        &FullVolumeReference::SCROLL332,
+        &FullVolumeReference::SCROLL332_3_24_UM,
+        &FullVolumeReference::SCROLL332_7_91_UM,
         &FullVolumeReference::SCROLL1667,
         &FullVolumeReference::SCROLL1667_7_91_UM,
         &FullVolumeReference::FRAGMENT_PHerc0051Cr04Fr08,
@@ -66,9 +67,13 @@ impl FullVolumeReference {
         scroll_id: "2",
         volume: "20230212125146",
     };
-    pub const SCROLL332: FullVolumeReference = FullVolumeReference {
-        scroll_id: "332",
+    pub const SCROLL332_3_24_UM: FullVolumeReference = FullVolumeReference {
+        scroll_id: "0332",
         volume: "20231027191953",
+    };
+    pub const SCROLL332_7_91_UM: FullVolumeReference = FullVolumeReference {
+        scroll_id: "0332",
+        volume: "20231117143551",
     };
     pub const SCROLL1667: FullVolumeReference = FullVolumeReference {
         scroll_id: "1667",
