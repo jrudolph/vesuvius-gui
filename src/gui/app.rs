@@ -5,18 +5,22 @@ use crate::downloader::*;
 use crate::model::*;
 use crate::volume::*;
 
+use directories::BaseDirs;
 use egui::Vec2;
-use egui::{ColorImage, CursorIcon, Image, PointerButton, Response, Ui};
+use egui::{ColorImage, Image, PointerButton, Response, Ui};
 
-const ZOOM_RES_FACTOR: f32 = 0.08f32; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+
+#[derive(PartialEq, Eq)]
+enum Mode {
+    Blocks,
+    Cells,
+    Layers,
+}
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TemplateApp {
-    #[serde(skip)]
-    is_authorized: bool,
-    #[serde(skip)]
-    credential_entry: (String, String),
     #[serde(skip)]
     last_login_failed: bool,
     volume_id: usize,
@@ -44,14 +48,14 @@ pub struct TemplateApp {
     #[serde(skip)]
     ppm_file: Option<String>,
     #[serde(skip)]
-    cell_mode: bool,
+    mode: Mode,
+    #[serde(skip)]
+    extra_resolutions: u32,
 }
 
 impl Default for TemplateApp {
     fn default() -> Self {
         Self {
-            is_authorized: false,
-            credential_entry: ("".to_string(), "".to_string()),
             last_login_failed: false,
             volume_id: 0,
             coord: [2800, 2500, 10852],
@@ -69,7 +73,8 @@ impl Default for TemplateApp {
             drawing_config: Default::default(),
             ranges: [0..=10000, 0..=10000, 0..=15000],
             ppm_file: None,
-            cell_mode: false,
+            mode: Mode::Blocks,
+            extra_resolutions: 1,
         }
     }
 }
@@ -89,6 +94,13 @@ impl TemplateApp {
         };
         if let Some(dir) = data_dir {
             app.data_dir = dir;
+        } else {
+            let dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
+            app.data_dir = dir.to_str().unwrap().to_string();
+            println!("Using default data directory: {}", app.data_dir);
+
+            // make sure dir exists
+            std::fs::create_dir_all(&app.data_dir).unwrap();
         }
         app.ppm_file = ppm_file;
 
@@ -97,57 +109,33 @@ impl TemplateApp {
             let name = p.file_name().unwrap().to_str().unwrap_or("");
             name.starts_with("cell_yxz_") && name.ends_with(".tif")
         });
+        let contains_layer_files = std::fs::read_dir(&app.data_dir).unwrap().any(|entry| {
+            let p = entry.unwrap().path();
+            let name = p.file_name().unwrap().to_str().unwrap_or("");
+            regex::Regex::new(r"(\d{5})\.tif").unwrap().captures(name).is_some()
+        });
 
-        let needs_authorization = !contains_cell_files;
-
-        if needs_authorization {
-            let pass = Self::load_data_password(&app.data_dir);
-            if Downloader::check_authorization(Self::TILE_SERVER, pass) {
-                app.is_authorized = true;
-            } else {
-                app.is_authorized = false;
-            }
+        if contains_cell_files {
+            app.mode = Mode::Cells;
+            app.load_from_cells();
+            app.transform_volume();
+        } else if contains_layer_files {
+            app.mode = Mode::Layers;
+            app.load_from_layers();
+            app.transform_volume();
         } else {
-            app.is_authorized = true;
+            app.select_volume(app.volume_id);
         }
-
-        if app.is_authorized {
-            if contains_cell_files {
-                app.cell_mode = true;
-                app.load_from_cells();
-                app.transform_volume();
-            } else {
-                app.select_volume(app.volume_id);
-            }
-        }
-
         app
     }
-    pub fn load_data_password(data_dir: &str) -> Option<String> {
-        // load data password from <data_dir>/password.txt
-        let mut password = String::new();
-        let mut password_file = std::fs::File::open(format!("{}/password.txt", data_dir)).ok()?;
-        std::io::Read::read_to_string(&mut password_file, &mut password).ok()?;
-        password = password.trim().to_string();
-        Some(password)
-    }
     fn load_data(&mut self, volume: &'static dyn VolumeReference) {
-        let password = TemplateApp::load_data_password(&self.data_dir);
-
-        if !password.is_some() {
-            panic!(
-                "No password.txt found in data directory {}, attempting access with no password",
-                self.data_dir
-            );
-        }
-
         let (sender, receiver) = std::sync::mpsc::channel();
         self.download_notifier = Some(receiver);
 
         let volume_dir = volume.sub_dir(&self.data_dir);
 
         self.world = {
-            let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, password, sender);
+            let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, None, sender);
             let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
             Box::new(v)
         };
@@ -158,6 +146,12 @@ impl TemplateApp {
     fn load_from_cells(&mut self) {
         let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
         self.world = Box::new(v);
+        self.extra_resolutions = 0;
+    }
+    fn load_from_layers(&mut self) {
+        let v = LayersMappedVolume::from_data_dir(&self.data_dir);
+        self.world = Box::new(v);
+        self.extra_resolutions = 0;
     }
 
     fn transform_volume(&mut self) {
@@ -205,17 +199,18 @@ impl TemplateApp {
 
     fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, coord: usize) {
         if image.hovered() {
-            let delta = ui.input(|i| i.scroll_delta);
+            let delta = ui.input(|i| i.smooth_scroll_delta);
             let zoom_delta = ui.input(|i| i.zoom_delta());
-            if delta.y != 0.0 {
+
+            if zoom_delta != 1.0 {
+                self.zoom = (self.zoom * zoom_delta).max(0.1).min(6.0);
+                self.clear_textures();
+            } else if delta.y != 0.0 {
                 let min_level = 1 << ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
                 let delta = delta.y.signum() * min_level as f32;
                 let m = &mut self.coord[coord];
                 *m = ((*m + delta as i32) / min_level as i32 * min_level as i32)
                     .clamp(*self.ranges[coord].start(), *self.ranges[coord].end());
-                self.clear_textures();
-            } else if zoom_delta != 1.0 {
-                self.zoom = (self.zoom * zoom_delta).max(0.1).min(6.0);
                 self.clear_textures();
             }
         }
@@ -276,7 +271,7 @@ impl TemplateApp {
         let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
             .min(4)
             .max(0);
-        let max_level: u32 = (min_level).min(4);
+        let max_level: u32 = (min_level + self.extra_resolutions).min(4);
         /* let min_level = 0;
         let max_level = 0; */
         for level in (min_level..=max_level).rev() {
@@ -331,8 +326,10 @@ impl TemplateApp {
                 ui.label("Volume");
                 if self.is_ppm_mode() {
                     ui.label("Fixed to Scroll 1 in PPM mode");
-                } else if self.cell_mode {
+                } else if self.mode == Mode::Cells {
                     ui.label(format!("Browsing cells in {}", self.data_dir));
+                } else if self.mode == Mode::Layers {
+                    ui.label(format!("Browsing layers in {}", self.data_dir));
                 } else {
                     ui.add_enabled_ui(!self.is_ppm_mode(), |ui| {
                         egui::ComboBox::from_id_source("Volume")
@@ -503,90 +500,10 @@ impl TemplateApp {
             };
         });
     }
-    fn update_password_entry(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let mut should_try_auth = false;
-
-        egui::Window::new("Login").show(ctx, |ui| {
-            egui::Grid::new("login_grid")
-                .num_columns(2)
-                .spacing([40.0, 4.0])
-                .show(ui, |ui| {
-                    use egui::text::CCursor;
-                    use egui::text_edit::CCursorRange;
-                    use egui::Id;
-
-                    let user_id = Id::new("user");
-                    let pass_id = Id::new("pass");
-
-                    ui.label("Username");
-                    let mut user_field = egui::TextEdit::singleline(&mut self.credential_entry.0)
-                        .id(user_id)
-                        .show(ui);
-
-                    if user_field.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        if self.credential_entry.1.is_empty() {
-                            ui.memory_mut(|m| m.request_focus(pass_id));
-                        } else {
-                            should_try_auth = true;
-                        }
-                    }
-                    ui.end_row();
-
-                    ui.label("Password");
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut self.credential_entry.1)
-                            .id(pass_id)
-                            .password(true),
-                    );
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        if !self.credential_entry.0.is_empty() && !self.credential_entry.1.is_empty() {
-                            should_try_auth = true;
-                        }
-                    }
-                    ui.end_row();
-
-                    ui.label("");
-                    ui.label("Use same credentials as for the data server");
-                    ui.end_row();
-
-                    should_try_auth = should_try_auth || ui.button("Login").clicked();
-                    if should_try_auth {
-                        let credentials = format!("{}:{}", self.credential_entry.0, self.credential_entry.1);
-                        if Downloader::check_authorization(Self::TILE_SERVER, Some(credentials.clone())) {
-                            std::fs::write(format!("{}/password.txt", self.data_dir), credentials).unwrap();
-                            self.is_authorized = true;
-                            self.last_login_failed = false;
-                            self.select_volume(self.volume_id);
-                        } else {
-                            self.last_login_failed = true;
-
-                            ui.memory_mut(|m| m.request_focus(user_id));
-                            user_field.state.set_ccursor_range(Some(CCursorRange::two(
-                                CCursor::new(0),
-                                CCursor::new(self.credential_entry.0.len()),
-                            )));
-                        }
-                    }
-                    if self.last_login_failed {
-                        ui.colored_label(egui::Color32::RED, "Login failed.");
-                    }
-
-                    if self.credential_entry.0.is_empty() && self.credential_entry.1.is_empty() {
-                        ui.memory_mut(|m| m.request_focus(user_id));
-                    }
-                });
-        });
-    }
 }
 
 impl eframe::App for TemplateApp {
     /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) { eframe::set_value(storage, eframe::APP_KEY, self); }
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        if self.is_authorized {
-            self.update_main(ctx, frame);
-        } else {
-            self.update_password_entry(ctx, frame);
-        }
-    }
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) { self.update_main(ctx, frame); }
 }

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use vesuvius_gui::downloader::Downloader;
-use vesuvius_gui::gui::TemplateApp;
 use vesuvius_gui::model::VolumeReference;
 use vesuvius_gui::model::{self, FullVolumeReference};
 use vesuvius_gui::volume::{self, PPMVolume, TrilinearInterpolatedVolume, VoxelVolume};
@@ -11,22 +10,15 @@ fn main() {
     let data_dir = std::env::args().nth(1).unwrap();
     let ppm = std::env::args().nth(2).unwrap();
 
-    let password = TemplateApp::load_data_password(&data_dir).unwrap();
-
     //self.download_notifier = Some(receiver);
     let volume: &'static FullVolumeReference = &model::FullVolumeReference::FRAGMENT_PHerc1667Cr01Fr03;
 
     let volume_dir = volume.sub_dir(&data_dir);
 
-    fn create_world(
-        volume: &'static FullVolumeReference,
-        password: String,
-        volume_dir: String,
-        ppm: String,
-    ) -> Box<PPMVolume> {
+    fn create_world(volume: &'static FullVolumeReference, volume_dir: String, ppm: String) -> Box<PPMVolume> {
         let world = {
             let (sender, _receiver) = std::sync::mpsc::channel();
-            let downloader = Downloader::new(&volume_dir, TILE_SERVER, volume, Some(password), sender);
+            let downloader = Downloader::new(&volume_dir, TILE_SERVER, volume, None, sender);
             let v = volume::VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
             Box::new(v)
         };
@@ -46,12 +38,10 @@ fn main() {
 
     #[derive(Clone)]
     struct WorldSetup {
-        password: String,
         volume_dir: String,
         ppm: String,
     }
     let setup = WorldSetup {
-        password: password.clone(),
         volume_dir: volume_dir.clone(),
         ppm: ppm.clone(),
     };
@@ -62,12 +52,7 @@ fn main() {
     (w_range).into_par_iter().for_each(move |w| {
         let mut world = {
             let setup = setup.clone();
-            create_world(
-                &volume,
-                setup.password.clone(),
-                setup.volume_dir.clone(),
-                setup.ppm.clone(),
-            )
+            create_world(&volume, setup.volume_dir.clone(), setup.ppm.clone())
         };
         let width = ((world.width() as f64) / factor) as usize;
         let height = ((world.height() as f64) / factor) as usize;
