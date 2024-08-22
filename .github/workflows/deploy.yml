@@ -51,17 +51,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Set up cargo cache
-        uses: actions/cache@v3
-        continue-on-error: false
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ matrix.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ matrix.os }}-${{ matrix.target }}-cargo-
+          shared-key: ${{ matrix.os }}-${{ matrix.target }}-cargo
 
       - name: Build
         uses: actions-rs/cargo@v1
@@ -73,27 +65,20 @@ jobs:
       - name: Build archive
         shell: bash
         run: |
-          # Replace with the name of your binary
-          binary_name="vesuvius-gui"
-
-          dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
-          mkdir "$dirname"
+          suffix="${{ env.VERSION }}-${{ matrix.target }}"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv "target/${{ matrix.target }}/release/$binary_name.exe" "$dirname"
-          else
-            mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
+            ext=".exe"
           fi
 
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a "$dirname.zip" "$dirname"
-            echo "ASSET=$dirname.zip" >> $GITHUB_ENV
-          else
-            tar -czf "$dirname.tar.gz" "$dirname"
-            echo "ASSET=$dirname.tar.gz" >> $GITHUB_ENV
-          fi
+          mv "target/${{ matrix.target }}/release/vesuvius-gui$ext" vesuvius-gui-$suffix$ext
+          mv "target/${{ matrix.target }}/release/vesuvius-render$ext" vesuvius-render-$suffix$ext
+
+          echo "ASSET1=vesuvius-gui-$suffix$ext" >> $GITHUB_ENV
+          echo "ASSET2=vesuvius-render-$suffix$ext" >> $GITHUB_ENV
 
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            ${{ env.ASSET }}
+            ${{ env.ASSET1 }}
+            ${{ env.ASSET2 }}
