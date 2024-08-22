@@ -72,7 +72,9 @@ impl LayersMappedVolume {
 
             assume(&mut decoder, Tag::BitsPerSample, 16)?;
             assume(&mut decoder, Tag::Compression, 1 /* None */)?;
-            assume(&mut decoder, Tag::PlanarConfiguration, 2 /* Planar */)?;
+            assume(&mut decoder, Tag::SamplesPerPixel, 1)?;
+            // PlanarConfiguration does not matter for grayscale
+            // assume(&mut decoder, Tag::PlanarConfiguration, 2 /* Planar */)?;
 
             // get offsets
             let offsets = decoder.get_tag_u32_vec(Tag::StripOffsets).ok()?;
