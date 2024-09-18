@@ -23,6 +23,7 @@ rayon  = { version = "1" }
 regex  = { version = "1", default-features=false, features = ["unicode-perl"] }
 serde  = { version = "1", features = ["derive"] }
 tiff   = { version = "0.9" }
+wavefront_obj = { version = "10.0.0" }
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
