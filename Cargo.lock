@@ -2022,8 +2022,6 @@ checksum = "c62a0a307cb4a311d3a07867860911ca130c3494e8c2719593806c08bc5d0484"
 [[package]]
 name = "wavefront_obj"
 version = "10.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b44bbcea20221556597a89462dba84fd4a1ece9a56ab9ec017f872f33b34e8a"
 dependencies = [
  "lexical",
 ]

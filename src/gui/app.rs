@@ -9,7 +9,7 @@ use directories::BaseDirs;
 use egui::Vec2;
 use egui::{ColorImage, Image, PointerButton, Response, Ui};
 
-const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+const ZOOM_RES_FACTOR: f32 = 0.1; //1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
 #[derive(PartialEq, Eq)]
 enum Mode {
@@ -48,6 +48,8 @@ pub struct TemplateApp {
     #[serde(skip)]
     ppm_file: Option<String>,
     #[serde(skip)]
+    obj_file: Option<String>,
+    #[serde(skip)]
     mode: Mode,
     #[serde(skip)]
     extra_resolutions: u32,
@@ -73,6 +75,7 @@ impl Default for TemplateApp {
             drawing_config: Default::default(),
             ranges: [0..=10000, 0..=10000, 0..=15000],
             ppm_file: None,
+            obj_file: None,
             mode: Mode::Blocks,
             extra_resolutions: 1,
         }
@@ -102,7 +105,11 @@ impl TemplateApp {
             // make sure dir exists
             std::fs::create_dir_all(&app.data_dir).unwrap();
         }
-        app.ppm_file = ppm_file;
+        if ppm_file.as_ref().is_some_and(|x| x.ends_with(".ppm")) {
+            app.ppm_file = ppm_file;
+        } else if ppm_file.as_ref().is_some_and(|x| x.ends_with(".obj")) {
+            app.obj_file = ppm_file;
+        }
 
         let contains_cell_files = std::fs::read_dir(&app.data_dir).unwrap().any(|entry| {
             let p = entry.unwrap().path();
@@ -177,6 +184,30 @@ impl TemplateApp {
             {
                 self.coord = [width / 2, height / 2, 0];
             }
+        } else if let Some(obj_file) = &self.obj_file {
+            // FIXME: avoid duplication with ppm above
+            let old = std::mem::replace(&mut self.world, Box::new(EmptyVolume {}));
+            let base = if self.trilinear_interpolation {
+                Box::new(TrilinearInterpolatedVolume { base: old })
+            } else {
+                old
+            };
+            let obj_volume = ObjVolume::new(&obj_file, base);
+            let width = obj_volume.width() as i32;
+            let height = obj_volume.height() as i32;
+            println!("Loaded Obj volume with size {}x{}", width, height);
+
+            self.world = Box::new(obj_volume);
+            self.ranges = [0..=width, 0..=height, 0..=0];
+
+            /* if self.coord[0] < 0 || self.coord[0] > width {}
+            if !self.ranges[0].contains(&self.coord[0])
+                || !self.ranges[1].contains(&self.coord[1])
+                || !self.ranges[2].contains(&self.coord[2])
+            {
+                self.coord = [width / 2, height / 2, 0];
+            } */
+            self.coord = [width / 2, height / 2, 0];
         }
     }
 
@@ -268,12 +299,12 @@ impl TemplateApp {
         let mut xyz: [i32; 3] = [0, 0, 0];
         xyz[d_coord] = self.coord[d_coord];
 
-        let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
-            .min(4)
-            .max(0);
-        let max_level: u32 = (min_level + self.extra_resolutions).min(4);
-        /* let min_level = 0;
-        let max_level = 0; */
+        // let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
+        //     .min(4)
+        //     .max(0);
+        // let max_level: u32 = (min_level + self.extra_resolutions).min(4);
+        let min_level = 0;
+        let max_level = 0;
         for level in (min_level..=max_level).rev() {
             let sfactor = 1 << level as u8;
             //println!("level: {} factor: {}", level, sfactor);
@@ -468,15 +499,15 @@ impl TemplateApp {
                 self.frame_height = new_height;
 
                 let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, |s| &mut s.texture_xy);
-                let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
-                let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
+                //let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
+                //let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
 
                 let image = Image::new(texture_xy)
                     .max_height(self.frame_height as f32)
                     .max_width(self.frame_width as f32)
                     .fit_to_original_size(pane_scaling);
 
-                let image_xz = Image::new(texture_xz)
+                /* let image_xz = Image::new(texture_xz)
                     .max_height(self.frame_height as f32)
                     .max_width(self.frame_width as f32)
                     .fit_to_original_size(pane_scaling);
@@ -484,19 +515,19 @@ impl TemplateApp {
                 let image_yz = Image::new(texture_yz)
                     .max_height(self.frame_height as f32)
                     .max_width(self.frame_width as f32)
-                    .fit_to_original_size(pane_scaling);
+                    .fit_to_original_size(pane_scaling); */
 
                 ui.horizontal(|ui| {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
                     self.add_scroll_handler(&im_xy, ui, 2);
                     self.add_drag_handler(&im_xy, 0, 1);
-                    let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
+                    /* let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
                     self.add_scroll_handler(&im_xz, ui, 1);
-                    self.add_drag_handler(&im_xz, 0, 2);
+                    self.add_drag_handler(&im_xz, 0, 2); */
                 });
-                let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
+                /* let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
                 self.add_scroll_handler(&im_yz, ui, 0);
-                self.add_drag_handler(&im_yz, 2, 1);
+                self.add_drag_handler(&im_yz, 2, 1); */
             };
         });
     }
