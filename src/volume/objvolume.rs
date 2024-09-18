@@ -81,12 +81,24 @@ impl PaintVolume for ObjVolume {
         let min_v = (xyz[1] - height as i32 / 2 * paint_zoom as i32) / sfactor as i32;
         let max_v = (xyz[1] + height as i32 / 2 * paint_zoom as i32) / sfactor as i32;
 
-        println!(
+        /* println!(
             "xyz: {:?}, width: {}, height: {}, sfactor: {}, paint_zoom: {}",
             xyz, width, height, sfactor, paint_zoom
-        );
-        println!("min_u: {}, max_u: {}, min_v: {}, max_v: {}", min_u, max_u, min_v, max_v);
+        ); */
+        //println!("min_u: {}, max_u: {}, min_v: {}, max_v: {}", min_u, max_u, min_v, max_v);
 
+        /*
+                int orient2d(const Point2D& a, const Point2D& b, const Point2D& c)
+        {
+            return (b.x-a.x)*(c.y-a.y) - (b.y-a.y)*(c.x-a.x);
+        }
+
+                 */
+        fn orient2d(u1: i32, v1: i32, u2: i32, v2: i32, u3: i32, v3: i32) -> i32 {
+            (u2 - u1) * (v3 - v1) - (v2 - v1) * (u3 - u1)
+        }
+
+        let mut done = false;
         let obj = &self.obj.object;
         for s in obj.geometry[0].shapes.iter() {
             match s.primitive {
@@ -104,36 +116,103 @@ impl PaintVolume for ObjVolume {
                     let u3 = (v3.u * self.width() as f64) as i32;
                     let v3 = (v3.v * self.height() as f64) as i32;
 
-                    //println!("u1: {}, v1: {}, u2: {}, v2: {}, u3: {}, v3: {}", u1, v1, u2, v2, u3, v3);
-
-                    if (u1 >= min_u && u1 < max_u && v1 >= min_v && v1 < max_v)
+                    if !done
+                        && (u1 >= min_u && u1 < max_u && v1 >= min_v && v1 < max_v)
                         && (u2 >= min_u && u2 < max_u && v2 >= min_v && v2 < max_v)
                         && (u3 >= min_u && u3 < max_u && v3 >= min_v && v3 < max_v)
                     {
-                        line(
-                            (u1 - min_u) as usize,
-                            (v1 - min_v) as usize,
-                            (u2 - min_u) as usize,
-                            (v2 - min_v) as usize,
-                            buffer,
-                            width,
-                        );
-                        line(
-                            (u2 - min_u) as usize,
-                            (v2 - min_v) as usize,
-                            (u3 - min_u) as usize,
-                            (v3 - min_v) as usize,
-                            buffer,
-                            width,
-                        );
-                        line(
-                            (u3 - min_u) as usize,
-                            (v3 - min_v) as usize,
-                            (u1 - min_u) as usize,
-                            (v1 - min_v) as usize,
-                            buffer,
-                            width,
-                        );
+                        /*
+                                             // Compute triangle bounding box
+                        int minX = min3(v0.x, v1.x, v2.x);
+                        int minY = min3(v0.y, v1.y, v2.y);
+                        int maxX = max3(v0.x, v1.x, v2.x);
+                        int maxY = max3(v0.y, v1.y, v2.y);
+
+                        // Clip against screen bounds
+                        minX = max(minX, 0);
+                        minY = max(minY, 0);
+                        maxX = min(maxX, screenWidth - 1);
+                        maxY = min(maxY, screenHeight - 1);
+
+                        // Rasterize
+                        Point2D p;
+                        for (p.y = minY; p.y <= maxY; p.y++) {
+                            for (p.x = minX; p.x <= maxX; p.x++) {
+                                // Determine barycentric coordinates
+                                int w0 = orient2d(v1, v2, p);
+                                int w1 = orient2d(v2, v0, p);
+                                int w2 = orient2d(v0, v1, p);
+
+                                // If p is on or inside all edges, render pixel.
+                                if (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                                    renderPixel(p, w0, w1, w2);
+                            }
+                        } */
+
+                        //println!("u1: {}, v1: {}, u2: {}, v2: {}, u3: {}, v3: {}", u1, v1, u2, v2, u3, v3);
+
+                        let u1i = u1 - min_u;
+                        let v1i = v1 - min_v;
+
+                        let u2i = u2 - min_u;
+                        let v2i = v2 - min_v;
+
+                        let u3i = u3 - min_u;
+                        let v3i = v3 - min_v;
+
+                        /* println!(
+                            "u1i: {}, v1i: {}, u2i: {}, v2i: {}, u3i: {}, v3i: {}",
+                            u1i, v1i, u2i, v2i, u3i, v3i
+                        ); */
+
+                        let tmin_u = u1i.min(u2i).min(u3i);
+                        let tmax_u = u1i.max(u2i).max(u3i);
+
+                        let tmin_v = v1i.min(v2i).min(v3i);
+                        let tmax_v = v1i.max(v2i).max(v3i);
+
+                        /* println!(
+                            "tmin_u: {}, tmax_u: {}, tmin_v: {}, tmax_v: {}",
+                            tmin_u, tmax_u, tmin_v, tmax_v
+                        ); */
+
+                        for v in tmin_v..=tmax_v {
+                            for u in tmin_u..=tmax_u {
+                                let w0 = orient2d(u2i, v2i, u3i, v3i, u, v);
+                                let w1 = orient2d(u3i, v3i, u1i, v1i, u, v);
+                                let w2 = orient2d(u1i, v1i, u2i, v2i, u, v);
+
+                                //println!("At u:{} v:{} w0: {}, w1: {}, w2: {}", u, v, w0, w1, w2);
+
+                                if w0 <= 0 && w1 <= 0 && w2 <= 0 {
+                                    let idx = v * width as i32 + u;
+                                    if idx >= 0 && idx < buffer.len() as i32 {
+                                        let xyz1 = &obj.vertices[i1.0];
+                                        let xyz2 = &obj.vertices[i2.0];
+                                        let xyz3 = &obj.vertices[i3.0];
+
+                                        // barymetric interpolation
+                                        let invwsum = 1. / (w0 + w1 + w2) as f64;
+                                        let x =
+                                            (w0 as f64 * xyz1.x + w1 as f64 * xyz2.x + w2 as f64 * xyz3.x) * invwsum;
+                                        let y =
+                                            (w0 as f64 * xyz1.y + w1 as f64 * xyz2.y + w2 as f64 * xyz3.y) * invwsum;
+                                        let z =
+                                            (w0 as f64 * xyz1.z + w1 as f64 * xyz2.z + w2 as f64 * xyz3.z) * invwsum;
+
+                                        let v = self.volume.get([x, y, z], 1);
+
+                                        buffer[idx as usize] = v;
+                                    }
+                                }
+                            }
+                        }
+
+                        //done = true;
+
+                        //line(u1i, v1i, u2i, v2i, buffer, width);
+                        //line(u2i, v2i, u3i, v3i, buffer, width);
+                        //line(u3i, v3i, u1i, v1i, buffer, width);
                     }
                 }
                 _ => todo!(),
@@ -146,7 +225,7 @@ impl PaintVolume for ObjVolume {
     }
 }
 
-fn line(x0: usize, y0: usize, x1: usize, y1: usize, buffer: &mut [u8], width: usize) {
+fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut [u8], width: usize) {
     // simple bresenham algorithm from https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm
 
     let dx = (x1 as i32 - x0 as i32).abs();
@@ -158,11 +237,11 @@ fn line(x0: usize, y0: usize, x1: usize, y1: usize, buffer: &mut [u8], width: us
     let mut x = x0 as i32;
     let mut y = y0 as i32;
 
-    while x as usize != x1 || y as usize != y1 {
+    while x != x1 || y != y1 {
         //println!("x: {}, y: {}", x, y);
-        let idx = y as usize * width + x as usize;
-        if idx >= 0 && idx < buffer.len() {
-            buffer[idx] = 255;
+        let idx = y * width as i32 + x;
+        if idx >= 0 && idx < buffer.len() as i32 {
+            buffer[idx as usize] = 255;
         }
 
         let e2 = 2 * error;
