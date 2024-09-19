@@ -1,7 +1,6 @@
 #![allow(dead_code, unused_variables)] // FIXME
 use super::{PaintVolume, VoxelPaintVolume, VoxelVolume};
-use std::u128;
-use wavefront_obj::obj::{self, ObjSet, Object, Primitive, Shape};
+use wavefront_obj::obj::{self, Object, Primitive};
 
 struct ObjFile {
     object: Object,
