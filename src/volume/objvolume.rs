@@ -117,11 +117,13 @@ impl PaintVolume for ObjVolume {
                     let u3 = (v3.u * self.width() as f64) as i32;
                     let v3 = ((1.0 - v3.v) * self.height() as f64) as i32;
 
-                    if !done
-                        && (u1 >= min_u && u1 < max_u && v1 >= min_v && v1 < max_v)
-                        && (u2 >= min_u && u2 < max_u && v2 >= min_v && v2 < max_v)
-                        && (u3 >= min_u && u3 < max_u && v3 >= min_v && v3 < max_v)
-                    {
+                    let min_u_t = u1.min(u2).min(u3);
+                    let max_u_t = u1.max(u2).max(u3);
+
+                    let min_v_t = v1.min(v2).min(v3);
+                    let max_v_t = v1.max(v2).max(v3);
+
+                    if !done && !(min_u_t > max_u || max_u_t < min_u || min_v_t > max_v || max_v_t < min_v) {
                         /*
                                              // Compute triangle bounding box
                         int minX = min3(v0.x, v1.x, v2.x);
@@ -166,19 +168,19 @@ impl PaintVolume for ObjVolume {
                             u1i, v1i, u2i, v2i, u3i, v3i
                         ); */
 
-                        let tmin_u = u1i.min(u2i).min(u3i);
-                        let tmax_u = u1i.max(u2i).max(u3i);
+                        let tmin_u = u1i.min(u2i).min(u3i).max(0);
+                        let tmax_u = u1i.max(u2i).max(u3i).min((width as i32) / paint_zoom as i32 - 1);
 
-                        let tmin_v = v1i.min(v2i).min(v3i);
-                        let tmax_v = v1i.max(v2i).max(v3i);
+                        let tmin_v = v1i.min(v2i).min(v3i).max(0);
+                        let tmax_v = v1i.max(v2i).max(v3i).min(height as i32 / paint_zoom as i32 - 1);
 
                         /* println!(
                             "tmin_u: {}, tmax_u: {}, tmin_v: {}, tmax_v: {}",
                             tmin_u, tmax_u, tmin_v, tmax_v
                         ); */
 
-                        for v in tmin_v..=tmax_v {
-                            for u in tmin_u..=tmax_u {
+                        for v in (tmin_v..=tmax_v).step_by(paint_zoom as usize) {
+                            for u in (tmin_u..=tmax_u).step_by(paint_zoom as usize) {
                                 let w0 = orient2d(u2i, v2i, u3i, v3i, u, v);
                                 let w1 = orient2d(u3i, v3i, u1i, v1i, u, v);
                                 let w2 = orient2d(u1i, v1i, u2i, v2i, u, v);
@@ -186,7 +188,7 @@ impl PaintVolume for ObjVolume {
                                 //println!("At u:{} v:{} w0: {}, w1: {}, w2: {}", u, v, w0, w1, w2);
 
                                 if w0 >= 0 && w1 >= 0 && w2 >= 0 {
-                                    let idx = v * width as i32 + u;
+                                    let idx = (v / paint_zoom as i32) * width as i32 + (u / paint_zoom as i32);
                                     if idx >= 0 && idx < buffer.len() as i32 {
                                         let xyz1 = &obj.vertices[i1.0];
                                         let xyz2 = &obj.vertices[i2.0];
