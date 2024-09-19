@@ -110,13 +110,13 @@ impl PaintVolume for ObjVolume {
                     let v3 = &obj.tex_vertices[i3.1.unwrap()];
 
                     let u1 = (v1.u * self.width() as f64) as i32;
-                    let v1 = (v1.v * self.height() as f64) as i32;
+                    let v1 = ((1.0 - v1.v) * self.height() as f64) as i32;
 
                     let u2 = (v2.u * self.width() as f64) as i32;
-                    let v2 = (v2.v * self.height() as f64) as i32;
+                    let v2 = ((1.0 - v2.v) * self.height() as f64) as i32;
 
                     let u3 = (v3.u * self.width() as f64) as i32;
-                    let v3 = (v3.v * self.height() as f64) as i32;
+                    let v3 = ((1.0 - v3.v) * self.height() as f64) as i32;
 
                     if !done
                         && (u1 >= min_u && u1 < max_u && v1 >= min_v && v1 < max_v)
@@ -186,7 +186,7 @@ impl PaintVolume for ObjVolume {
 
                                 //println!("At u:{} v:{} w0: {}, w1: {}, w2: {}", u, v, w0, w1, w2);
 
-                                if w0 <= 0 && w1 <= 0 && w2 <= 0 {
+                                if w0 >= 0 && w1 >= 0 && w2 >= 0 {
                                     let idx = v * width as i32 + u;
                                     if idx >= 0 && idx < buffer.len() as i32 {
                                         let xyz1 = &obj.vertices[i1.0];
