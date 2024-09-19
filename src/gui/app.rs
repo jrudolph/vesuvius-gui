@@ -170,7 +170,6 @@ impl TemplateApp {
 
     fn setup_segment(&mut self, segment_file: &str) {
         if segment_file.ends_with(".ppm") {
-            //let old = std::mem::replace(&mut self.world, Box::new(EmptyVolume {}));
             let old: Arc<RefCell<dyn VoxelPaintVolume>> = self.world.clone();
             let base = if self.trilinear_interpolation {
                 Arc::new(RefCell::new(TrilinearInterpolatedVolume { base: old }))
@@ -223,8 +222,7 @@ impl TemplateApp {
                 texture_uv: None,
                 convert_to_world_coords: Box::new(move |coords| obj2.borrow().convert_to_volume_coords(coords)),
             });
-            /* self.world = Arc::new(RefCell::new(obj_volume));
-            self.ranges = [0..=width, 0..=height, -40..=40];
+            /*
 
             if self.coord[0] < 0 || self.coord[0] > width {}
             if !self.ranges[0].contains(&self.coord[0])
@@ -285,10 +283,11 @@ impl TemplateApp {
     }
 
     fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, coord: usize, segment_pane: bool) {
-        let coords = if segment_pane {
-            &mut self.segment_mode.as_mut().unwrap().coord
+        let (coords, ranges) = if segment_pane {
+            let ranges = self.segment_mode.as_ref().unwrap().ranges.clone();
+            (&mut self.segment_mode.as_mut().unwrap().coord, ranges)
         } else {
-            &mut self.coord
+            (&mut self.coord, self.ranges.clone())
         };
 
         if image.hovered() {
@@ -303,7 +302,7 @@ impl TemplateApp {
                 let delta = delta.y.signum() * min_level as f32;
                 let m = &mut coords[coord];
                 *m = ((*m + delta as i32) / min_level as i32 * min_level as i32)
-                    .clamp(*self.ranges[coord].start(), *self.ranges[coord].end());
+                    .clamp(*ranges[coord].start(), *ranges[coord].end());
                 self.clear_textures();
             }
         }
