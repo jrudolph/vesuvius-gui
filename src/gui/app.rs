@@ -150,6 +150,7 @@ impl TemplateApp {
         self.transform_volume();
     }
     pub fn is_ppm_mode(&self) -> bool { self.ppm_file.is_some() }
+    pub fn is_obj_mode(&self) -> bool { self.obj_file.is_some() }
     fn load_from_cells(&mut self) {
         let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
         self.world = Box::new(v);
@@ -198,23 +199,22 @@ impl TemplateApp {
             println!("Loaded Obj volume with size {}x{}", width, height);
 
             self.world = Box::new(obj_volume);
-            self.ranges = [0..=width, 0..=height, 0..=0];
+            self.ranges = [0..=width, 0..=height, -40..=40];
 
-            /* if self.coord[0] < 0 || self.coord[0] > width {}
+            if self.coord[0] < 0 || self.coord[0] > width {}
             if !self.ranges[0].contains(&self.coord[0])
                 || !self.ranges[1].contains(&self.coord[1])
                 || !self.ranges[2].contains(&self.coord[2])
             {
                 self.coord = [width / 2, height / 2, 0];
-            } */
-            self.coord = [width / 2, height / 2, 0];
+            }
         }
     }
 
     fn select_volume(&mut self, id: usize) {
         if self.ppm_file.is_some() {
             self.volume_id = 0;
-            self.load_data(&FullVolumeReference::FRAGMENT_PHerc1667Cr01Fr03);
+            self.load_data(&FullVolumeReference::SCROLL1);
         } else {
             self.volume_id = id;
             self.load_data(<dyn VolumeReference>::VOLUMES[id]);
@@ -385,7 +385,7 @@ impl TemplateApp {
                 let z_sl = slider(ui, "z", &mut self.coord[2], self.ranges[2].clone(), false);
                 let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
 
-                if self.is_ppm_mode() {
+                if self.is_ppm_mode() || self.is_obj_mode() {
                     ui.label("Trilinear interpolation ('I')");
                     let c = ui.checkbox(&mut self.trilinear_interpolation, "");
                     if c.changed() {
