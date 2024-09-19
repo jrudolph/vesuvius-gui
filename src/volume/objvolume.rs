@@ -64,6 +64,8 @@ impl PaintVolume for ObjVolume {
         assert!(v_coord == 1);
         assert!(plane_coord == 2);
 
+        let w_factor = xyz[2] as f64 * sfactor as f64;
+
         /*
         let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32;
                 let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32;
@@ -200,7 +202,26 @@ impl PaintVolume for ObjVolume {
                                         let z =
                                             (w0 as f64 * xyz1.z + w1 as f64 * xyz2.z + w2 as f64 * xyz3.z) * invwsum;
 
-                                        let v = self.volume.get([x, y, z], 1);
+                                        let (nx, ny, nz) = if xyz[2] == 0 {
+                                            (0.0, 0.0, 0.0)
+                                        } else {
+                                            let nxyz1 = &obj.normals[i1.2.unwrap()];
+                                            let nxyz2 = &obj.normals[i2.2.unwrap()];
+                                            let nxyz3 = &obj.normals[i3.2.unwrap()];
+
+                                            let nx = (w0 as f64 * nxyz1.x + w1 as f64 * nxyz2.x + w2 as f64 * nxyz3.x)
+                                                * invwsum;
+                                            let ny = (w0 as f64 * nxyz1.y + w1 as f64 * nxyz2.y + w2 as f64 * nxyz3.y)
+                                                * invwsum;
+                                            let nz = (w0 as f64 * nxyz1.z + w1 as f64 * nxyz2.z + w2 as f64 * nxyz3.z)
+                                                * invwsum;
+
+                                            (nx, ny, nz)
+                                        };
+
+                                        let v = self
+                                            .volume
+                                            .get([x + w_factor * nx, y + w_factor * ny, z + w_factor * nz], 1);
 
                                         buffer[idx as usize] = v;
                                     }
