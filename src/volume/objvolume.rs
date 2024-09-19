@@ -46,7 +46,7 @@ impl ObjVolume {
     pub fn convert_to_volume_coords(&self, coord: [i32; 3]) -> [i32; 3] {
         let u = coord[0];
         let v = coord[1];
-        let _w = coord[2]; // FIXME
+        let w = coord[2] as f64;
 
         let obj = &self.obj.object;
         for s in obj.geometry[0].shapes.iter() {
@@ -88,7 +88,21 @@ impl ObjVolume {
                             let y = (w0 as f64 * xyz1.y + w1 as f64 * xyz2.y + w2 as f64 * xyz3.y) * invwsum;
                             let z = (w0 as f64 * xyz1.z + w1 as f64 * xyz2.z + w2 as f64 * xyz3.z) * invwsum;
 
-                            return [x as i32, y as i32, z as i32];
+                            let (nx, ny, nz) = if coord[2] == 0 {
+                                (0.0, 0.0, 0.0)
+                            } else {
+                                let nxyz1 = &obj.normals[i1.2.unwrap()];
+                                let nxyz2 = &obj.normals[i2.2.unwrap()];
+                                let nxyz3 = &obj.normals[i3.2.unwrap()];
+
+                                let nx = (w0 as f64 * nxyz1.x + w1 as f64 * nxyz2.x + w2 as f64 * nxyz3.x) * invwsum;
+                                let ny = (w0 as f64 * nxyz1.y + w1 as f64 * nxyz2.y + w2 as f64 * nxyz3.y) * invwsum;
+                                let nz = (w0 as f64 * nxyz1.z + w1 as f64 * nxyz2.z + w2 as f64 * nxyz3.z) * invwsum;
+
+                                (nx, ny, nz)
+                            };
+
+                            return [(x + w * nx) as i32, (y + w * ny) as i32, (z + w * nz) as i32];
                         }
                     }
                 }
