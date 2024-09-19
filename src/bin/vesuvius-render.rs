@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::sync::Arc;
 use vesuvius_gui::downloader::Downloader;
 use vesuvius_gui::model::VolumeReference;
@@ -15,15 +16,15 @@ fn main() {
 
     let volume_dir = volume.sub_dir(&data_dir);
 
-    fn create_world(volume: &'static FullVolumeReference, volume_dir: String, ppm: String) -> Box<PPMVolume> {
+    fn create_world(volume: &'static FullVolumeReference, volume_dir: String, ppm: String) -> Arc<RefCell<PPMVolume>> {
         let world = {
             let (sender, _receiver) = std::sync::mpsc::channel();
             let downloader = Downloader::new(&volume_dir, TILE_SERVER, volume, None, sender);
             let v = volume::VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
-            Box::new(v)
+            Arc::new(RefCell::new(v))
         };
-        let mut world = transform_volume(&ppm, world, true);
-        world.enable_bilinear_interpolation();
+        let world = transform_volume(&ppm, world, true);
+        world.borrow_mut().enable_bilinear_interpolation();
         world
     }
 
@@ -50,10 +51,11 @@ fn main() {
     let w_range = 15..=49;
 
     (w_range).into_par_iter().for_each(move |w| {
-        let mut world = {
+        let world = {
             let setup = setup.clone();
             create_world(&volume, setup.volume_dir.clone(), setup.ppm.clone())
         };
+        let mut world = world.borrow_mut();
         let width = ((world.width() as f64) / factor) as usize;
         let height = ((world.height() as f64) / factor) as usize;
         println!("Rescaling layer w:{} to {}x{}", w, width, height);
@@ -75,12 +77,12 @@ fn main() {
 
 fn transform_volume(
     ppm_file: &str,
-    world: Box<dyn volume::VoxelPaintVolume>,
+    world: Arc<RefCell<dyn volume::VoxelPaintVolume>>,
     trilinear_interpolation: bool,
-) -> Box<PPMVolume> {
+) -> Arc<RefCell<PPMVolume>> {
     //let old = std::mem::replace(&mut self.world, Box::new(EmptyVolume {}));
     let base = if trilinear_interpolation {
-        Box::new(TrilinearInterpolatedVolume { base: world })
+        Arc::new(RefCell::new(TrilinearInterpolatedVolume { base: world }))
     } else {
         world
     };
@@ -89,5 +91,5 @@ fn transform_volume(
     let height = ppm.height() as i32;
     println!("Loaded PPM volume with size {}x{}", width, height);
 
-    Box::new(ppm)
+    Arc::new(RefCell::new(ppm))
 }

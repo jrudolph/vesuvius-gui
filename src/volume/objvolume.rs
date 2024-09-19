@@ -1,4 +1,5 @@
 use super::{PaintVolume, VoxelPaintVolume, VoxelVolume};
+use std::{cell::RefCell, sync::Arc};
 use wavefront_obj::obj::{self, Object, Primitive};
 
 struct ObjFile {
@@ -6,11 +7,11 @@ struct ObjFile {
 }
 
 pub struct ObjVolume {
-    volume: Box<dyn VoxelPaintVolume>,
+    volume: Arc<RefCell<dyn VoxelPaintVolume>>,
     obj: ObjFile,
 }
 impl ObjVolume {
-    pub fn new(obj_file_path: &str, base_volume: Box<dyn VoxelPaintVolume>) -> Self {
+    pub fn new(obj_file_path: &str, base_volume: Arc<RefCell<dyn VoxelPaintVolume>>) -> Self {
         let mut objects = Self::load_obj(obj_file_path).objects;
         println!("Loaded obj file with {} objects", objects.len());
         for o in objects.iter() {
@@ -61,6 +62,8 @@ impl PaintVolume for ObjVolume {
         assert!(u_coord == 0);
         assert!(v_coord == 1);
         assert!(plane_coord == 2);
+
+        let mut volume = self.volume.borrow_mut();
 
         let ffactor = sfactor as f64;
 
@@ -217,7 +220,7 @@ impl PaintVolume for ObjVolume {
                                             (nx, ny, nz)
                                         };
 
-                                        let v = self.volume.get(
+                                        let v = volume.get(
                                             [
                                                 (x + w_factor * nx) / ffactor,
                                                 (y + w_factor * ny) / ffactor,

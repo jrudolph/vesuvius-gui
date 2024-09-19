@@ -8,6 +8,8 @@ use crate::volume::*;
 use directories::BaseDirs;
 use egui::Vec2;
 use egui::{ColorImage, Image, PointerButton, Response, Ui};
+use std::cell::RefCell;
+use std::sync::Arc;
 
 const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
@@ -16,6 +18,32 @@ enum Mode {
     Blocks,
     Cells,
     Layers,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct SegmentMode {
+    coord: [i32; 3],
+    #[serde(skip)]
+    info: String,
+    #[serde(skip)]
+    ranges: [RangeInclusive<i32>; 3],
+    #[serde(skip)]
+    world: Arc<RefCell<dyn VoxelPaintVolume>>,
+    #[serde(skip)]
+    texture_uv: Option<egui::TextureHandle>,
+}
+
+impl Default for SegmentMode {
+    fn default() -> Self {
+        Self {
+            coord: [0, 0, 0],
+            info: "Unknown segment".to_string(),
+            ranges: [0..=1000, 0..=1000, -40..=40],
+            world: Arc::new(RefCell::new(EmptyVolume {})),
+            texture_uv: None,
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -37,7 +65,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     texture_yz: Option<egui::TextureHandle>,
     #[serde(skip)]
-    world: Box<dyn VoxelPaintVolume>,
+    world: Arc<RefCell<dyn VoxelPaintVolume>>,
     #[serde(skip)]
     last_size: Vec2,
     #[serde(skip)]
@@ -45,14 +73,15 @@ pub struct TemplateApp {
     drawing_config: DrawingConfig,
     #[serde(skip)]
     ranges: [RangeInclusive<i32>; 3],
-    #[serde(skip)]
+    /* #[serde(skip)]
     ppm_file: Option<String>,
     #[serde(skip)]
-    obj_file: Option<String>,
+    obj_file: Option<String>, */
     #[serde(skip)]
     mode: Mode,
     #[serde(skip)]
     extra_resolutions: u32,
+    segment_mode: Option<SegmentMode>,
 }
 
 impl Default for TemplateApp {
@@ -69,15 +98,16 @@ impl Default for TemplateApp {
             texture_xy: None,
             texture_xz: None,
             texture_yz: None,
-            world: Box::new(EmptyVolume {}),
+            world: Arc::new(RefCell::new(EmptyVolume {})),
             last_size: Vec2::ZERO,
             download_notifier: None,
             drawing_config: Default::default(),
             ranges: [0..=10000, 0..=10000, 0..=15000],
-            ppm_file: None,
-            obj_file: None,
+            //ppm_file: None,
+            //obj_file: None,
             mode: Mode::Blocks,
             extra_resolutions: 1,
+            segment_mode: None,
         }
     }
 }
@@ -87,7 +117,7 @@ impl TemplateApp {
     //const TILE_SERVER: &'static str = "http://localhost:8095";
 
     /// Called once before the first frame.
-    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: Option<String>, ppm_file: Option<String>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: Option<String>, segment_file: Option<String>) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
         let mut app: TemplateApp = if let Some(storage) = cc.storage {
@@ -105,11 +135,6 @@ impl TemplateApp {
             // make sure dir exists
             std::fs::create_dir_all(&app.data_dir).unwrap();
         }
-        if ppm_file.as_ref().is_some_and(|x| x.ends_with(".ppm")) {
-            app.ppm_file = ppm_file;
-        } else if ppm_file.as_ref().is_some_and(|x| x.ends_with(".obj")) {
-            app.obj_file = ppm_file;
-        }
 
         let contains_cell_files = std::fs::read_dir(&app.data_dir).unwrap().any(|entry| {
             let p = entry.unwrap().path();
@@ -125,57 +150,35 @@ impl TemplateApp {
         if contains_cell_files {
             app.mode = Mode::Cells;
             app.load_from_cells();
-            app.transform_volume();
         } else if contains_layer_files {
             app.mode = Mode::Layers;
             app.load_from_layers();
-            app.transform_volume();
         } else {
             app.select_volume(app.volume_id);
         }
+
+        if let Some(segment_file) = segment_file {
+            app.setup_segment(&segment_file);
+        }
+
         app
     }
-    fn load_data(&mut self, volume: &'static dyn VolumeReference) {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        self.download_notifier = Some(receiver);
 
-        let volume_dir = volume.sub_dir(&self.data_dir);
-
-        self.world = {
-            let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, None, sender);
-            let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
-            Box::new(v)
-        };
-
-        self.transform_volume();
-    }
-    pub fn is_ppm_mode(&self) -> bool { self.ppm_file.is_some() }
-    pub fn is_obj_mode(&self) -> bool { self.obj_file.is_some() }
-    fn load_from_cells(&mut self) {
-        let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
-        self.world = Box::new(v);
-        self.extra_resolutions = 0;
-    }
-    fn load_from_layers(&mut self) {
-        let v = LayersMappedVolume::from_data_dir(&self.data_dir);
-        self.world = Box::new(v);
-        self.extra_resolutions = 0;
-    }
-
-    fn transform_volume(&mut self) {
-        if let Some(ppm_file) = &self.ppm_file {
-            let old = std::mem::replace(&mut self.world, Box::new(EmptyVolume {}));
+    fn setup_segment(&mut self, segment_file: &str) {
+        if segment_file.ends_with(".ppm") {
+            //let old = std::mem::replace(&mut self.world, Box::new(EmptyVolume {}));
+            let old: Arc<RefCell<dyn VoxelPaintVolume>> = self.world.clone();
             let base = if self.trilinear_interpolation {
-                Box::new(TrilinearInterpolatedVolume { base: old })
+                Arc::new(RefCell::new(TrilinearInterpolatedVolume { base: old }))
             } else {
                 old
             };
-            let ppm = PPMVolume::new(&ppm_file, base);
+            let ppm = PPMVolume::new(segment_file, base);
             let width = ppm.width() as i32;
             let height = ppm.height() as i32;
             println!("Loaded PPM volume with size {}x{}", width, height);
 
-            self.world = Box::new(ppm);
+            self.world = Arc::new(RefCell::new(ppm));
             self.ranges = [0..=width, 0..=height, -43..=43];
 
             if self.coord[0] < 0 || self.coord[0] > width {}
@@ -185,20 +188,19 @@ impl TemplateApp {
             {
                 self.coord = [width / 2, height / 2, 0];
             }
-        } else if let Some(obj_file) = &self.obj_file {
-            // FIXME: avoid duplication with ppm above
-            let old = std::mem::replace(&mut self.world, Box::new(EmptyVolume {}));
+        } else if segment_file.ends_with(".obj") {
+            let old: Arc<RefCell<dyn VoxelPaintVolume>> = self.world.clone();
             let base = if self.trilinear_interpolation {
-                Box::new(TrilinearInterpolatedVolume { base: old })
+                Arc::new(RefCell::new(TrilinearInterpolatedVolume { base: old }))
             } else {
                 old
             };
-            let obj_volume = ObjVolume::new(&obj_file, base);
+            let obj_volume = ObjVolume::new(&segment_file, base);
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
             println!("Loaded Obj volume with size {}x{}", width, height);
 
-            self.world = Box::new(obj_volume);
+            self.world = Arc::new(RefCell::new(obj_volume));
             self.ranges = [0..=width, 0..=height, -40..=40];
 
             if self.coord[0] < 0 || self.coord[0] > width {}
@@ -211,8 +213,34 @@ impl TemplateApp {
         }
     }
 
+    fn load_data(&mut self, volume: &'static dyn VolumeReference) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.download_notifier = Some(receiver);
+
+        let volume_dir = volume.sub_dir(&self.data_dir);
+
+        self.world = {
+            let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, None, sender);
+            let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
+            Arc::new(RefCell::new(v))
+        };
+    }
+    //pub fn is_ppm_mode(&self) -> bool { self.ppm_file.is_some() }
+    //pub fn is_obj_mode(&self) -> bool { self.obj_file.is_some() }
+    pub fn is_segment_mode(&self) -> bool { self.segment_mode.is_some() }
+    fn load_from_cells(&mut self) {
+        let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
+        self.world = Arc::new(RefCell::new(v));
+        self.extra_resolutions = 0;
+    }
+    fn load_from_layers(&mut self) {
+        let v = LayersMappedVolume::from_data_dir(&self.data_dir);
+        self.world = Arc::new(RefCell::new(v));
+        self.extra_resolutions = 0;
+    }
+
     fn select_volume(&mut self, id: usize) {
-        if self.ppm_file.is_some() {
+        if self.is_segment_mode() {
             self.volume_id = 0;
             self.load_data(&FullVolumeReference::SCROLL1);
         } else {
@@ -308,7 +336,7 @@ impl TemplateApp {
         for level in (min_level..=max_level).rev() {
             let sfactor = 1 << level as u8;
             //println!("level: {} factor: {}", level, sfactor);
-            self.world.paint(
+            self.world.borrow_mut().paint(
                 self.coord,
                 u_coord,
                 v_coord,
@@ -355,14 +383,14 @@ impl TemplateApp {
             .spacing([40.0, 4.0])
             .show(ui, |ui| {
                 ui.label("Volume");
-                if self.is_ppm_mode() {
-                    ui.label("Fixed to Scroll 1 in PPM mode");
+                if self.is_segment_mode() {
+                    ui.label("Fixed to Scroll 1 in segment mode");
                 } else if self.mode == Mode::Cells {
                     ui.label(format!("Browsing cells in {}", self.data_dir));
                 } else if self.mode == Mode::Layers {
                     ui.label(format!("Browsing layers in {}", self.data_dir));
                 } else {
-                    ui.add_enabled_ui(!self.is_ppm_mode(), |ui| {
+                    ui.add_enabled_ui(!self.is_segment_mode(), |ui| {
                         egui::ComboBox::from_id_source("Volume")
                             .selected_text(self.selected_volume().label())
                             .show_ui(ui, |ui| {
@@ -385,7 +413,7 @@ impl TemplateApp {
                 let z_sl = slider(ui, "z", &mut self.coord[2], self.ranges[2].clone(), false);
                 let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
 
-                if self.is_ppm_mode() || self.is_obj_mode() {
+                if self.is_segment_mode() {
                     ui.label("Trilinear interpolation ('I')");
                     let c = ui.checkbox(&mut self.trilinear_interpolation, "");
                     if c.changed() {
@@ -499,15 +527,15 @@ impl TemplateApp {
                 self.frame_height = new_height;
 
                 let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, |s| &mut s.texture_xy);
-                //let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
-                //let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
+                let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
+                let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
 
                 let image = Image::new(texture_xy)
                     .max_height(self.frame_height as f32)
                     .max_width(self.frame_width as f32)
                     .fit_to_original_size(pane_scaling);
 
-                /* let image_xz = Image::new(texture_xz)
+                let image_xz = Image::new(texture_xz)
                     .max_height(self.frame_height as f32)
                     .max_width(self.frame_width as f32)
                     .fit_to_original_size(pane_scaling);
@@ -515,19 +543,19 @@ impl TemplateApp {
                 let image_yz = Image::new(texture_yz)
                     .max_height(self.frame_height as f32)
                     .max_width(self.frame_width as f32)
-                    .fit_to_original_size(pane_scaling); */
+                    .fit_to_original_size(pane_scaling);
 
                 ui.horizontal(|ui| {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
                     self.add_scroll_handler(&im_xy, ui, 2);
                     self.add_drag_handler(&im_xy, 0, 1);
-                    /* let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
+                    let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
                     self.add_scroll_handler(&im_xz, ui, 1);
-                    self.add_drag_handler(&im_xz, 0, 2); */
+                    self.add_drag_handler(&im_xz, 0, 2);
                 });
-                /* let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
+                let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
                 self.add_scroll_handler(&im_yz, ui, 0);
-                self.add_drag_handler(&im_yz, 2, 1); */
+                self.add_drag_handler(&im_yz, 2, 1);
             };
         });
     }
