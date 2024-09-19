@@ -9,6 +9,7 @@ use directories::BaseDirs;
 use egui::Vec2;
 use egui::{ColorImage, Image, PointerButton, Response, Ui};
 use std::cell::RefCell;
+use std::mem;
 use std::sync::Arc;
 
 const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
@@ -24,8 +25,8 @@ enum Mode {
 #[serde(default)]
 pub struct SegmentMode {
     coord: [i32; 3],
-    #[serde(skip)]
     info: String,
+    filename: String,
     #[serde(skip)]
     ranges: [RangeInclusive<i32>; 3],
     #[serde(skip)]
@@ -40,7 +41,8 @@ impl Default for SegmentMode {
     fn default() -> Self {
         Self {
             coord: [0, 0, 0],
-            info: "Unknown segment".to_string(),
+            info: "".to_string(),
+            filename: "".to_string(),
             ranges: [0..=1000, 0..=1000, -40..=40],
             world: Arc::new(RefCell::new(EmptyVolume {})),
             texture_uv: None,
@@ -84,7 +86,7 @@ pub struct TemplateApp {
     mode: Mode,
     #[serde(skip)]
     extra_resolutions: u32,
-    #[serde(skip)]
+    //#[serde(skip)]
     segment_mode: Option<SegmentMode>,
 }
 
@@ -168,8 +170,15 @@ impl TemplateApp {
         app
     }
 
+    fn reload_segment(&mut self) {
+        if let Some(segment_mode) = self.segment_mode.as_ref() {
+            self.setup_segment(&segment_mode.filename.clone());
+        }
+    }
+
     fn setup_segment(&mut self, segment_file: &str) {
         if segment_file.ends_with(".ppm") {
+            let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old: Arc<RefCell<dyn VoxelPaintVolume>> = self.world.clone();
             let base = if self.trilinear_interpolation {
                 Arc::new(RefCell::new(TrilinearInterpolatedVolume { base: old }))
@@ -183,23 +192,18 @@ impl TemplateApp {
             let ppm2 = ppm.clone();
             println!("Loaded PPM volume with size {}x{}", width, height);
 
-            self.segment_mode = Some(SegmentMode {
-                coord: [width / 2, height / 2, 0],
-                info: segment_file.to_string(),
-                ranges: [0..=width, 0..=height, -40..=40],
-                world: ppm,
-                texture_uv: None,
-                convert_to_world_coords: Box::new(move |coord| ppm2.borrow().convert_to_world_coords(coord)),
-            });
+            if segment.filename != segment_file {
+                segment.coord = [width / 2, height / 2, 0];
+                segment.filename = segment_file.to_string();
+                segment.info = segment_file.to_string();
+            }
+            segment.ranges = [0..=width, 0..=height, -40..=40];
+            segment.world = ppm;
+            segment.convert_to_world_coords = Box::new(move |coord| ppm2.borrow().convert_to_world_coords(coord));
 
-            /* if self.coord[0] < 0 || self.coord[0] > width {}
-            if !self.ranges[0].contains(&self.coord[0])
-                || !self.ranges[1].contains(&self.coord[1])
-                || !self.ranges[2].contains(&self.coord[2])
-            {
-                self.coord = [width / 2, height / 2, 0];
-            } */
+            self.segment_mode = Some(segment)
         } else if segment_file.ends_with(".obj") {
+            let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old: Arc<RefCell<dyn VoxelPaintVolume>> = self.world.clone();
             let base = if self.trilinear_interpolation {
                 Arc::new(RefCell::new(TrilinearInterpolatedVolume { base: old }))
@@ -214,23 +218,16 @@ impl TemplateApp {
             let obj2 = volume.clone();
             println!("Loaded Obj volume with size {}x{}", width, height);
 
-            self.segment_mode = Some(SegmentMode {
-                coord: [width / 2, height / 2, 0],
-                info: segment_file.to_string(),
-                ranges: [0..=width, 0..=height, -40..=40],
-                world: volume,
-                texture_uv: None,
-                convert_to_world_coords: Box::new(move |coords| obj2.borrow().convert_to_volume_coords(coords)),
-            });
-            /*
+            if segment.filename != segment_file {
+                segment.coord = [width / 2, height / 2, 0];
+                segment.filename = segment_file.to_string();
+                segment.info = segment_file.to_string();
+            }
+            segment.ranges = [0..=width, 0..=height, -40..=40];
+            segment.world = volume;
+            segment.convert_to_world_coords = Box::new(move |coords| obj2.borrow().convert_to_volume_coords(coords));
 
-            if self.coord[0] < 0 || self.coord[0] > width {}
-            if !self.ranges[0].contains(&self.coord[0])
-                || !self.ranges[1].contains(&self.coord[1])
-                || !self.ranges[2].contains(&self.coord[2])
-            {
-                self.coord = [width / 2, height / 2, 0];
-            } */
+            self.segment_mode = Some(segment)
         }
     }
 
@@ -540,7 +537,7 @@ impl TemplateApp {
                     ui.label("Trilinear interpolation ('I')");
                     let c = ui.checkbox(&mut self.trilinear_interpolation, "");
                     if c.changed() {
-                        self.load_data(self.selected_volume());
+                        self.reload_segment();
                         self.clear_textures();
                     }
                     ui.end_row()
@@ -613,6 +610,7 @@ impl TemplateApp {
             ui.input(|i| {
                 if i.key_pressed(egui::Key::F) {
                     self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
+                    self.reload_segment();
                     self.clear_textures();
                 }
                 if i.key_pressed(egui::Key::I) {
