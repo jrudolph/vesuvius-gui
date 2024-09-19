@@ -1,4 +1,4 @@
-#![allow(dead_code, unused_variables)] // FIXME
+#![allow(dead_code, unused)] // FIXME
 use super::{PaintVolume, VoxelPaintVolume, VoxelVolume};
 use wavefront_obj::obj::{self, Object, Primitive};
 
@@ -63,6 +63,8 @@ impl PaintVolume for ObjVolume {
         assert!(v_coord == 1);
         assert!(plane_coord == 2);
 
+        let ffactor = sfactor as f64;
+
         let w_factor = xyz[2] as f64 * sfactor as f64;
 
         /*
@@ -77,16 +79,16 @@ impl PaintVolume for ObjVolume {
                 let v = self.get(uvw, _sfactor as i32);
                 buffer[im_v * width + im_u] = v; */
 
-        let min_u = (xyz[0] - width as i32 / 2 * paint_zoom as i32) / sfactor as i32;
-        let max_u = (xyz[0] + width as i32 / 2 * paint_zoom as i32) / sfactor as i32;
-        let min_v = (xyz[1] - height as i32 / 2 * paint_zoom as i32) / sfactor as i32;
-        let max_v = (xyz[1] + height as i32 / 2 * paint_zoom as i32) / sfactor as i32;
+        let min_u = (xyz[0] - width as i32 / 2 * paint_zoom as i32);
+        let max_u = (xyz[0] + width as i32 / 2 * paint_zoom as i32);
+        let min_v = (xyz[1] - height as i32 / 2 * paint_zoom as i32);
+        let max_v = (xyz[1] + height as i32 / 2 * paint_zoom as i32);
 
-        /* println!(
+        println!(
             "xyz: {:?}, width: {}, height: {}, sfactor: {}, paint_zoom: {}",
             xyz, width, height, sfactor, paint_zoom
-        ); */
-        //println!("min_u: {}, max_u: {}, min_v: {}, max_v: {}", min_u, max_u, min_v, max_v);
+        );
+        println!("min_u: {}, max_u: {}, min_v: {}, max_v: {}", min_u, max_u, min_v, max_v);
 
         /*
                 int orient2d(const Point2D& a, const Point2D& b, const Point2D& c)
@@ -169,10 +171,10 @@ impl PaintVolume for ObjVolume {
                         ); */
 
                         let tmin_u = u1i.min(u2i).min(u3i).max(0);
-                        let tmax_u = u1i.max(u2i).max(u3i).min((width as i32) / paint_zoom as i32 - 1);
+                        let tmax_u = u1i.max(u2i).max(u3i).min(width as i32 * paint_zoom as i32 - 1);
 
                         let tmin_v = v1i.min(v2i).min(v3i).max(0);
-                        let tmax_v = v1i.max(v2i).max(v3i).min(height as i32 / paint_zoom as i32 - 1);
+                        let tmax_v = v1i.max(v2i).max(v3i).min(height as i32 * paint_zoom as i32 - 1);
 
                         /* println!(
                             "tmin_u: {}, tmax_u: {}, tmin_v: {}, tmax_v: {}",
@@ -220,9 +222,14 @@ impl PaintVolume for ObjVolume {
                                             (nx, ny, nz)
                                         };
 
-                                        let v = self
-                                            .volume
-                                            .get([x + w_factor * nx, y + w_factor * ny, z + w_factor * nz], 1);
+                                        let v = self.volume.get(
+                                            [
+                                                (x + w_factor * nx) / ffactor,
+                                                (y + w_factor * ny) / ffactor,
+                                                (z + w_factor * nz) / ffactor,
+                                            ],
+                                            sfactor as i32,
+                                        );
 
                                         buffer[idx as usize] = v;
                                     }

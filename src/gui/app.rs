@@ -9,7 +9,7 @@ use directories::BaseDirs;
 use egui::Vec2;
 use egui::{ColorImage, Image, PointerButton, Response, Ui};
 
-const ZOOM_RES_FACTOR: f32 = 0.1; //1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
 #[derive(PartialEq, Eq)]
 enum Mode {
@@ -299,12 +299,12 @@ impl TemplateApp {
         let mut xyz: [i32; 3] = [0, 0, 0];
         xyz[d_coord] = self.coord[d_coord];
 
-        // let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
-        //     .min(4)
-        //     .max(0);
-        // let max_level: u32 = (min_level + self.extra_resolutions).min(4);
-        let min_level = 0;
-        let max_level = 0;
+        let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
+            .min(4)
+            .max(0);
+        let max_level: u32 = (min_level + self.extra_resolutions).min(4);
+        /* let min_level = 0;
+        let max_level = 0; */
         for level in (min_level..=max_level).rev() {
             let sfactor = 1 << level as u8;
             //println!("level: {} factor: {}", level, sfactor);
