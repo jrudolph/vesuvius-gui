@@ -210,15 +210,18 @@ impl TemplateApp {
             let obj_volume = ObjVolume::new(&segment_file, base);
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
+
+            let volume = Arc::new(RefCell::new(obj_volume));
+            let obj2 = volume.clone();
             println!("Loaded Obj volume with size {}x{}", width, height);
 
             self.segment_mode = Some(SegmentMode {
                 coord: [width / 2, height / 2, 0],
                 info: segment_file.to_string(),
                 ranges: [0..=width, 0..=height, -40..=40],
-                world: Arc::new(RefCell::new(obj_volume)),
+                world: volume,
                 texture_uv: None,
-                convert_to_world_coords: Box::new(|x| x), // FIXME
+                convert_to_world_coords: Box::new(move |coords| obj2.borrow().convert_to_volume_coords(coords)),
             });
             /* self.world = Arc::new(RefCell::new(obj_volume));
             self.ranges = [0..=width, 0..=height, -40..=40];

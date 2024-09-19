@@ -43,6 +43,65 @@ impl ObjVolume {
     pub fn height(&self) -> usize {
         9163 // FIXME
     }
+    pub fn convert_to_volume_coords(&self, coord: [i32; 3]) -> [i32; 3] {
+        let u = coord[0];
+        let v = coord[1];
+        let _w = coord[2]; // FIXME
+
+        let obj = &self.obj.object;
+        for s in obj.geometry[0].shapes.iter() {
+            match s.primitive {
+                Primitive::Triangle(i1, i2, i3) => {
+                    let v1 = &obj.tex_vertices[i1.1.unwrap()];
+                    let v2 = &obj.tex_vertices[i2.1.unwrap()];
+                    let v3 = &obj.tex_vertices[i3.1.unwrap()];
+
+                    let u1 = (v1.u * self.width() as f64) as i32;
+                    let v1 = ((1.0 - v1.v) * self.height() as f64) as i32;
+
+                    let u2 = (v2.u * self.width() as f64) as i32;
+                    let v2 = ((1.0 - v2.v) * self.height() as f64) as i32;
+
+                    let u3 = (v3.u * self.width() as f64) as i32;
+                    let v3 = ((1.0 - v3.v) * self.height() as f64) as i32;
+
+                    let min_u_t = u1.min(u2).min(u3);
+                    let max_u_t = u1.max(u2).max(u3);
+
+                    let min_v_t = v1.min(v2).min(v3);
+                    let max_v_t = v1.max(v2).max(v3);
+
+                    // broad pre-check against triangle bounding box
+                    if min_u_t <= u && u <= max_u_t && min_v_t <= v && v <= max_v_t {
+                        let w0 = orient2d(u2, v2, u3, v3, u, v);
+                        let w1 = orient2d(u3, v3, u1, v1, u, v);
+                        let w2 = orient2d(u1, v1, u2, v2, u, v);
+
+                        if w0 >= 0 && w1 >= 0 && w2 >= 0 {
+                            let xyz1 = &obj.vertices[i1.0];
+                            let xyz2 = &obj.vertices[i2.0];
+                            let xyz3 = &obj.vertices[i3.0];
+
+                            // barymetric interpolation
+                            let invwsum = 1. / (w0 + w1 + w2) as f64;
+                            let x = (w0 as f64 * xyz1.x + w1 as f64 * xyz2.x + w2 as f64 * xyz3.x) * invwsum;
+                            let y = (w0 as f64 * xyz1.y + w1 as f64 * xyz2.y + w2 as f64 * xyz3.y) * invwsum;
+                            let z = (w0 as f64 * xyz1.z + w1 as f64 * xyz2.z + w2 as f64 * xyz3.z) * invwsum;
+
+                            return [x as i32, y as i32, z as i32];
+                        }
+                    }
+                }
+                _ => todo!(),
+            }
+        }
+
+        [-1, -1, -1]
+    }
+}
+
+fn orient2d(u1: i32, v1: i32, u2: i32, v2: i32, u3: i32, v3: i32) -> i32 {
+    (u2 - u1) * (v3 - v1) - (v2 - v1) * (u3 - u1)
 }
 
 impl PaintVolume for ObjVolume {
@@ -79,10 +138,6 @@ impl PaintVolume for ObjVolume {
             xyz, width, height, sfactor, paint_zoom
         );
         println!("min_u: {}, max_u: {}, min_v: {}, max_v: {}", min_u, max_u, min_v, max_v); */
-
-        fn orient2d(u1: i32, v1: i32, u2: i32, v2: i32, u3: i32, v3: i32) -> i32 {
-            (u2 - u1) * (v3 - v1) - (v2 - v1) * (u3 - u1)
-        }
 
         let obj = &self.obj.object;
         for s in obj.geometry[0].shapes.iter() {
