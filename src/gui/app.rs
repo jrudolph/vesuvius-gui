@@ -32,6 +32,8 @@ pub struct SegmentMode {
     world: Arc<RefCell<dyn VoxelPaintVolume>>,
     #[serde(skip)]
     texture_uv: Option<egui::TextureHandle>,
+    #[serde(skip)]
+    convert_to_world_coords: Box<dyn Fn([i32; 3]) -> [i32; 3]>,
 }
 
 impl Default for SegmentMode {
@@ -42,6 +44,7 @@ impl Default for SegmentMode {
             ranges: [0..=1000, 0..=1000, -40..=40],
             world: Arc::new(RefCell::new(EmptyVolume {})),
             texture_uv: None,
+            convert_to_world_coords: Box::new(|x| x),
         }
     }
 }
@@ -81,6 +84,7 @@ pub struct TemplateApp {
     mode: Mode,
     #[serde(skip)]
     extra_resolutions: u32,
+    #[serde(skip)]
     segment_mode: Option<SegmentMode>,
 }
 
@@ -176,18 +180,26 @@ impl TemplateApp {
             let ppm = PPMVolume::new(segment_file, base);
             let width = ppm.width() as i32;
             let height = ppm.height() as i32;
+            let ppm = Arc::new(RefCell::new(ppm));
+            let ppm2 = ppm.clone();
             println!("Loaded PPM volume with size {}x{}", width, height);
 
-            self.world = Arc::new(RefCell::new(ppm));
-            self.ranges = [0..=width, 0..=height, -43..=43];
+            self.segment_mode = Some(SegmentMode {
+                coord: [width / 2, height / 2, 0],
+                info: segment_file.to_string(),
+                ranges: [0..=width, 0..=height, -40..=40],
+                world: ppm,
+                texture_uv: None,
+                convert_to_world_coords: Box::new(move |coord| ppm2.borrow().convert_to_world_coords(coord)),
+            });
 
-            if self.coord[0] < 0 || self.coord[0] > width {}
+            /* if self.coord[0] < 0 || self.coord[0] > width {}
             if !self.ranges[0].contains(&self.coord[0])
                 || !self.ranges[1].contains(&self.coord[1])
                 || !self.ranges[2].contains(&self.coord[2])
             {
                 self.coord = [width / 2, height / 2, 0];
-            }
+            } */
         } else if segment_file.ends_with(".obj") {
             let old: Arc<RefCell<dyn VoxelPaintVolume>> = self.world.clone();
             let base = if self.trilinear_interpolation {
@@ -200,7 +212,15 @@ impl TemplateApp {
             let height = obj_volume.height() as i32;
             println!("Loaded Obj volume with size {}x{}", width, height);
 
-            self.world = Arc::new(RefCell::new(obj_volume));
+            self.segment_mode = Some(SegmentMode {
+                coord: [width / 2, height / 2, 0],
+                info: segment_file.to_string(),
+                ranges: [0..=width, 0..=height, -40..=40],
+                world: Arc::new(RefCell::new(obj_volume)),
+                texture_uv: None,
+                convert_to_world_coords: Box::new(|x| x), // FIXME
+            });
+            /* self.world = Arc::new(RefCell::new(obj_volume));
             self.ranges = [0..=width, 0..=height, -40..=40];
 
             if self.coord[0] < 0 || self.coord[0] > width {}
@@ -209,7 +229,7 @@ impl TemplateApp {
                 || !self.ranges[2].contains(&self.coord[2])
             {
                 self.coord = [width / 2, height / 2, 0];
-            }
+            } */
         }
     }
 
@@ -254,9 +274,20 @@ impl TemplateApp {
         self.texture_xy = None;
         self.texture_xz = None;
         self.texture_yz = None;
+
+        if let Some(segment_mode) = self.segment_mode.as_mut() {
+            segment_mode.texture_uv = None;
+            self.sync_coords();
+        }
     }
 
-    fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, coord: usize) {
+    fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, coord: usize, segment_pane: bool) {
+        let coords = if segment_pane {
+            &mut self.segment_mode.as_mut().unwrap().coord
+        } else {
+            &mut self.coord
+        };
+
         if image.hovered() {
             let delta = ui.input(|i| i.smooth_scroll_delta);
             let zoom_delta = ui.input(|i| i.zoom_delta());
@@ -267,22 +298,28 @@ impl TemplateApp {
             } else if delta.y != 0.0 {
                 let min_level = 1 << ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
                 let delta = delta.y.signum() * min_level as f32;
-                let m = &mut self.coord[coord];
+                let m = &mut coords[coord];
                 *m = ((*m + delta as i32) / min_level as i32 * min_level as i32)
                     .clamp(*self.ranges[coord].start(), *self.ranges[coord].end());
                 self.clear_textures();
             }
         }
     }
-    fn add_drag_handler(&mut self, image: &Response, ucoord: usize, vcoord: usize) {
+    fn add_drag_handler(&mut self, image: &Response, ucoord: usize, vcoord: usize, segment_pane: bool) {
+        let coords = if segment_pane {
+            &mut self.segment_mode.as_mut().unwrap().coord
+        } else {
+            &mut self.coord
+        };
+
         if image.dragged_by(PointerButton::Primary) {
             //let im2 = image.on_hover_cursor(CursorIcon::Grabbing);
             let delta = -image.drag_delta() / self.zoom;
 
-            self.coord[ucoord] =
-                (self.coord[ucoord] + delta.x as i32).clamp(*self.ranges[ucoord].start(), *self.ranges[ucoord].end());
-            self.coord[vcoord] =
-                (self.coord[vcoord] + delta.y as i32).clamp(*self.ranges[vcoord].start(), *self.ranges[vcoord].end());
+            coords[ucoord] =
+                (coords[ucoord] + delta.x as i32).clamp(*self.ranges[ucoord].start(), *self.ranges[ucoord].end());
+            coords[vcoord] =
+                (coords[vcoord] + delta.y as i32).clamp(*self.ranges[vcoord].start(), *self.ranges[vcoord].end());
             self.clear_textures();
         }
     }
@@ -292,17 +329,25 @@ impl TemplateApp {
         u_coord: usize,
         v_coord: usize,
         d_coord: usize,
+        segment_pane: bool,
         t: fn(&mut Self) -> &mut Option<egui::TextureHandle>,
     ) -> egui::TextureHandle {
         if let Some(texture) = t(self) {
             texture.clone()
         } else {
-            let res = self.create_texture(ui, u_coord, v_coord, d_coord);
+            let res = self.create_texture(ui, u_coord, v_coord, d_coord, segment_pane);
             *t(self) = Some(res.clone());
             res
         }
     }
-    fn create_texture(&mut self, ui: &Ui, u_coord: usize, v_coord: usize, d_coord: usize) -> egui::TextureHandle {
+    fn create_texture(
+        &mut self,
+        ui: &Ui,
+        u_coord: usize,
+        v_coord: usize,
+        d_coord: usize,
+        segment_pane: bool,
+    ) -> egui::TextureHandle {
         use std::time::Instant;
         let _start = Instant::now();
 
@@ -322,10 +367,19 @@ impl TemplateApp {
         let mut pixels = vec![0u8; width * height];
 
         //let q = 1;
-
         //let mut printed = false;
+
+        let (coords, world) = if !segment_pane {
+            (self.coord, self.world.clone())
+        } else {
+            (
+                self.segment_mode.as_ref().unwrap().coord,
+                self.segment_mode.as_ref().unwrap().world.clone(),
+            )
+        };
+
         let mut xyz: [i32; 3] = [0, 0, 0];
-        xyz[d_coord] = self.coord[d_coord];
+        xyz[d_coord] = coords[d_coord];
 
         let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
             .min(4)
@@ -336,8 +390,8 @@ impl TemplateApp {
         for level in (min_level..=max_level).rev() {
             let sfactor = 1 << level as u8;
             //println!("level: {} factor: {}", level, sfactor);
-            self.world.borrow_mut().paint(
-                self.coord,
+            world.borrow_mut().paint(
+                coords,
                 u_coord,
                 v_coord,
                 d_coord,
@@ -353,13 +407,25 @@ impl TemplateApp {
         let image = ColorImage::from_gray([width, height], &pixels);
         //println!("Time elapsed before loading in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _start.elapsed());
         // Load the texture only once.
-        let res = ui
+        let texture_id = ui
             .ctx()
             .load_texture(format!("{}{}{}", u_coord, v_coord, d_coord), image, Default::default());
 
         let _duration = _start.elapsed();
-        //println!("Time elapsed in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _duration);
-        res
+        /* println!(
+            "Time elapsed in segment: {segment_pane} ({}, {}, {}) is: {:?}",
+            u_coord, v_coord, d_coord, _duration
+        ); */
+        texture_id
+    }
+
+    fn sync_coords(&mut self) {
+        if let Some(segment_mode) = self.segment_mode.as_ref() {
+            let res = (*segment_mode.convert_to_world_coords)(segment_mode.coord);
+            if res[0] >= 0 && res[1] >= 0 && res[2] >= 0 {
+                self.coord = res;
+            }
+        }
     }
 
     fn controls(&mut self, _frame: &eframe::Frame, ui: &mut Ui) {
@@ -369,11 +435,12 @@ impl TemplateApp {
             value: &mut T,
             range: RangeInclusive<T>,
             logarithmic: bool,
+            enabled: bool,
         ) -> Response {
             ui.label(label);
             let slider = egui::Slider::new(value, range).clamp_to_range(true);
             let slider = if logarithmic { slider.logarithmic(true) } else { slider };
-            let sl = ui.add(slider);
+            let sl = ui.add_enabled(enabled, slider);
             ui.end_row();
             sl
         }
@@ -408,10 +475,64 @@ impl TemplateApp {
                     });
                 }
                 ui.end_row();
-                let x_sl = slider(ui, "x", &mut self.coord[0], self.ranges[0].clone(), false);
-                let y_sl = slider(ui, "y", &mut self.coord[1], self.ranges[1].clone(), false);
-                let z_sl = slider(ui, "z", &mut self.coord[2], self.ranges[2].clone(), false);
-                let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true);
+                let is_segment_mode = self.is_segment_mode();
+                let x_sl = slider(
+                    ui,
+                    "x",
+                    &mut self.coord[0],
+                    self.ranges[0].clone(),
+                    false,
+                    !is_segment_mode,
+                );
+                let y_sl = slider(
+                    ui,
+                    "y",
+                    &mut self.coord[1],
+                    self.ranges[1].clone(),
+                    false,
+                    !is_segment_mode,
+                );
+                let z_sl = slider(
+                    ui,
+                    "z",
+                    &mut self.coord[2],
+                    self.ranges[2].clone(),
+                    false,
+                    !is_segment_mode,
+                );
+
+                let has_changed = if let Some(segment_mode) = self.segment_mode.as_mut() {
+                    let u_sl = slider(
+                        ui,
+                        "u",
+                        &mut segment_mode.coord[0],
+                        segment_mode.ranges[0].clone(),
+                        false,
+                        true,
+                    );
+                    let v_sl = slider(
+                        ui,
+                        "v",
+                        &mut segment_mode.coord[1],
+                        segment_mode.ranges[1].clone(),
+                        false,
+                        true,
+                    );
+                    let w_sl = slider(
+                        ui,
+                        "w",
+                        &mut segment_mode.coord[2],
+                        segment_mode.ranges[2].clone(),
+                        false,
+                        true,
+                    );
+
+                    u_sl.changed() || v_sl.changed() || w_sl.changed()
+                } else {
+                    false
+                };
+
+                let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true, true);
 
                 if self.is_segment_mode() {
                     ui.label("Trilinear interpolation ('I')");
@@ -423,7 +544,7 @@ impl TemplateApp {
                     ui.end_row()
                 }
 
-                if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() {
+                if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() || has_changed {
                     self.clear_textures();
                 }
             });
@@ -441,6 +562,7 @@ impl TemplateApp {
                             &mut self.drawing_config.threshold_min,
                             0..=(254 - self.drawing_config.threshold_max),
                             false,
+                            true,
                         );
                         let max_sl = slider(
                             ui,
@@ -448,9 +570,17 @@ impl TemplateApp {
                             &mut self.drawing_config.threshold_max,
                             0..=(254 - self.drawing_config.threshold_min),
                             false,
+                            true,
                         );
-                        let bits_sl = slider(ui, "Mask Bits", &mut self.drawing_config.quant, 1..=8, false);
-                        let mask_sl = slider(ui, "Mask Shift", &mut self.drawing_config.mask_shift, 0..=7, false);
+                        let bits_sl = slider(ui, "Mask Bits", &mut self.drawing_config.quant, 1..=8, false, true);
+                        let mask_sl = slider(
+                            ui,
+                            "Mask Shift",
+                            &mut self.drawing_config.mask_shift,
+                            0..=7,
+                            false,
+                            true,
+                        );
                         ui.label("Mask");
                         ui.label(format!("{:08b}", self.drawing_config.bit_mask()));
                         ui.end_row();
@@ -526,9 +656,9 @@ impl TemplateApp {
                 self.frame_width = new_width;
                 self.frame_height = new_height;
 
-                let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, |s| &mut s.texture_xy);
-                let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, |s| &mut s.texture_xz);
-                let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, |s| &mut s.texture_yz);
+                let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, false, |s| &mut s.texture_xy);
+                let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, false, |s| &mut s.texture_xz);
+                let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, false, |s| &mut s.texture_yz);
 
                 let image = Image::new(texture_xy)
                     .max_height(self.frame_height as f32)
@@ -547,15 +677,37 @@ impl TemplateApp {
 
                 ui.horizontal(|ui| {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
-                    self.add_scroll_handler(&im_xy, ui, 2);
-                    self.add_drag_handler(&im_xy, 0, 1);
+                    if !self.is_segment_mode() {
+                        self.add_scroll_handler(&im_xy, ui, 2, false);
+                        self.add_drag_handler(&im_xy, 0, 1, false);
+                    }
+
                     let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
-                    self.add_scroll_handler(&im_xz, ui, 1);
-                    self.add_drag_handler(&im_xz, 0, 2);
+                    if !self.is_segment_mode() {
+                        self.add_scroll_handler(&im_xz, ui, 1, false);
+                        self.add_drag_handler(&im_xz, 0, 2, false);
+                    }
                 });
-                let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
-                self.add_scroll_handler(&im_yz, ui, 0);
-                self.add_drag_handler(&im_yz, 2, 1);
+                ui.horizontal(|ui| {
+                    let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
+                    if !self.is_segment_mode() {
+                        self.add_scroll_handler(&im_yz, ui, 0, false);
+                        self.add_drag_handler(&im_yz, 2, 1, false);
+                    }
+
+                    if self.is_segment_mode() {
+                        let texture_uv = &self.get_or_create_texture(ui, 0, 1, 2, true, |s| {
+                            &mut s.segment_mode.as_mut().unwrap().texture_uv
+                        });
+                        let image_uv = Image::new(texture_uv)
+                            .max_height(self.frame_height as f32)
+                            .max_width(self.frame_width as f32)
+                            .fit_to_original_size(pane_scaling);
+                        let im_uv = ui.add(image_uv).interact(egui::Sense::drag());
+                        self.add_scroll_handler(&im_uv, ui, 2, true);
+                        self.add_drag_handler(&im_uv, 0, 1, true);
+                    }
+                });
             };
         });
     }

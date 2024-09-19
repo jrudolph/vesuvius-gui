@@ -54,7 +54,8 @@ impl VolumeGrid64x4Mapped {
         if !self.data.contains_key(&key) {
             self.data.insert(key, TileState::Unknown.into());
         }
-        let tile_state = Rc::get_mut(self.data.get_mut(&key).unwrap()).unwrap();
+        let tile_state = Rc::get_mut(self.data.get_mut(&key).expect("expected tile state data"))
+            .expect("concurrent access to tile state");
         match tile_state {
             TileState::Unknown => {
                 // println!("trying to load tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
@@ -196,6 +197,10 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         config: &DrawingConfig,
         buffer: &mut [u8],
     ) {
+        // drop last_tile, which we do not use for area painting and may get in the way of accessing tilestate otherwise
+        self.last_tile_key = (0, 0, 0, 0);
+        self.last_tile = Weak::new();
+
         let width = paint_zoom as usize * canvas_width;
         let height = paint_zoom as usize * canvas_height;
 
