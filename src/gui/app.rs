@@ -183,7 +183,7 @@ impl TemplateApp {
     fn select_volume(&mut self, id: usize) {
         if self.ppm_file.is_some() {
             self.volume_id = 0;
-            self.load_data(&FullVolumeReference::FRAGMENT_PHerc1667Cr01Fr03);
+            self.load_data(&FullVolumeReference::SCROLL1);
         } else {
             self.volume_id = id;
             self.load_data(<dyn VolumeReference>::VOLUMES[id]);
