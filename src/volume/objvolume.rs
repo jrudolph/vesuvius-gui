@@ -1,4 +1,3 @@
-#![allow(dead_code, unused)] // FIXME
 use super::{PaintVolume, VoxelPaintVolume, VoxelVolume};
 use wavefront_obj::obj::{self, Object, Primitive};
 
@@ -56,7 +55,7 @@ impl PaintVolume for ObjVolume {
         height: usize,
         sfactor: u8,
         paint_zoom: u8,
-        config: &super::DrawingConfig,
+        _config: &super::DrawingConfig,
         buffer: &mut [u8],
     ) {
         assert!(u_coord == 0);
@@ -67,41 +66,21 @@ impl PaintVolume for ObjVolume {
 
         let w_factor = xyz[2] as f64 * sfactor as f64;
 
-        /*
-        let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32;
-                let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32;
+        let min_u = xyz[0] - width as i32 / 2 * paint_zoom as i32;
+        let max_u = xyz[0] + width as i32 / 2 * paint_zoom as i32;
+        let min_v = xyz[1] - height as i32 / 2 * paint_zoom as i32;
+        let max_v = xyz[1] + height as i32 / 2 * paint_zoom as i32;
 
-                let mut uvw: [f64; 3] = [0.; 3];
-                uvw[u_coord] = (xyz[u_coord] + im_rel_u) as f64 / fi32;
-                uvw[v_coord] = (xyz[v_coord] + im_rel_v) as f64 / fi32;
-                uvw[plane_coord] = (xyz[plane_coord]) as f64 / fi32;
-
-                let v = self.get(uvw, _sfactor as i32);
-                buffer[im_v * width + im_u] = v; */
-
-        let min_u = (xyz[0] - width as i32 / 2 * paint_zoom as i32);
-        let max_u = (xyz[0] + width as i32 / 2 * paint_zoom as i32);
-        let min_v = (xyz[1] - height as i32 / 2 * paint_zoom as i32);
-        let max_v = (xyz[1] + height as i32 / 2 * paint_zoom as i32);
-
-        println!(
+        /* println!(
             "xyz: {:?}, width: {}, height: {}, sfactor: {}, paint_zoom: {}",
             xyz, width, height, sfactor, paint_zoom
         );
-        println!("min_u: {}, max_u: {}, min_v: {}, max_v: {}", min_u, max_u, min_v, max_v);
+        println!("min_u: {}, max_u: {}, min_v: {}, max_v: {}", min_u, max_u, min_v, max_v); */
 
-        /*
-                int orient2d(const Point2D& a, const Point2D& b, const Point2D& c)
-        {
-            return (b.x-a.x)*(c.y-a.y) - (b.y-a.y)*(c.x-a.x);
-        }
-
-                 */
         fn orient2d(u1: i32, v1: i32, u2: i32, v2: i32, u3: i32, v3: i32) -> i32 {
             (u2 - u1) * (v3 - v1) - (v2 - v1) * (u3 - u1)
         }
 
-        let mut done = false;
         let obj = &self.obj.object;
         for s in obj.geometry[0].shapes.iter() {
             match s.primitive {
@@ -125,9 +104,12 @@ impl PaintVolume for ObjVolume {
                     let min_v_t = v1.min(v2).min(v3);
                     let max_v_t = v1.max(v2).max(v3);
 
-                    if !done && !(min_u_t > max_u || max_u_t < min_u || min_v_t > max_v || max_v_t < min_v) {
+                    // clip to paint area
+                    if !(min_u_t > max_u || max_u_t < min_u || min_v_t > max_v || max_v_t < min_v) {
                         /*
-                                             // Compute triangle bounding box
+                        Implement the simple tri rasterization algorithm from https://fgiesen.wordpress.com/2013/02/08/triangle-rasterization-in-practice/
+
+                        // Compute triangle bounding box
                         int minX = min3(v0.x, v1.x, v2.x);
                         int minY = min3(v0.y, v1.y, v2.y);
                         int maxX = max3(v0.x, v1.x, v2.x);
@@ -170,11 +152,24 @@ impl PaintVolume for ObjVolume {
                             u1i, v1i, u2i, v2i, u3i, v3i
                         ); */
 
-                        let tmin_u = u1i.min(u2i).min(u3i).max(0);
-                        let tmax_u = u1i.max(u2i).max(u3i).min(width as i32 * paint_zoom as i32 - 1);
+                        // align values to paint_zoom to avoid gaps because of integer processing
+                        fn paint_zoom_align(v: i32, paint_zoom: u8) -> i32 {
+                            let v = v / paint_zoom as i32;
+                            v * paint_zoom as i32
+                        }
+                        fn paint_zoom_align_up(v: i32, paint_zoom: u8) -> i32 {
+                            paint_zoom_align(v + paint_zoom as i32 - 1, paint_zoom)
+                        }
 
-                        let tmin_v = v1i.min(v2i).min(v3i).max(0);
-                        let tmax_v = v1i.max(v2i).max(v3i).min(height as i32 * paint_zoom as i32 - 1);
+                        // calculate triangle bounding box in paint coordinates, make sure to slightly widen to align
+                        // to paint_zoom to avoid gaps at the edges because of integer processing
+                        let tmin_u = paint_zoom_align(u1i.min(u2i).min(u3i), paint_zoom).max(0);
+                        let tmax_u = paint_zoom_align_up(u1i.max(u2i).max(u3i), paint_zoom)
+                            .min(width as i32 * paint_zoom as i32 - 1);
+
+                        let tmin_v = paint_zoom_align(v1i.min(v2i).min(v3i), paint_zoom).max(0);
+                        let tmax_v = paint_zoom_align_up(v1i.max(v2i).max(v3i), paint_zoom)
+                            .min(height as i32 * paint_zoom as i32 - 1);
 
                         /* println!(
                             "tmin_u: {}, tmax_u: {}, tmin_v: {}, tmax_v: {}",
@@ -236,24 +231,15 @@ impl PaintVolume for ObjVolume {
                                 }
                             }
                         }
-
-                        //done = true;
-
-                        //line(u1i, v1i, u2i, v2i, buffer, width);
-                        //line(u2i, v2i, u3i, v3i, buffer, width);
-                        //line(u3i, v3i, u1i, v1i, buffer, width);
                     }
                 }
                 _ => todo!(),
             }
         }
-
-        //line(0, 0, width - 1, height - 1, buffer, width);
-
-        //todo!()
     }
 }
 
+#[allow(dead_code)] // useful for debugging triangle shapes
 fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut [u8], width: usize) {
     // simple bresenham algorithm from https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm
 
@@ -283,10 +269,8 @@ fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut [u8], width: usize) {
             y += sy;
         }
     }
-
-    //buffer[y1 * width + x1] = 255;
 }
 
 impl VoxelVolume for ObjVolume {
-    fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 { todo!() }
+    fn get(&mut self, _xyz: [f64; 3], _downsampling: i32) -> u8 { todo!() }
 }
