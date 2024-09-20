@@ -140,7 +140,7 @@ impl PaintVolume for ObjVolume {
 
         let ffactor = sfactor as f64;
 
-        let w_factor = xyz[2] as f64 * sfactor as f64;
+        let w_factor = xyz[2] as f64;
 
         let min_u = xyz[0] - width as i32 / 2 * paint_zoom as i32;
         let max_u = xyz[0] + width as i32 / 2 * paint_zoom as i32;
