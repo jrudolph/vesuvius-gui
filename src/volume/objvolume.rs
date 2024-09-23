@@ -1,6 +1,6 @@
-use super::{Image, PaintVolume, VoxelPaintVolume, VoxelVolume};
+use super::{Image, PaintVolume, SurfaceVolume, VoxelPaintVolume, VoxelVolume};
 use std::{cell::RefCell, sync::Arc};
-use wavefront_obj::obj::{self, Object, Primitive};
+use wavefront_obj::obj::{self, Object, Primitive, Vertex};
 
 struct ObjFile {
     object: Object,
@@ -224,15 +224,6 @@ impl PaintVolume for ObjVolume {
                             u1i, v1i, u2i, v2i, u3i, v3i
                         ); */
 
-                        // align values to paint_zoom to avoid gaps because of integer processing
-                        fn paint_zoom_align(v: i32, paint_zoom: u8) -> i32 {
-                            let v = v / paint_zoom as i32;
-                            v * paint_zoom as i32
-                        }
-                        fn paint_zoom_align_up(v: i32, paint_zoom: u8) -> i32 {
-                            paint_zoom_align(v + paint_zoom as i32 - 1, paint_zoom)
-                        }
-
                         // calculate triangle bounding box in paint coordinates, make sure to slightly widen to align
                         // to paint_zoom to avoid gaps at the edges because of integer processing
                         let tmin_u = paint_zoom_align(u1i.min(u2i).min(u3i), paint_zoom).max(0);
@@ -315,8 +306,130 @@ impl PaintVolume for ObjVolume {
     }
 }
 
+impl SurfaceVolume for ObjVolume {
+    fn paint_plane_intersection(
+        &self,
+        xyz: [i32; 3],
+        u_coord: usize,
+        v_coord: usize,
+        plane_coord: usize,
+        width: usize,
+        height: usize,
+        _sfactor: u8,
+        paint_zoom: u8,
+        _config: &super::DrawingConfig,
+        image: &mut Image,
+    ) {
+        let u = xyz[u_coord];
+        let v = xyz[v_coord];
+
+        let min_u = u - width as i32 / 2 * paint_zoom as i32;
+        let max_u = u + width as i32 / 2 * paint_zoom as i32;
+        let min_v = v - height as i32 / 2 * paint_zoom as i32;
+        let max_v = v + height as i32 / 2 * paint_zoom as i32;
+
+        let w = xyz[plane_coord];
+
+        let mut mins = [0.0, 0.0, 0.0];
+        let mut maxs = [0.0, 0.0, 0.0];
+
+        mins[u_coord] = min_u as f64;
+        maxs[u_coord] = max_u as f64;
+
+        mins[v_coord] = min_v as f64;
+        maxs[v_coord] = max_v as f64;
+
+        mins[plane_coord] = w as f64;
+        maxs[plane_coord] = w as f64;
+
+        let obj = &self.obj.object;
+        for s in obj.geometry[0].shapes.iter() {
+            match s.primitive {
+                Primitive::Triangle(i1, i2, i3) => {
+                    let v1 = &obj.vertices[i1.0];
+                    let v2 = &obj.vertices[i2.0];
+                    let v3 = &obj.vertices[i3.0];
+
+                    let minx = v1.x.min(v2.x).min(v3.x);
+                    let maxx = v1.x.max(v2.x).max(v3.x);
+
+                    let miny = v1.y.min(v2.y).min(v3.y);
+                    let maxy = v1.y.max(v2.y).max(v3.y);
+
+                    let minz = v1.z.min(v2.z).min(v3.z);
+                    let maxz = v1.z.max(v2.z).max(v3.z);
+
+                    // clip to paint area
+                    if !(minx > maxs[0]
+                        || maxx < mins[0]
+                        || miny > maxs[1]
+                        || maxy < mins[1]
+                        || minz > maxs[2]
+                        || maxz < mins[2])
+                    {
+                        fn coord(v: &Vertex) -> [f64; 3] { [v.x, v.y, v.z] }
+                        fn intersects(v1: &Vertex, v2: &Vertex, w: i32, plane_coord: usize) -> bool {
+                            (coord(v1)[plane_coord] - w as f64).signum() != (coord(v2)[plane_coord] - w as f64).signum()
+                        }
+
+                        let mut points: Vec<[f64; 3]> = vec![];
+
+                        let mut add_intersection_points = |v1: &Vertex, v2: &Vertex| {
+                            if intersects(v1, v2, w, plane_coord) {
+                                let x1 = coord(v1)[u_coord];
+                                let y1 = coord(v1)[v_coord];
+
+                                let x2 = coord(v2)[u_coord];
+                                let y2 = coord(v2)[v_coord];
+
+                                let d1 = w as f64 - coord(v1)[plane_coord];
+                                let d2 = w as f64 - coord(v2)[plane_coord];
+
+                                let t = d1 / (d1 - d2);
+
+                                let mut coords = [0.0, 0.0, 0.0];
+                                coords[u_coord] = x1 + t * (x2 - x1);
+                                coords[v_coord] = y1 + t * (y2 - y1);
+                                coords[plane_coord] = w as f64;
+
+                                points.push(coords);
+                            }
+                        };
+
+                        add_intersection_points(v1, v2);
+                        add_intersection_points(v2, v3);
+                        add_intersection_points(v3, v1);
+
+                        if points.len() == 2 {
+                            let p1 = points[0];
+                            let p2 = points[1];
+
+                            // convert to image coordinates
+                            let x0 = ((p1[u_coord] - min_u as f64) / paint_zoom as f64) as i32;
+                            let y0 = ((p1[v_coord] - min_v as f64) / paint_zoom as f64) as i32;
+
+                            let x1 = ((p2[u_coord] - min_u as f64) / paint_zoom as f64) as i32;
+                            let y1 = ((p2[v_coord] - min_v as f64) / paint_zoom as f64) as i32;
+
+                            line(x0, y0, x1, y1, image, width, height, 0xff, 0, 0xff);
+                        }
+                    }
+                }
+                _ => todo!(),
+            }
+        }
+    }
+}
+
+// align values to paint_zoom to avoid gaps because of integer processing
+fn paint_zoom_align(v: i32, paint_zoom: u8) -> i32 {
+    let v = v / paint_zoom as i32;
+    v * paint_zoom as i32
+}
+fn paint_zoom_align_up(v: i32, paint_zoom: u8) -> i32 { paint_zoom_align(v + paint_zoom as i32 - 1, paint_zoom) }
+
 #[allow(dead_code)] // useful for debugging triangle shapes
-fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut [u8], width: usize) {
+fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut Image, width: usize, height: usize, r: u8, g: u8, b: u8) {
     // simple bresenham algorithm from https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm
 
     let dx = (x1 as i32 - x0 as i32).abs();
@@ -330,9 +443,8 @@ fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut [u8], width: usize) {
 
     while x != x1 || y != y1 {
         //println!("x: {}, y: {}", x, y);
-        let idx = y * width as i32 + x;
-        if idx >= 0 && idx < buffer.len() as i32 {
-            buffer[idx as usize] = 255;
+        if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
+            buffer.set_rgb(x as usize, y as usize, r, g, b);
         }
 
         let e2 = 2 * error;

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, Seek, SeekFrom};
 
-use super::{AutoPaintVolume, VoxelPaintVolume, VoxelVolume};
+use super::{AutoPaintVolume, Image, SurfaceVolume, VoxelPaintVolume, VoxelVolume};
 use libm::modf;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -144,3 +144,19 @@ impl VoxelVolume for PPMVolume {
     }
 }
 impl AutoPaintVolume for PPMVolume {}
+impl SurfaceVolume for PPMVolume {
+    fn paint_plane_intersection(
+        &self,
+        _xyz: [i32; 3],
+        _u_coord: usize,
+        _v_coord: usize,
+        _plane_coord: usize,
+        _width: usize,
+        _height: usize,
+        _sfactor: u8,
+        _paint_zoom: u8,
+        _config: &super::DrawingConfig,
+        _buffer: &mut Image,
+    ) {
+    }
+}

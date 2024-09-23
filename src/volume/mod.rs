@@ -106,3 +106,19 @@ pub trait PaintVolume {
 
 pub trait VoxelPaintVolume: PaintVolume + VoxelVolume {}
 impl<T: PaintVolume + VoxelVolume> VoxelPaintVolume for T {}
+
+pub trait SurfaceVolume: PaintVolume + VoxelVolume {
+    fn paint_plane_intersection(
+        &self,
+        xyz: [i32; 3],
+        u_coord: usize,
+        v_coord: usize,
+        plane_coord: usize,
+        width: usize,
+        height: usize,
+        sfactor: u8,
+        paint_zoom: u8,
+        config: &DrawingConfig,
+        buffer: &mut Image,
+    );
+}

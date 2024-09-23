@@ -31,6 +31,10 @@ pub struct SegmentMode {
     ranges: [RangeInclusive<i32>; 3],
     #[serde(skip)]
     world: Arc<RefCell<dyn VoxelPaintVolume>>,
+    // This is the same reference as `world`. We need to add it just because upcasting between SurfaceVolume and VoxelPaintVolume is so hard.
+    // TODO: remove when there's a better way to upcast
+    #[serde(skip)]
+    surface_volume: Arc<RefCell<dyn SurfaceVolume>>,
     #[serde(skip)]
     texture_uv: Option<egui::TextureHandle>,
     #[serde(skip)]
@@ -45,6 +49,7 @@ impl Default for SegmentMode {
             filename: "".to_string(),
             ranges: [0..=1000, 0..=1000, -40..=40],
             world: Arc::new(RefCell::new(EmptyVolume {})),
+            surface_volume: Arc::new(RefCell::new(EmptyVolume {})),
             texture_uv: None,
             convert_to_world_coords: Box::new(|x| x),
         }
@@ -198,7 +203,8 @@ impl TemplateApp {
                 segment.info = segment_file.to_string();
             }
             segment.ranges = [0..=width, 0..=height, -40..=40];
-            segment.world = ppm;
+            segment.world = ppm.clone();
+            segment.surface_volume = ppm;
             segment.convert_to_world_coords = Box::new(move |coord| ppm2.borrow().convert_to_world_coords(coord));
 
             self.segment_mode = Some(segment)
@@ -224,7 +230,8 @@ impl TemplateApp {
                 segment.info = segment_file.to_string();
             }
             segment.ranges = [0..=width, 0..=height, -40..=40];
-            segment.world = volume;
+            segment.world = volume.clone();
+            segment.surface_volume = volume;
             segment.convert_to_world_coords = Box::new(move |coords| obj2.borrow().convert_to_volume_coords(coords));
 
             self.segment_mode = Some(segment)
@@ -403,6 +410,26 @@ impl TemplateApp {
                 &self.drawing_config,
                 &mut image,
             );
+        }
+
+        if self.is_segment_mode() && !segment_pane {
+            self.segment_mode
+                .as_ref()
+                .unwrap()
+                .surface_volume
+                .borrow()
+                .paint_plane_intersection(
+                    self.coord,
+                    u_coord,
+                    v_coord,
+                    d_coord,
+                    width,
+                    height,
+                    1,
+                    paint_zoom,
+                    &self.drawing_config,
+                    &mut image,
+                );
         }
 
         let image: ColorImage = image.into();
