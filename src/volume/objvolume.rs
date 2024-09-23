@@ -293,15 +293,11 @@ impl PaintVolume for ObjVolume {
                                             (nx, ny, nz)
                                         };
 
-                                        let value = volume.get(
-                                            [
-                                                (x + w_factor * nx) / ffactor,
-                                                (y + w_factor * ny) / ffactor,
-                                                (z + w_factor * nz) / ffactor,
-                                            ],
-                                            sfactor as i32,
-                                        );
+                                        let x = x + w_factor * nx;
+                                        let y = y + w_factor * ny;
+                                        let z = z + w_factor * nz;
 
+                                        let value = volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32);
                                         buffer.set_gray(
                                             u as usize / paint_zoom as usize,
                                             v as usize / paint_zoom as usize,
