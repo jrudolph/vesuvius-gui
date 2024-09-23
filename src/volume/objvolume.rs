@@ -1,4 +1,4 @@
-use super::{PaintVolume, VoxelPaintVolume, VoxelVolume};
+use super::{Image, PaintVolume, VoxelPaintVolume, VoxelVolume};
 use std::{cell::RefCell, sync::Arc};
 use wavefront_obj::obj::{self, Object, Primitive};
 
@@ -130,7 +130,7 @@ impl PaintVolume for ObjVolume {
         sfactor: u8,
         paint_zoom: u8,
         _config: &super::DrawingConfig,
-        buffer: &mut [u8],
+        buffer: &mut Image,
     ) {
         assert!(u_coord == 0);
         assert!(v_coord == 1);
@@ -248,6 +248,7 @@ impl PaintVolume for ObjVolume {
                             tmin_u, tmax_u, tmin_v, tmax_v
                         ); */
 
+                        // TODO: would probably better to operate in paint coordinates instead
                         for v in (tmin_v..=tmax_v).step_by(paint_zoom as usize) {
                             for u in (tmin_u..=tmax_u).step_by(paint_zoom as usize) {
                                 let w0 = orient2d(u2i, v2i, u3i, v3i, u, v);
@@ -257,8 +258,11 @@ impl PaintVolume for ObjVolume {
                                 //println!("At u:{} v:{} w0: {}, w1: {}, w2: {}", u, v, w0, w1, w2);
 
                                 if w0 >= 0 && w1 >= 0 && w2 >= 0 {
-                                    let idx = (v / paint_zoom as i32) * width as i32 + (u / paint_zoom as i32);
-                                    if idx >= 0 && idx < buffer.len() as i32 {
+                                    if u >= 0
+                                        && u < width as i32 * paint_zoom as i32
+                                        && v >= 0
+                                        && v < height as i32 * paint_zoom as i32
+                                    {
                                         let xyz1 = &obj.vertices[i1.0];
                                         let xyz2 = &obj.vertices[i2.0];
                                         let xyz3 = &obj.vertices[i3.0];
@@ -289,7 +293,7 @@ impl PaintVolume for ObjVolume {
                                             (nx, ny, nz)
                                         };
 
-                                        let v = volume.get(
+                                        let value = volume.get(
                                             [
                                                 (x + w_factor * nx) / ffactor,
                                                 (y + w_factor * ny) / ffactor,
@@ -298,7 +302,11 @@ impl PaintVolume for ObjVolume {
                                             sfactor as i32,
                                         );
 
-                                        buffer[idx as usize] = v;
+                                        buffer.set_gray(
+                                            u as usize / paint_zoom as usize,
+                                            v as usize / paint_zoom as usize,
+                                            value,
+                                        );
                                     }
                                 }
                             }

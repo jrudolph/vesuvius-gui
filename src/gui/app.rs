@@ -5,6 +5,7 @@ use crate::downloader::*;
 use crate::model::*;
 use crate::volume::*;
 
+use crate::volume;
 use directories::BaseDirs;
 use egui::Vec2;
 use egui::{ColorImage, Image, PointerButton, Response, Ui};
@@ -364,7 +365,7 @@ impl TemplateApp {
 
         let width = (self.frame_width as f32 / scaling) as usize;
         let height = (self.frame_height as f32 / scaling) as usize;
-        let mut pixels = vec![0u8; width * height];
+        let mut image = volume::Image::new(width, height);
 
         //let q = 1;
         //let mut printed = false;
@@ -400,11 +401,11 @@ impl TemplateApp {
                 sfactor,
                 paint_zoom,
                 &self.drawing_config,
-                &mut pixels,
+                &mut image,
             );
         }
 
-        let image = ColorImage::from_gray([width, height], &pixels);
+        let image: ColorImage = image.into();
         //println!("Time elapsed before loading in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _start.elapsed());
         // Load the texture only once.
         let texture_id = ui
