@@ -9,7 +9,6 @@ use directories::BaseDirs;
 use egui::Vec2;
 use egui::{ColorImage, Image, PointerButton, Response, Ui};
 use std::cell::RefCell;
-use std::mem;
 use std::sync::Arc;
 
 const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
@@ -243,14 +242,15 @@ impl TemplateApp {
             Arc::new(RefCell::new(v))
         };
     }
-    //pub fn is_ppm_mode(&self) -> bool { self.ppm_file.is_some() }
-    //pub fn is_obj_mode(&self) -> bool { self.obj_file.is_some() }
+
     pub fn is_segment_mode(&self) -> bool { self.segment_mode.is_some() }
+
     fn load_from_cells(&mut self) {
         let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
         self.world = Arc::new(RefCell::new(v));
         self.extra_resolutions = 0;
     }
+
     fn load_from_layers(&mut self) {
         let v = LayersMappedVolume::from_data_dir(&self.data_dir);
         self.world = Arc::new(RefCell::new(v));
@@ -266,6 +266,7 @@ impl TemplateApp {
             self.load_data(<dyn VolumeReference>::VOLUMES[id]);
         }
     }
+
     fn selected_volume(&self) -> &'static dyn VolumeReference { <dyn VolumeReference>::VOLUMES[self.volume_id] }
 
     pub fn clear_textures(&mut self) {
