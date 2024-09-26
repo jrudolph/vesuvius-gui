@@ -23,7 +23,7 @@ impl ObjVolume {
             );
         }
 
-        let object = objects.remove(1);
+        let object = objects.remove(0);
         let obj = ObjFile { object };
 
         Self {
@@ -34,6 +34,13 @@ impl ObjVolume {
 
     fn load_obj(file_path: &str) -> obj::ObjSet {
         let obj_file = std::fs::read_to_string(file_path).unwrap();
+        // filter out material definitions that wavefront_obj does not cope well with
+        let obj_file = obj_file
+            .lines()
+            .filter(|line| !line.starts_with("mtllib"))
+            .filter(|line| !line.starts_with("usemtl"))
+            .collect::<Vec<_>>()
+            .join("\n");
         obj::parse(obj_file).unwrap()
     }
 
