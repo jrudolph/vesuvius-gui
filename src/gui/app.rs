@@ -252,6 +252,8 @@ impl TemplateApp {
                 segment.filename = segment_file.to_string();
                 segment.info = segment_file.to_string();
             }
+            segment.width = width as usize;
+            segment.height = height as usize;
             segment.ranges = [0..=width, 0..=height, -40..=40];
             segment.world = volume.clone();
             segment.surface_volume = volume;
