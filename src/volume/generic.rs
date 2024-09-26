@@ -1,4 +1,4 @@
-use super::{DrawingConfig, PaintVolume, VoxelVolume};
+use super::{DrawingConfig, Image, PaintVolume, VoxelVolume};
 
 // marker trait for volumes that do not want to provide a specific PaintVolume implementation
 pub trait AutoPaintVolume {}
@@ -15,7 +15,7 @@ impl<T: VoxelVolume + AutoPaintVolume> PaintVolume for T {
         _sfactor: u8,
         paint_zoom: u8,
         _config: &DrawingConfig,
-        buffer: &mut [u8],
+        buffer: &mut Image,
     ) {
         let fi32 = _sfactor as f64;
 
@@ -30,7 +30,7 @@ impl<T: VoxelVolume + AutoPaintVolume> PaintVolume for T {
                 uvw[plane_coord] = (xyz[plane_coord]) as f64 / fi32;
 
                 let v = self.get(uvw, _sfactor as i32);
-                buffer[im_v * width + im_u] = v;
+                buffer.set_gray(im_u, im_v, v);
             }
         }
     }

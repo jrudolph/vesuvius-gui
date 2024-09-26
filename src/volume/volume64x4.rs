@@ -8,7 +8,7 @@ use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use super::{DrawingConfig, VoxelVolume};
+use super::{DrawingConfig, Image, VoxelVolume};
 
 #[derive(Debug)]
 pub(crate) enum TileState {
@@ -54,7 +54,8 @@ impl VolumeGrid64x4Mapped {
         if !self.data.contains_key(&key) {
             self.data.insert(key, TileState::Unknown.into());
         }
-        let tile_state = Rc::get_mut(self.data.get_mut(&key).unwrap()).unwrap();
+        let tile_state = Rc::get_mut(self.data.get_mut(&key).expect("expected tile state data"))
+            .expect("concurrent access to tile state");
         match tile_state {
             TileState::Unknown => {
                 // println!("trying to load tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
@@ -194,8 +195,12 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         _sfactor: u8,
         paint_zoom: u8,
         config: &DrawingConfig,
-        buffer: &mut [u8],
+        buffer: &mut Image,
     ) {
+        // drop last_tile, which we do not use for area painting and may get in the way of accessing tilestate otherwise
+        self.last_tile_key = (0, 0, 0, 0);
+        self.last_tile = Weak::new();
+
         let width = paint_zoom as usize * canvas_width;
         let height = paint_zoom as usize * canvas_height;
 
@@ -299,19 +304,19 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                                         }
                                         let value = tile[off as usize];
 
-                                        if u == center_u || v == center_v {
-                                            buffer[v as usize * canvas_width + u as usize] = 0;
+                                        let value = if u == center_u || v == center_v {
+                                            0
                                         } else if filters_active {
                                             let pluscon = ((value as i32 - config.threshold_min as i32).max(0) * 255
                                                 / (255 - (config.threshold_min + config.threshold_max) as i32))
                                                 .min(255)
                                                 as u8;
 
-                                            buffer[v as usize * canvas_width + u as usize] =
-                                                (((pluscon & mask) as f32) / (mask as f32) * 255.0) as u8;
+                                            (((pluscon & mask) as f32) / (mask as f32) * 255.0) as u8
                                         } else {
-                                            buffer[v as usize * canvas_width + u as usize] = value;
-                                        }
+                                            value
+                                        };
+                                        buffer.set_gray(u as usize, v as usize, value);
                                     }
                                 }
                             }

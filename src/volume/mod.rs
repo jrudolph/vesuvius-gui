@@ -3,14 +3,17 @@ mod generic;
 mod grid500;
 mod interpolated;
 mod layers;
+mod objvolume;
 mod ppmvolume;
 mod volume64x4;
 
+use egui::{Color32, ColorImage};
 pub use empty::EmptyVolume;
 pub use generic::AutoPaintVolume;
 pub use grid500::VolumeGrid500Mapped;
 pub use interpolated::TrilinearInterpolatedVolume;
 pub use layers::LayersMappedVolume;
+pub use objvolume::ObjVolume;
 pub use ppmvolume::PPMVolume;
 pub use volume64x4::VolumeGrid64x4Mapped;
 
@@ -58,6 +61,33 @@ pub trait VoxelVolume {
     fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8;
 }
 
+pub struct Image {
+    width: usize,
+    height: usize,
+    data: Vec<Color32>,
+}
+impl Image {
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![Color32::BLACK; width * height],
+        }
+    }
+
+    pub fn set(&mut self, x: usize, y: usize, value: Color32) { self.data[y * self.width + x] = value; }
+    pub fn set_rgb(&mut self, x: usize, y: usize, r: u8, g: u8, b: u8) { self.set(x, y, Color32::from_rgb(r, g, b)); }
+    pub fn set_gray(&mut self, x: usize, y: usize, value: u8) { self.set(x, y, Color32::from_gray(value)); }
+}
+impl From<Image> for ColorImage {
+    fn from(value: Image) -> Self {
+        ColorImage {
+            size: [value.width, value.height],
+            pixels: value.data,
+        }
+    }
+}
+
 pub trait PaintVolume {
     fn paint(
         &mut self,
@@ -70,9 +100,25 @@ pub trait PaintVolume {
         sfactor: u8,
         paint_zoom: u8,
         config: &DrawingConfig,
-        buffer: &mut [u8],
+        buffer: &mut Image,
     );
 }
 
 pub trait VoxelPaintVolume: PaintVolume + VoxelVolume {}
 impl<T: PaintVolume + VoxelVolume> VoxelPaintVolume for T {}
+
+pub trait SurfaceVolume: PaintVolume + VoxelVolume {
+    fn paint_plane_intersection(
+        &self,
+        xyz: [i32; 3],
+        u_coord: usize,
+        v_coord: usize,
+        plane_coord: usize,
+        width: usize,
+        height: usize,
+        sfactor: u8,
+        paint_zoom: u8,
+        config: &DrawingConfig,
+        buffer: &mut Image,
+    );
+}

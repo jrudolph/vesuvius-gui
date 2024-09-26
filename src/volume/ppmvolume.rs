@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, Seek, SeekFrom};
 
-use super::{AutoPaintVolume, VoxelPaintVolume, VoxelVolume};
+use super::{AutoPaintVolume, Image, SurfaceVolume, VoxelPaintVolume, VoxelVolume};
 use libm::modf;
+use std::cell::RefCell;
+use std::sync::Arc;
 
 pub struct PPMFile {
     pub width: usize,
@@ -53,13 +55,13 @@ impl PPMFile {
 }
 
 pub struct PPMVolume {
-    volume: Box<dyn VoxelPaintVolume>,
+    volume: Arc<RefCell<dyn VoxelPaintVolume>>,
     ppm: PPMFile,
     /// should the volume use bilinear interpolation
     interpolate: bool,
 }
 impl PPMVolume {
-    pub fn new(ppm_file: &str, base_volume: Box<dyn VoxelPaintVolume>) -> Self {
+    pub fn new(ppm_file: &str, base_volume: Arc<RefCell<dyn VoxelPaintVolume>>) -> Self {
         let ppm = PPMFile::new(ppm_file).unwrap();
 
         Self {
@@ -69,6 +71,14 @@ impl PPMVolume {
         }
     }
     pub fn enable_bilinear_interpolation(&mut self) { self.interpolate = true; }
+    pub fn convert_to_world_coords(&self, coord: [i32; 3]) -> [i32; 3] {
+        let xyz = self.ppm.get(coord[0] as usize, coord[1] as usize);
+        [
+            (xyz[0] + coord[2] as f64 * xyz[3]) as i32,
+            (xyz[1] + coord[2] as f64 * xyz[4]) as i32,
+            (xyz[2] + coord[2] as f64 * xyz[5]) as i32,
+        ]
+    }
     pub fn width(&self) -> usize { self.ppm.width }
     pub fn height(&self) -> usize { self.ppm.height }
 }
@@ -123,7 +133,7 @@ impl VoxelVolume for PPMVolume {
         let x = x0 + uvw[2] as f64 * nx;
         let y = y0 + uvw[2] as f64 * ny;
         let z = z0 + uvw[2] as f64 * nz;
-        self.volume.get(
+        self.volume.borrow_mut().get(
             [
                 x / downsampling as f64,
                 y / downsampling as f64,
@@ -134,3 +144,19 @@ impl VoxelVolume for PPMVolume {
     }
 }
 impl AutoPaintVolume for PPMVolume {}
+impl SurfaceVolume for PPMVolume {
+    fn paint_plane_intersection(
+        &self,
+        _xyz: [i32; 3],
+        _u_coord: usize,
+        _v_coord: usize,
+        _plane_coord: usize,
+        _width: usize,
+        _height: usize,
+        _sfactor: u8,
+        _paint_zoom: u8,
+        _config: &super::DrawingConfig,
+        _buffer: &mut Image,
+    ) {
+    }
+}
