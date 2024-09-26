@@ -644,7 +644,7 @@ impl TemplateApp {
                 }
                 if i.key_pressed(egui::Key::I) {
                     self.trilinear_interpolation = !self.trilinear_interpolation;
-                    self.load_data(self.selected_volume());
+                    self.reload_segment();
                     self.clear_textures();
                 }
             });
