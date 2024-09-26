@@ -6,14 +6,15 @@ use crate::model::*;
 use crate::volume::*;
 
 use crate::catalog::Catalog;
+use crate::catalog::Segment;
 use crate::volume;
 use directories::BaseDirs;
-use egui::text;
 use egui::Vec2;
 use egui::{ColorImage, Image, PointerButton, Response, Ui};
 use egui_extras::Column;
 use egui_extras::TableBuilder;
 use std::cell::RefCell;
+use std::io::Cursor;
 use std::sync::Arc;
 
 const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
@@ -31,6 +32,8 @@ pub struct SegmentMode {
     coord: [i32; 3],
     info: String,
     filename: String,
+    width: usize,
+    height: usize,
     #[serde(skip)]
     ranges: [RangeInclusive<i32>; 3],
     #[serde(skip)]
@@ -51,6 +54,8 @@ impl Default for SegmentMode {
             coord: [0, 0, 0],
             info: "".to_string(),
             filename: "".to_string(),
+            width: 1000,
+            height: 1000,
             ranges: [0..=1000, 0..=1000, -40..=40],
             world: Arc::new(RefCell::new(EmptyVolume {})),
             surface_volume: Arc::new(RefCell::new(EmptyVolume {})),
@@ -95,10 +100,12 @@ pub struct TemplateApp {
     mode: Mode,
     #[serde(skip)]
     extra_resolutions: u32,
-    //#[serde(skip)]
+    #[serde(skip)]
     segment_mode: Option<SegmentMode>,
     #[serde(skip)]
     catalog: Catalog,
+    #[serde(default)]
+    selected_segment: Option<Segment>,
 }
 
 impl Default for TemplateApp {
@@ -126,6 +133,7 @@ impl Default for TemplateApp {
             extra_resolutions: 1,
             segment_mode: None,
             catalog: Catalog::default(),
+            selected_segment: None,
         }
     }
 }
@@ -182,7 +190,7 @@ impl TemplateApp {
         }
 
         if let Some(segment_file) = segment_file {
-            app.setup_segment(&segment_file);
+            app.setup_segment(&segment_file, 1000, 1000);
         }
 
         app
@@ -190,11 +198,11 @@ impl TemplateApp {
 
     fn reload_segment(&mut self) {
         if let Some(segment_mode) = self.segment_mode.as_ref() {
-            self.setup_segment(&segment_mode.filename.clone());
+            self.setup_segment(&segment_mode.filename.clone(), segment_mode.width, segment_mode.height);
         }
     }
 
-    fn setup_segment(&mut self, segment_file: &str) {
+    fn setup_segment(&mut self, segment_file: &str, width: usize, height: usize) {
         if segment_file.ends_with(".ppm") {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old: Arc<RefCell<dyn VoxelPaintVolume>> = self.world.clone();
@@ -215,6 +223,8 @@ impl TemplateApp {
                 segment.filename = segment_file.to_string();
                 segment.info = segment_file.to_string();
             }
+            segment.width = width as usize;
+            segment.height = height as usize;
             segment.ranges = [0..=width, 0..=height, -40..=40];
             segment.world = ppm.clone();
             segment.surface_volume = ppm;
@@ -229,7 +239,7 @@ impl TemplateApp {
             } else {
                 old
             };
-            let obj_volume = ObjVolume::new(&segment_file, base);
+            let obj_volume = ObjVolume::new(&segment_file, base, width, height);
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
 
@@ -251,7 +261,7 @@ impl TemplateApp {
         }
     }
 
-    fn load_data(&mut self, volume: &'static dyn VolumeReference) {
+    fn load_data(&mut self, volume: &dyn VolumeReference) {
         let (sender, receiver) = std::sync::mpsc::channel();
         self.download_notifier = Some(receiver);
 
@@ -771,15 +781,18 @@ impl TemplateApp {
             });
 
             ui.collapsing("Segments", |ui| {
+                let mut clicked = None;
                 self.catalog.scrolls().iter().for_each(|scroll| {
                     egui::CollapsingHeader::new(scroll.label()).show(ui, |ui| {
-                        let table = TableBuilder::new(ui)
+                        let mut table = TableBuilder::new(ui)
                             .vscroll(true)
                             .column(Column::auto())
                             .column(Column::remainder().at_least(130.0) /* Column::initial(150.0) */)
                             .column(Column::auto())
                             .column(Column::auto())
                             .column(Column::auto());
+
+                        table = table.sense(egui::Sense::click());
 
                         table
                             .header(20.0, |mut header| {
@@ -801,7 +814,6 @@ impl TemplateApp {
                             })
                             .body(|mut body| {
                                 for segment in self.catalog.segments(&scroll) {
-                                    let row =
                                     body.row(20.0, |mut row| {
                                         if segment.id.ends_with("1847") {
                                             row.set_selected(true);
@@ -825,11 +837,34 @@ impl TemplateApp {
                                         row.col(|ui| {
                                             ui.label(segment.area_cm2.map_or("".to_string(), |v| format!("{v:.1}")));
                                         });
+
+                                        if row.response().clicked() && segment.volume.is_some(){
+                                            clicked = Some((DynamicFullVolumeReference::new(scroll.old_id.clone(), segment.volume.as_ref().unwrap().clone()), segment.clone()));
+                                        }
                                     });
                                 }
                             });
                     });
                 });
+                if let Some((volume, segment)) = clicked {
+                    println!("Selected volume: {:?}", &volume.volume);
+                    let dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
+                    let obj_file  =  dir.join(format!("segments/{}/{}.obj", &segment.scroll.old_id, segment.id));
+                    // use existing or download
+                    if !obj_file.exists() {
+                        println!("Downloading obj file from {} to {}", segment.urls.obj_url, &obj_file.to_str().unwrap());
+                        let response = ehttp::fetch_blocking(&ehttp::Request::get(&segment.urls.obj_url)).unwrap();
+                        std::fs::create_dir_all(&obj_file.parent().unwrap()).unwrap();
+                        let mut file = std::fs::File::create(&obj_file).unwrap();
+                        let bytes = response.bytes;
+                        println!("Downloaded {} bytes", bytes.len());
+                        std::io::copy(&mut Cursor::new(bytes), &mut file).unwrap();
+                    }
+
+                    self.load_data(&volume);
+                    self.setup_segment(&obj_file.to_str().unwrap().to_string(), segment.width, segment.height);
+                    self.clear_textures();
+                }
             });
         });
     }

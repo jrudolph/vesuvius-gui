@@ -46,13 +46,14 @@ impl Downloader {
     pub fn new(
         dir: &str,
         tile_server_base: &'static str,
-        volume: &'static dyn VolumeReference,
+        volume: &dyn VolumeReference,
         authorization: Option<String>,
         download_notifier: Sender<()>,
     ) -> Downloader {
         let (sender, receiver) = std::sync::mpsc::channel::<DownloadMessage>();
 
         let count = Arc::new(AtomicUsize::new(0));
+        let volume_base_path = volume.url_path_base().clone();
 
         std::fs::create_dir_all(dir.to_string()).unwrap();
         let dir = dir.to_string();
@@ -83,7 +84,7 @@ impl Downloader {
                                     let url = format!(
                                         "{}/tiles/{}download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}",
                                         tile_server_base,
-                                        volume.url_path_base(),
+                                        volume_base_path,
                                         x,
                                         y,
                                         z,

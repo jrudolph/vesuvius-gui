@@ -1,13 +1,12 @@
 use itertools::Itertools;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    fmt::format,
     io::Cursor,
     io::Read,
 };
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct Scroll {
     pub id: String,
@@ -23,7 +22,7 @@ impl Scroll {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Urls {
     pub composite_url: String,
@@ -33,16 +32,19 @@ pub struct Urls {
     pub ppm_url: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Segment {
     pub id: String,
     pub scroll: Scroll,
     pub volume: Option<String>,
-    pub height: i32,
-    pub width: i32,
+    pub height: usize,
+    pub width: usize,
     pub urls: Urls,
     pub area_cm2: Option<f64>,
+}
+impl PartialEq for Segment {
+    fn eq(&self, other: &Self) -> bool { self.id == other.id && self.scroll == other.scroll }
 }
 
 #[derive(Default)]
@@ -63,7 +65,7 @@ impl Catalog {
             .map(|(scroll, group)| (scroll, group.collect()))
             .collect();
 
-        segments_by_scroll.iter_mut().for_each(|(scroll, segments)| {
+        segments_by_scroll.iter_mut().for_each(|(_, segments)| {
             segments.sort_by(|a, b| a.id.cmp(&b.id));
         });
         let mut scrolls: Vec<Scroll> = scrolls.into_iter().collect();

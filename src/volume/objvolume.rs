@@ -9,9 +9,16 @@ struct ObjFile {
 pub struct ObjVolume {
     volume: Arc<RefCell<dyn VoxelPaintVolume>>,
     obj: ObjFile,
+    width: usize,
+    height: usize,
 }
 impl ObjVolume {
-    pub fn new(obj_file_path: &str, base_volume: Arc<RefCell<dyn VoxelPaintVolume>>) -> Self {
+    pub fn new(
+        obj_file_path: &str,
+        base_volume: Arc<RefCell<dyn VoxelPaintVolume>>,
+        width: usize,
+        height: usize,
+    ) -> Self {
         let mut objects = Self::load_obj(obj_file_path).objects;
         println!("Loaded obj file with {} objects", objects.len());
         for o in objects.iter() {
@@ -29,6 +36,8 @@ impl ObjVolume {
         Self {
             volume: base_volume,
             obj,
+            width,
+            height,
         }
     }
 
@@ -44,12 +53,8 @@ impl ObjVolume {
         obj::parse(obj_file).unwrap()
     }
 
-    pub fn width(&self) -> usize {
-        5048 // FIXME, hardcoded for 1847 segment
-    }
-    pub fn height(&self) -> usize {
-        9163 // FIXME
-    }
+    pub fn width(&self) -> usize { self.width }
+    pub fn height(&self) -> usize { self.height }
     pub fn convert_to_volume_coords(&self, coord: [i32; 3]) -> [i32; 3] {
         let u = coord[0];
         let v = coord[1];

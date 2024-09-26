@@ -41,6 +41,22 @@ impl dyn VolumeReference {
     ];
 }
 
+pub struct DynamicFullVolumeReference {
+    pub scroll_id: String,
+    pub volume: String,
+}
+impl DynamicFullVolumeReference {
+    pub fn new(scroll_id: String, volume: String) -> DynamicFullVolumeReference {
+        DynamicFullVolumeReference { scroll_id, volume }
+    }
+}
+impl VolumeReference for DynamicFullVolumeReference {
+    fn sub_dir(&self, data_dir: &str) -> String { format!("{}/scroll{}/{}/", data_dir, self.scroll_id, self.volume) }
+    fn label(&self) -> String { format!("Scroll {} / {}", self.scroll_id, self.volume) }
+
+    fn url_path_base(&self) -> String { format!("scroll/{}/volume/{}/", self.scroll_id, self.volume) }
+}
+
 pub struct FullVolumeReference {
     pub scroll_id: &'static str,
     pub volume: &'static str,
