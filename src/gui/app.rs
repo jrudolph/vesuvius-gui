@@ -5,10 +5,14 @@ use crate::downloader::*;
 use crate::model::*;
 use crate::volume::*;
 
+use crate::catalog::Catalog;
 use crate::volume;
 use directories::BaseDirs;
+use egui::text;
 use egui::Vec2;
 use egui::{ColorImage, Image, PointerButton, Response, Ui};
+use egui_extras::Column;
+use egui_extras::TableBuilder;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -93,6 +97,8 @@ pub struct TemplateApp {
     extra_resolutions: u32,
     //#[serde(skip)]
     segment_mode: Option<SegmentMode>,
+    #[serde(skip)]
+    catalog: Catalog,
 }
 
 impl Default for TemplateApp {
@@ -119,6 +125,7 @@ impl Default for TemplateApp {
             mode: Mode::Blocks,
             extra_resolutions: 1,
             segment_mode: None,
+            catalog: Catalog::default(),
         }
     }
 }
@@ -128,7 +135,12 @@ impl TemplateApp {
     //const TILE_SERVER: &'static str = "http://localhost:8095";
 
     /// Called once before the first frame.
-    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: Option<String>, segment_file: Option<String>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        catalog: Catalog,
+        data_dir: Option<String>,
+        segment_file: Option<String>,
+    ) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
         let mut app: TemplateApp = if let Some(storage) = cc.storage {
@@ -136,6 +148,7 @@ impl TemplateApp {
         } else {
             Default::default()
         };
+        app.catalog = catalog;
         if let Some(dir) = data_dir {
             app.data_dir = dir;
         } else {
@@ -629,11 +642,15 @@ impl TemplateApp {
     }
 
     fn update_main(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui_extras::install_image_loaders(ctx);
+
         if self.try_recv_from_download_notifier() {
             self.clear_textures();
 
             while self.try_recv_from_download_notifier() {} // clear queue
         }
+
+        self.catalog_panel(ctx);
 
         egui::Window::new("Controls").show(ctx, |ui| {
             ui.input(|i| {
@@ -738,6 +755,82 @@ impl TemplateApp {
                     }
                 });
             };
+        });
+    }
+
+    fn catalog_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("Catalog").show(ctx, |ui| {
+            // Header
+            ui.add_space(4.0);
+            ui.vertical_centered(|ui| {
+                ui.heading("📜 Catalog");
+            });
+            ui.separator();
+
+            ui.collapsing("Volumes", |ui| {
+            });
+
+            ui.collapsing("Segments", |ui| {
+                self.catalog.scrolls().iter().for_each(|scroll| {
+                    egui::CollapsingHeader::new(scroll.label()).show(ui, |ui| {
+                        let table = TableBuilder::new(ui)
+                            .vscroll(true)
+                            .column(Column::auto())
+                            .column(Column::remainder().at_least(130.0) /* Column::initial(150.0) */)
+                            .column(Column::auto())
+                            .column(Column::auto())
+                            .column(Column::auto());
+
+                        table
+                            .header(20.0, |mut header| {
+                                header.col(|ui| {
+                                    ui.strong("Mask");
+                                });
+                                header.col(|ui| {
+                                    ui.strong("ID");
+                                });
+                                header.col(|ui| {
+                                    ui.strong("Width");
+                                });
+                                header.col(|ui| {
+                                    ui.strong("Height");
+                                });
+                                header.col(|ui| {
+                                    ui.strong("Area / cm²");
+                                });
+                            })
+                            .body(|mut body| {
+                                for segment in self.catalog.segments(&scroll) {
+                                    let row =
+                                    body.row(20.0, |mut row| {
+                                        if segment.id.ends_with("1847") {
+                                            row.set_selected(true);
+                                        }
+                                        row
+                                        .col(|ui| {
+                                            let url = format!("https://vesuvius.virtual-void.net/scroll/{}/segment/{}/mask?ext=png&width=50&height=25", scroll.old_id, segment.id);
+                                            ui.image(url);
+
+                                            //ui.image(segment.urls.mask_url.clone());
+                                        });
+                                        row.col(|ui| {
+                                            ui.label(format!("{}", segment.id));
+                                        });
+                                        row.col(|ui| {
+                                            ui.label(format!("{}", segment.width));
+                                        });
+                                        row.col(|ui| {
+                                            ui.label(format!("{}", segment.height));
+                                        });
+                                        row.col(|ui| {
+                                            ui.label(segment.area_cm2.map_or("".to_string(), |v| format!("{v:.1}")));
+                                        });
+                                    });
+                                }
+                            });
+                    });
+                });
+            });
         });
     }
 }
