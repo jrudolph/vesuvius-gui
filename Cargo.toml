@@ -33,6 +33,3 @@ wavefront_obj = { version = "10.0" }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = { version = "0.11", default-features = false, features = [] }
 memmap = "0.7"
-
-[patch.crates-io]
-wavefront_obj = { path = "/home/johannes/git/opensource/_2024/wavefront_obj" }
