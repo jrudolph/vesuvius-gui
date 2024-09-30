@@ -317,16 +317,16 @@ impl PaintVolume for ObjVolume {
                                                 buffer.set_rgb(
                                                     u as usize / paint_zoom as usize,
                                                     v as usize / paint_zoom as usize,
+                                                    0,
+                                                    0,
                                                     255,
-                                                    0,
-                                                    0,
                                                 );
                                             } else if (y - real_xyz[1] as f64).abs() < 2.0 {
                                                 buffer.set_rgb(
                                                     u as usize / paint_zoom as usize,
                                                     v as usize / paint_zoom as usize,
-                                                    0,
                                                     255,
+                                                    0,
                                                     0,
                                                 );
                                             } else if (z - real_xyz[2] as f64).abs() < 2.0 {
@@ -334,8 +334,8 @@ impl PaintVolume for ObjVolume {
                                                     u as usize / paint_zoom as usize,
                                                     v as usize / paint_zoom as usize,
                                                     0,
-                                                    0,
                                                     255,
+                                                    0,
                                                 );
                                             }
                                         }
