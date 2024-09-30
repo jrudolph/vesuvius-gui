@@ -109,7 +109,7 @@ pub struct TemplateApp {
     segment_mode: Option<SegmentMode>,
     #[serde(skip)]
     catalog: Catalog,
-    #[serde(default)]
+    #[serde(skip)]
     selected_segment: Option<Segment>,
 }
 
