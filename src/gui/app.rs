@@ -47,6 +47,7 @@ pub struct SegmentMode {
     texture_uv: Option<egui::TextureHandle>,
     #[serde(skip)]
     convert_to_world_coords: Box<dyn Fn([i32; 3]) -> [i32; 3]>,
+    show_segment_outlines: bool,
 }
 
 impl Default for SegmentMode {
@@ -62,6 +63,7 @@ impl Default for SegmentMode {
             surface_volume: Arc::new(RefCell::new(EmptyVolume {})),
             texture_uv: None,
             convert_to_world_coords: Box::new(|x| x),
+            show_segment_outlines: true,
         }
     }
 }
@@ -437,7 +439,7 @@ impl TemplateApp {
             );
         }
 
-        if self.is_segment_mode() && !segment_pane {
+        if self.is_segment_mode() && !segment_pane && self.segment_mode.as_ref().unwrap().show_segment_outlines {
             self.segment_mode
                 .as_ref()
                 .unwrap()
@@ -554,7 +556,9 @@ impl TemplateApp {
                     !is_segment_mode,
                 );
 
-                let has_changed = if let Some(segment_mode) = self.segment_mode.as_mut() {
+                let mut has_changed = false;
+
+                if let Some(segment_mode) = self.segment_mode.as_mut() {
                     let u_sl = slider(
                         ui,
                         "u",
@@ -579,11 +583,8 @@ impl TemplateApp {
                         false,
                         true,
                     );
-
-                    u_sl.changed() || v_sl.changed() || w_sl.changed()
-                } else {
-                    false
-                };
+                    has_changed = has_changed || u_sl.changed() || v_sl.changed() || w_sl.changed();
+                }
 
                 let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true, true);
 
@@ -592,9 +593,15 @@ impl TemplateApp {
                     let c = ui.checkbox(&mut self.trilinear_interpolation, "");
                     if c.changed() {
                         self.reload_segment();
-                        self.clear_textures();
+                        has_changed = true;
                     }
-                    ui.end_row()
+                    ui.end_row();
+
+                    ui.label("Show segment outlines");
+                    let show_segment_outlines =
+                        ui.checkbox(&mut self.segment_mode.as_mut().unwrap().show_segment_outlines, "");
+                    has_changed = has_changed || show_segment_outlines.changed();
+                    ui.end_row();
                 }
 
                 if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() || has_changed {
