@@ -9,8 +9,9 @@ use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
 use directories::BaseDirs;
+use egui::Label;
 use egui::Vec2;
-use egui::{ColorImage, Image, PointerButton, Response, Ui};
+use egui::{ColorImage, Image, PointerButton, Response, Ui, Widget};
 use egui_extras::Column;
 use egui_extras::TableBuilder;
 use std::cell::RefCell;
@@ -824,17 +825,21 @@ impl TemplateApp {
 
                                             //ui.image(segment.urls.mask_url.clone());
                                         });
+                                        fn l<T: ToString>(text: T) -> Label {
+                                            Label::new(text.to_string()).selectable(false)
+                                        }
+
                                         row.col(|ui| {
-                                            ui.label(format!("{}", segment.id));
+                                            l(format!("{}", segment.id)).ui(ui);
                                         });
                                         row.col(|ui| {
-                                            ui.label(format!("{}", segment.width));
+                                            l(format!("{}", segment.width)).ui(ui);
                                         });
                                         row.col(|ui| {
-                                            ui.label(format!("{}", segment.height));
+                                            l(format!("{}", segment.height)).ui(ui);
                                         });
                                         row.col(|ui| {
-                                            ui.label(segment.area_cm2.map_or("".to_string(), |v| format!("{v:.1}")));
+                                            l(segment.area_cm2.map_or("".to_string(), |v| format!("{v:.1}"))).ui(ui);
                                         });
 
                                         if row.response().clicked() && segment.volume.is_some(){
