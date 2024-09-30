@@ -319,6 +319,7 @@ impl TemplateApp {
     fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, coord: usize, segment_pane: bool) {
         let (coords, ranges) = if segment_pane {
             let ranges = self.segment_mode.as_ref().unwrap().ranges.clone();
+
             (&mut self.segment_mode.as_mut().unwrap().coord, ranges)
         } else {
             (&mut self.coord, self.ranges.clone())
@@ -742,21 +743,21 @@ impl TemplateApp {
 
                 ui.horizontal(|ui| {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
+                    self.add_scroll_handler(&im_xy, ui, 2, false);
                     if !self.is_segment_mode() {
-                        self.add_scroll_handler(&im_xy, ui, 2, false);
                         self.add_drag_handler(&im_xy, 0, 1, false);
                     }
 
                     let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
+                    self.add_scroll_handler(&im_xz, ui, 1, false);
                     if !self.is_segment_mode() {
-                        self.add_scroll_handler(&im_xz, ui, 1, false);
                         self.add_drag_handler(&im_xz, 0, 2, false);
                     }
                 });
                 ui.horizontal(|ui| {
                     let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
+                    self.add_scroll_handler(&im_yz, ui, 0, false);
                     if !self.is_segment_mode() {
-                        self.add_scroll_handler(&im_yz, ui, 0, false);
                         self.add_drag_handler(&im_yz, 2, 1, false);
                     }
 
