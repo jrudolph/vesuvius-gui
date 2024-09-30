@@ -816,9 +816,7 @@ impl TemplateApp {
                             .body(|mut body| {
                                 for segment in self.catalog.segments(&scroll) {
                                     body.row(20.0, |mut row| {
-                                        if segment.id.ends_with("1847") {
-                                            row.set_selected(true);
-                                        }
+                                        row.set_selected(self.selected_segment.as_ref() == Some(segment));
                                         row
                                         .col(|ui| {
                                             let url = format!("https://vesuvius.virtual-void.net/scroll/{}/segment/{}/mask?ext=png&width=50&height=25", scroll.old_id, segment.id);
@@ -865,6 +863,7 @@ impl TemplateApp {
                     self.load_data(&volume);
                     self.setup_segment(&obj_file.to_str().unwrap().to_string(), segment.width, segment.height);
                     self.clear_textures();
+                    self.selected_segment = Some(segment);
                 }
             });
         });
