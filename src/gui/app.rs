@@ -623,6 +623,10 @@ impl TemplateApp {
 
                     has_changed =
                         has_changed || cb(ui, "Sync coordinates ('S')", &mut segment_mode.sync_coordinates).changed();
+
+                    if cb(ui, "Draw XYZ outline ('X')", &mut self.drawing_config.draw_xyz_outlines).changed() {
+                        segment_mode.texture_uv = None;
+                    }
                 }
 
                 if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() || has_changed {
@@ -715,6 +719,10 @@ impl TemplateApp {
                         segment_mode.sync_coordinates = !segment_mode.sync_coordinates;
                         self.clear_textures();
                     }
+                }
+                if i.key_pressed(egui::Key::X) {
+                    self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
+                    self.clear_textures();
                 }
             });
 

@@ -25,6 +25,7 @@ pub struct DrawingConfig {
     pub threshold_max: u8,
     pub quant: u8,
     pub mask_shift: u8,
+    pub draw_xyz_outlines: bool,
 }
 impl DrawingConfig {
     pub fn filters_active(&self) -> bool {
@@ -53,6 +54,7 @@ impl Default for DrawingConfig {
             threshold_max: 0,
             quant: 0xff,
             mask_shift: 0,
+            draw_xyz_outlines: false,
         }
     }
 }

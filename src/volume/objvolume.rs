@@ -141,12 +141,16 @@ impl PaintVolume for ObjVolume {
         height: usize,
         sfactor: u8,
         paint_zoom: u8,
-        _config: &super::DrawingConfig,
+        config: &super::DrawingConfig,
         buffer: &mut Image,
     ) {
         assert!(u_coord == 0);
         assert!(v_coord == 1);
         assert!(plane_coord == 2);
+
+        let draw_outlines = config.draw_xyz_outlines;
+
+        let real_xyz = self.convert_to_volume_coords(xyz);
 
         let mut volume = self.volume.borrow_mut();
 
@@ -301,11 +305,40 @@ impl PaintVolume for ObjVolume {
                                         let z = z + w_factor * nz;
 
                                         let value = volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32);
+
                                         buffer.set_gray(
                                             u as usize / paint_zoom as usize,
                                             v as usize / paint_zoom as usize,
                                             value,
                                         );
+
+                                        if draw_outlines {
+                                            if (x - real_xyz[0] as f64).abs() < 2.0 {
+                                                buffer.set_rgb(
+                                                    u as usize / paint_zoom as usize,
+                                                    v as usize / paint_zoom as usize,
+                                                    255,
+                                                    0,
+                                                    0,
+                                                );
+                                            } else if (y - real_xyz[1] as f64).abs() < 2.0 {
+                                                buffer.set_rgb(
+                                                    u as usize / paint_zoom as usize,
+                                                    v as usize / paint_zoom as usize,
+                                                    0,
+                                                    255,
+                                                    0,
+                                                );
+                                            } else if (z - real_xyz[2] as f64).abs() < 2.0 {
+                                                buffer.set_rgb(
+                                                    u as usize / paint_zoom as usize,
+                                                    v as usize / paint_zoom as usize,
+                                                    0,
+                                                    0,
+                                                    255,
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
