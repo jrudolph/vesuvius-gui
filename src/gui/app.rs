@@ -598,25 +598,31 @@ impl TemplateApp {
 
                 let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true, true);
 
+                fn cb<T: ToString>(ui: &mut Ui, label: T, value: &mut bool) -> Response {
+                    ui.label(label.to_string());
+                    let res = ui.checkbox(value, "");
+                    ui.end_row();
+                    res
+                }
+
                 if self.is_segment_mode() {
-                    ui.label("Trilinear interpolation ('I')");
-                    let c = ui.checkbox(&mut self.trilinear_interpolation, "");
+                    let c = cb(ui, "Trilinear interpolation ('I')", &mut self.trilinear_interpolation);
                     if c.changed() {
                         self.reload_segment();
                         has_changed = true;
                     }
-                    ui.end_row();
 
-                    ui.label("Show segment outlines");
-                    let show_segment_outlines =
-                        ui.checkbox(&mut self.segment_mode.as_mut().unwrap().show_segment_outlines, "");
-                    has_changed = has_changed || show_segment_outlines.changed();
-                    ui.end_row();
+                    let segment_mode = self.segment_mode.as_mut().unwrap();
+                    has_changed = has_changed
+                        || cb(
+                            ui,
+                            "Show segment outlines ('O')",
+                            &mut segment_mode.show_segment_outlines,
+                        )
+                        .changed();
 
-                    ui.label("Sync coordinates");
-                    let sync_coordinates = ui.checkbox(&mut self.segment_mode.as_mut().unwrap().sync_coordinates, "");
-                    has_changed = has_changed || sync_coordinates.changed();
-                    ui.end_row();
+                    has_changed =
+                        has_changed || cb(ui, "Sync coordinates ('S')", &mut segment_mode.sync_coordinates).changed();
                 }
 
                 if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() || has_changed {
@@ -697,6 +703,18 @@ impl TemplateApp {
                     self.trilinear_interpolation = !self.trilinear_interpolation;
                     self.reload_segment();
                     self.clear_textures();
+                }
+                if i.key_pressed(egui::Key::O) {
+                    if let Some(segment_mode) = self.segment_mode.as_mut() {
+                        segment_mode.show_segment_outlines = !segment_mode.show_segment_outlines;
+                        self.clear_textures();
+                    }
+                }
+                if i.key_pressed(egui::Key::S) {
+                    if let Some(segment_mode) = self.segment_mode.as_mut() {
+                        segment_mode.sync_coordinates = !segment_mode.sync_coordinates;
+                        self.clear_textures();
+                    }
                 }
             });
 
