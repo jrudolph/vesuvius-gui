@@ -1,3 +1,6 @@
+pub mod obj_repository;
+
+use crate::model::{DynamicFullVolumeReference, VolumeReference};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,6 +46,13 @@ pub struct Segment {
     pub urls: Urls,
     pub area_cm2: Option<f64>,
 }
+
+impl Segment {
+    pub fn volume_ref(&self) -> impl VolumeReference {
+        DynamicFullVolumeReference::new(self.scroll.old_id.clone(), self.volume.as_ref().unwrap().clone())
+    }
+}
+
 impl PartialEq for Segment {
     fn eq(&self, other: &Self) -> bool { self.id == other.id && self.scroll == other.scroll }
 }

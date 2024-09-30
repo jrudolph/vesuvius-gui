@@ -5,17 +5,22 @@ use crate::downloader::*;
 use crate::model::*;
 use crate::volume::*;
 
+use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
 use directories::BaseDirs;
+use egui::Color32;
 use egui::Label;
+use egui::RichText;
+use egui::Stroke;
 use egui::Vec2;
+use egui::WidgetText;
 use egui::{ColorImage, Image, PointerButton, Response, Ui, Widget};
 use egui_extras::Column;
 use egui_extras::TableBuilder;
 use std::cell::RefCell;
-use std::io::Cursor;
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
 const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
@@ -70,6 +75,10 @@ impl Default for SegmentMode {
     }
 }
 
+enum UINotification {
+    ObjDownloadReady(Segment),
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TemplateApp {
@@ -110,11 +119,22 @@ pub struct TemplateApp {
     #[serde(skip)]
     catalog: Catalog,
     #[serde(skip)]
+    obj_repository: ObjRepository,
+    #[serde(skip)]
     selected_segment: Option<Segment>,
+    #[serde(skip)]
+    downloading_segment: Option<Segment>,
+    #[serde(skip)]
+    notification_sender: Sender<UINotification>,
+    #[serde(skip)]
+    notification_receiver: Receiver<UINotification>,
 }
 
 impl Default for TemplateApp {
     fn default() -> Self {
+        let catalog = Catalog::default();
+        let obj_repository = ObjRepository::new(&catalog);
+        let (notification_sender, notification_receiver) = std::sync::mpsc::channel();
         Self {
             last_login_failed: false,
             volume_id: 0,
@@ -137,8 +157,12 @@ impl Default for TemplateApp {
             mode: Mode::Blocks,
             extra_resolutions: 1,
             segment_mode: None,
-            catalog: Catalog::default(),
+            catalog,
+            obj_repository,
             selected_segment: None,
+            downloading_segment: None,
+            notification_sender,
+            notification_receiver,
         }
     }
 }
@@ -161,6 +185,7 @@ impl TemplateApp {
         } else {
             Default::default()
         };
+        app.obj_repository = ObjRepository::new(&catalog);
         app.catalog = catalog;
         if let Some(dir) = data_dir {
             app.data_dir = dir;
@@ -694,6 +719,26 @@ impl TemplateApp {
             while self.try_recv_from_download_notifier() {} // clear queue
         }
 
+        let mut switch_segment = None;
+        for n in self.notification_receiver.try_iter() {
+            match n {
+                UINotification::ObjDownloadReady(segment) => {
+                    if let Some(obj_file) = self.obj_repository.get(&segment) {
+                        if self.downloading_segment.as_ref().map_or(false, |s| s == &segment) {
+                            switch_segment = Some((segment, obj_file));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((segment, obj_file)) = switch_segment {
+            self.load_data(&segment.volume_ref());
+            self.setup_segment(obj_file.to_str().unwrap(), segment.width, segment.height);
+            self.selected_segment = Some(segment);
+            self.clear_textures();
+            self.downloading_segment = None;
+        }
+
         self.catalog_panel(ctx);
 
         egui::Window::new("Controls").show(ctx, |ui| {
@@ -814,6 +859,10 @@ impl TemplateApp {
 
     fn catalog_panel(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("Catalog").show(ctx, |ui| {
+            let selection = &mut ui.visuals_mut().selection;
+            selection.stroke = Stroke::new(2.0, Color32::from_rgb(0x00, 0x00, 0x00));
+            selection.bg_fill = Color32::from_rgb(0xcc, 0xcc, 0xcc);
+
             // Header
             ui.add_space(4.0);
             ui.vertical_centered(|ui| {
@@ -867,12 +916,28 @@ impl TemplateApp {
 
                                             //ui.image(segment.urls.mask_url.clone());
                                         });
-                                        fn l<T: ToString>(text: T) -> Label {
-                                            Label::new(text.to_string()).selectable(false)
+                                        fn l(text: impl Into<WidgetText>) -> Label {
+                                            Label::new(text).selectable(false)
                                         }
 
                                         row.col(|ui| {
-                                            l(format!("{}", segment.id)).ui(ui);
+                                            let cached = self.obj_repository.is_cached(&segment.id);
+                                            let mut text = RichText::new(&segment.id);
+                                            if cached {
+                                                text = text.color(Color32::DARK_GREEN);
+                                            } else if self.downloading_segment == Some(segment.clone()) {
+                                                // current time millis
+                                                let time = std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap()
+                                                    .as_millis() / 600;
+                                                if time % 2 == 0 {
+                                                    text = text.color(Color32::YELLOW);
+                                                }
+                                            }
+
+
+                                            l(text).ui(ui);
                                         });
                                         row.col(|ui| {
                                             l(format!("{}", segment.width)).ui(ui);
@@ -885,32 +950,25 @@ impl TemplateApp {
                                         });
 
                                         if row.response().clicked() && segment.volume.is_some(){
-                                            clicked = Some((DynamicFullVolumeReference::new(scroll.old_id.clone(), segment.volume.as_ref().unwrap().clone()), segment.clone()));
+                                            clicked = Some(segment.clone());
                                         }
                                     });
                                 }
                             });
                     });
                 });
-                if let Some((volume, segment)) = clicked {
-                    println!("Selected volume: {:?}", &volume.volume);
-                    let dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
-                    let obj_file  =  dir.join(format!("segments/{}/{}.obj", &segment.scroll.old_id, segment.id));
-                    // use existing or download
-                    if !obj_file.exists() {
-                        println!("Downloading obj file from {} to {}", segment.urls.obj_url, &obj_file.to_str().unwrap());
-                        let response = ehttp::fetch_blocking(&ehttp::Request::get(&segment.urls.obj_url)).unwrap();
-                        std::fs::create_dir_all(&obj_file.parent().unwrap()).unwrap();
-                        let mut file = std::fs::File::create(&obj_file).unwrap();
-                        let bytes = response.bytes;
-                        println!("Downloaded {} bytes", bytes.len());
-                        std::io::copy(&mut Cursor::new(bytes), &mut file).unwrap();
+                if let Some(segment) = clicked {
+                    if let Some(obj_file) = self.obj_repository.get(&segment) {
+                        self.load_data(&segment.volume_ref());
+                        self.setup_segment(&obj_file.to_str().unwrap().to_string(), segment.width, segment.height);
+                        self.clear_textures();
+                        self.selected_segment = Some(segment);
+                    } else {
+                        let sender = self.notification_sender.clone();
+                        let segment = segment.clone();
+                        self.downloading_segment = Some(segment.clone());
+                        self.obj_repository.download(&segment, move |segment| {let _ =sender.send(UINotification::ObjDownloadReady(segment.clone()));});
                     }
-
-                    self.load_data(&volume);
-                    self.setup_segment(&obj_file.to_str().unwrap().to_string(), segment.width, segment.height);
-                    self.clear_textures();
-                    self.selected_segment = Some(segment);
                 }
             });
         });
