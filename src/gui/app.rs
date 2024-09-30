@@ -541,7 +541,10 @@ impl TemplateApp {
             .show(ui, |ui| {
                 ui.label("Volume");
                 if self.is_segment_mode() {
-                    ui.label("Fixed to Scroll 1 in segment mode");
+                    if ui.button("Unload segment").clicked() {
+                        self.segment_mode = None;
+                        self.clear_textures();
+                    }
                 } else if self.mode == Mode::Cells {
                     ui.label(format!("Browsing cells in {}", self.data_dir));
                 } else if self.mode == Mode::Layers {
@@ -870,10 +873,9 @@ impl TemplateApp {
             });
             ui.separator();
 
-            ui.collapsing("Volumes", |ui| {
-            });
-
-            ui.collapsing("Segments", |ui| {
+            //ui.collapsing("Volumes", |_ui| {});
+            //ui.collapsing("Segments", |ui|
+            {
                 let mut clicked = None;
                 self.catalog.scrolls().iter().for_each(|scroll| {
                     egui::CollapsingHeader::new(scroll.label()).show(ui, |ui| {
@@ -970,7 +972,8 @@ impl TemplateApp {
                         self.obj_repository.download(&segment, move |segment| {let _ =sender.send(UINotification::ObjDownloadReady(segment.clone()));});
                     }
                 }
-            });
+            }
+            //);
         });
     }
 }
