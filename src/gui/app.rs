@@ -48,6 +48,7 @@ pub struct SegmentMode {
     #[serde(skip)]
     convert_to_world_coords: Box<dyn Fn([i32; 3]) -> [i32; 3]>,
     show_segment_outlines: bool,
+    sync_coordinates: bool,
 }
 
 impl Default for SegmentMode {
@@ -64,6 +65,7 @@ impl Default for SegmentMode {
             texture_uv: None,
             convert_to_world_coords: Box::new(|x| x),
             show_segment_outlines: true,
+            sync_coordinates: true,
         }
     }
 }
@@ -343,6 +345,10 @@ impl TemplateApp {
         }
     }
     fn add_drag_handler(&mut self, image: &Response, ucoord: usize, vcoord: usize, segment_pane: bool) {
+        if !segment_pane && self.should_sync_coords() {
+            return;
+        }
+
         let (coords, ranges) = if segment_pane {
             let smode = self.segment_mode.as_mut().unwrap();
             (&mut smode.coord, &smode.ranges)
@@ -477,12 +483,15 @@ impl TemplateApp {
 
     fn sync_coords(&mut self) {
         if let Some(segment_mode) = self.segment_mode.as_ref() {
-            let res = (*segment_mode.convert_to_world_coords)(segment_mode.coord);
-            if res[0] >= 0 && res[1] >= 0 && res[2] >= 0 {
-                self.coord = res;
+            if segment_mode.sync_coordinates {
+                let res = (*segment_mode.convert_to_world_coords)(segment_mode.coord);
+                if res[0] >= 0 && res[1] >= 0 && res[2] >= 0 {
+                    self.coord = res;
+                }
             }
         }
     }
+    fn should_sync_coords(&self) -> bool { self.segment_mode.as_ref().map_or(false, |s| s.sync_coordinates) }
 
     fn controls(&mut self, _frame: &eframe::Frame, ui: &mut Ui) {
         fn slider<T: emath::Numeric>(
@@ -531,14 +540,14 @@ impl TemplateApp {
                     });
                 }
                 ui.end_row();
-                let is_segment_mode = self.is_segment_mode();
+                let sync_coordinates = self.should_sync_coords();
                 let x_sl = slider(
                     ui,
                     "x",
                     &mut self.coord[0],
                     self.ranges[0].clone(),
                     false,
-                    !is_segment_mode,
+                    !sync_coordinates,
                 );
                 let y_sl = slider(
                     ui,
@@ -546,7 +555,7 @@ impl TemplateApp {
                     &mut self.coord[1],
                     self.ranges[1].clone(),
                     false,
-                    !is_segment_mode,
+                    !sync_coordinates,
                 );
                 let z_sl = slider(
                     ui,
@@ -554,7 +563,7 @@ impl TemplateApp {
                     &mut self.coord[2],
                     self.ranges[2].clone(),
                     false,
-                    !is_segment_mode,
+                    !sync_coordinates,
                 );
 
                 let mut has_changed = false;
@@ -602,6 +611,11 @@ impl TemplateApp {
                     let show_segment_outlines =
                         ui.checkbox(&mut self.segment_mode.as_mut().unwrap().show_segment_outlines, "");
                     has_changed = has_changed || show_segment_outlines.changed();
+                    ui.end_row();
+
+                    ui.label("Sync coordinates");
+                    let sync_coordinates = ui.checkbox(&mut self.segment_mode.as_mut().unwrap().sync_coordinates, "");
+                    has_changed = has_changed || sync_coordinates.changed();
                     ui.end_row();
                 }
 
@@ -744,22 +758,16 @@ impl TemplateApp {
                 ui.horizontal(|ui| {
                     let im_xy = ui.add(image).interact(egui::Sense::drag());
                     self.add_scroll_handler(&im_xy, ui, 2, false);
-                    if !self.is_segment_mode() {
-                        self.add_drag_handler(&im_xy, 0, 1, false);
-                    }
+                    self.add_drag_handler(&im_xy, 0, 1, false);
 
                     let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
                     self.add_scroll_handler(&im_xz, ui, 1, false);
-                    if !self.is_segment_mode() {
-                        self.add_drag_handler(&im_xz, 0, 2, false);
-                    }
+                    self.add_drag_handler(&im_xz, 0, 2, false);
                 });
                 ui.horizontal(|ui| {
                     let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
                     self.add_scroll_handler(&im_yz, ui, 0, false);
-                    if !self.is_segment_mode() {
-                        self.add_drag_handler(&im_yz, 2, 1, false);
-                    }
+                    self.add_drag_handler(&im_yz, 2, 1, false);
 
                     if self.is_segment_mode() {
                         let texture_uv = &self.get_or_create_texture(ui, 0, 1, 2, true, |s| {
