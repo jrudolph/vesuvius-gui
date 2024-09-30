@@ -339,20 +339,19 @@ impl TemplateApp {
         }
     }
     fn add_drag_handler(&mut self, image: &Response, ucoord: usize, vcoord: usize, segment_pane: bool) {
-        let coords = if segment_pane {
-            &mut self.segment_mode.as_mut().unwrap().coord
+        let (coords, ranges) = if segment_pane {
+            let smode = self.segment_mode.as_mut().unwrap();
+            (&mut smode.coord, &smode.ranges)
         } else {
-            &mut self.coord
+            (&mut self.coord, &self.ranges)
         };
 
         if image.dragged_by(PointerButton::Primary) {
             //let im2 = image.on_hover_cursor(CursorIcon::Grabbing);
             let delta = -image.drag_delta() / self.zoom;
 
-            coords[ucoord] =
-                (coords[ucoord] + delta.x as i32).clamp(*self.ranges[ucoord].start(), *self.ranges[ucoord].end());
-            coords[vcoord] =
-                (coords[vcoord] + delta.y as i32).clamp(*self.ranges[vcoord].start(), *self.ranges[vcoord].end());
+            coords[ucoord] = (coords[ucoord] + delta.x as i32).clamp(*ranges[ucoord].start(), *ranges[ucoord].end());
+            coords[vcoord] = (coords[vcoord] + delta.y as i32).clamp(*ranges[vcoord].start(), *ranges[vcoord].end());
             self.clear_textures();
         }
     }
