@@ -16,6 +16,22 @@ All the published volumes published so far are supported:
 - Fragment PHerc0051Cr04Fr08
 - Fragment PHerc1667Cr01Fr03
 
+Known surface segments are shown in the catalog and can be rendered on a 4th pane.
+
+## Features
+
+- Access to the full volume data set, data is converted to a more efficient format by a background server
+- A catalog of known surface segments will allow on-the-fly downloading of surfaces meshes and live rendering
+- Rendering options for volumes:
+  - thresholding
+  - bit depth reduction
+  - showing different bit planes
+- Rendering options for surfaces:
+  - trilinear interpolation
+  - show surface outline on the volume panes
+  - show xyz outline on the surface pane
+  - synchronized panning and zooming between the panes
+
 ## Installation
 
 Grab a binary from [the latest release](https://github.com/jrudolph/vesuvius-gui/releases).
