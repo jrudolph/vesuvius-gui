@@ -9,6 +9,8 @@ use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
+use crate::zarr::ZarrArray;
+use crate::zarr::ZarrContext;
 use directories::BaseDirs;
 use egui::Color32;
 use egui::Label;
@@ -128,6 +130,8 @@ pub struct TemplateApp {
     notification_sender: Sender<UINotification>,
     #[serde(skip)]
     notification_receiver: Receiver<UINotification>,
+    #[serde(skip)]
+    zarr_overlay: Option<ZarrContext<3>>,
 }
 
 impl Default for TemplateApp {
@@ -163,6 +167,7 @@ impl Default for TemplateApp {
             downloading_segment: None,
             notification_sender,
             notification_receiver,
+            zarr_overlay: None,
         }
     }
 }
@@ -222,6 +227,12 @@ impl TemplateApp {
         if let Some(segment_file) = segment_file {
             app.setup_segment(&segment_file, 1000, 1000);
         }
+
+        app.zarr_overlay = Some({
+            let zarr: ZarrArray<3, u8> =
+                ZarrArray::from_path("/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr");
+            zarr.into_ctx()
+        });
 
         app
     }
@@ -469,6 +480,25 @@ impl TemplateApp {
                 &self.drawing_config,
                 &mut image,
             );
+        }
+
+        if !segment_pane
+        /* && d_coord == 2 */
+        {
+            if let Some(zarr) = self.zarr_overlay.as_mut() {
+                zarr.paint(
+                    coords,
+                    u_coord,
+                    v_coord,
+                    d_coord,
+                    width,
+                    height,
+                    1,
+                    paint_zoom,
+                    &self.drawing_config,
+                    &mut image,
+                );
+            }
         }
 
         if self.is_segment_mode() && !segment_pane && self.segment_mode.as_ref().unwrap().show_segment_outlines {

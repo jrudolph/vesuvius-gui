@@ -1,6 +1,9 @@
+use crate::volume::{PaintVolume, VoxelVolume};
 use derive_more::Debug;
+use egui::Color32;
+use memmap::MmapOptions;
 use serde::{Deserialize, Serialize};
-use std::ops::Index;
+use std::{collections::HashMap, fs::File, ops::Index, rc::Rc};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum ZarrDataType {
@@ -117,16 +120,78 @@ impl BloscHeader {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct BloscChunk<T> {
     header: BloscHeader,
     offsets: Vec<u32>,
     #[debug(skip)]
-    data: Vec<u8>,
+    data: memmap::Mmap,
     phantom_t: std::marker::PhantomData<T>,
 }
 
+struct BlockCacheEntry {
+    block_idx: usize,
+    uncompressed: Vec<u8>,
+}
+
+struct BloscContext {
+    chunk: Rc<BloscChunk<u8>>,
+    cache: HashMap<usize, Vec<u8>>,
+}
+impl BloscContext {
+    fn get(&mut self, index: usize) -> u8 {
+        let block_idx = index * self.chunk.header.typesize as usize / self.chunk.header.blocksize as usize;
+        let idx = (index * self.chunk.header.typesize as usize) % self.chunk.header.blocksize as usize;
+
+        if self.cache.contains_key(&block_idx) {
+            self.cache.get_mut(&block_idx).unwrap()[idx]
+        } else {
+            let block_offset = self.chunk.offsets[block_idx] as usize;
+            let block_compressed_length =
+                u32::from_le_bytes(self.chunk.data[block_offset..block_offset + 4].try_into().unwrap()) as usize;
+            let block_compressed_data = &self.chunk.data[block_offset + 4..block_offset + block_compressed_length + 4];
+
+            let uncompressed = lz4_compression::decompress::decompress(&block_compressed_data).unwrap();
+            self.cache.insert(block_idx, uncompressed.clone());
+
+            uncompressed[idx]
+        }
+
+        /* if self.last_entry.as_ref().is_some_and(|e| e.block_idx == block_idx) {
+            return self.last_entry.as_ref().unwrap().uncompressed[idx];
+        } else {
+            let block_offset = self.chunk.offsets[block_idx] as usize;
+            let block_compressed_length =
+                u32::from_le_bytes(self.chunk.data[block_offset..block_offset + 4].try_into().unwrap()) as usize;
+            let block_compressed_data = &self.chunk.data[block_offset + 4..block_offset + block_compressed_length + 4];
+            /*
+            dbg!(
+                "Block: {:?} {:?} {:x} {}",
+                index,
+                idx,
+                block_idx,
+                block_offset,
+                block_compressed_length
+            ); */
+
+            let uncompressed = lz4_compression::decompress::decompress(&block_compressed_data).unwrap();
+            self.last_entry = Some(BlockCacheEntry {
+                block_idx,
+                uncompressed: uncompressed.clone(),
+            });
+
+            uncompressed[idx]
+        } */
+    }
+}
+
 impl BloscChunk<u8> {
+    fn into_ctx(self) -> BloscContext {
+        BloscContext {
+            chunk: Rc::new(self),
+            cache: HashMap::new(),
+        }
+    }
     fn get(&self, index: usize) -> u8 {
         let block_idx = index * self.header.typesize as usize / self.header.blocksize as usize;
         let idx = (index * self.header.typesize as usize) % self.header.blocksize as usize;
@@ -153,7 +218,8 @@ impl BloscChunk<u8> {
 impl<const N: usize, T> ZarrArray<N, T> {
     fn load_chunk(&self, chunk_no: [usize; N]) -> BloscChunk<T> {
         let chunk_path = self.chunk_path(chunk_no);
-        let chunk = std::fs::read(&chunk_path).unwrap();
+        let file = File::open(chunk_path.clone()).unwrap();
+        let chunk = unsafe { MmapOptions::new().map(&file) }.unwrap();
 
         // parse 16 byte blosc header
         let header = BloscHeader::from_bytes(&chunk[0..16]);
@@ -202,6 +268,13 @@ impl<const N: usize> ZarrArray<N, u8> {
             phantom_t: std::marker::PhantomData,
         }
     }
+
+    pub fn into_ctx(self) -> ZarrContext<N> {
+        ZarrContext {
+            array: Rc::new(self),
+            cache: HashMap::new(),
+        }
+    }
     fn get(&self, index: [usize; N]) -> u8 {
         let chunk_no = index
             .iter()
@@ -230,26 +303,179 @@ impl<const N: usize> ZarrArray<N, u8> {
     }
 }
 
+struct ZarrCacheEntry<const N: usize> {
+    chunk_no: [usize; N],
+    ctx: BloscContext,
+}
+
+pub struct ZarrContext<const N: usize> {
+    array: Rc<ZarrArray<N, u8>>,
+    cache: HashMap<[usize; N], BloscContext>,
+}
+/* impl<const N: usize> ZarrContext<N> {
+    fn get(&mut self, index: [usize; N]) -> u8 {
+        let chunk_no = index
+            .iter()
+            .zip(self.array.def.chunks.iter())
+            .map(|(i, c)| i / c)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+
+        let chunk_offset = index
+            .iter()
+            .zip(self.array.def.chunks.iter())
+            .map(|(i, c)| i % c)
+            .collect::<Vec<_>>();
+
+        let idx = chunk_offset
+            .iter()
+            .zip(self.array.def.chunks.iter())
+            //.rev() // FIXME: only if row-major
+            .fold(0, |acc, (i, c)| acc * c + i);
+
+        if self.last_chunk_context.as_ref().is_some_and(|e| e.chunk_no == chunk_no) {
+            self.last_chunk_context.as_mut().unwrap().ctx.get(idx)
+        } else {
+            let chunk = self.array.load_chunk(chunk_no);
+            let mut ctx = chunk.into_ctx();
+            let res = ctx.get(idx);
+            self.last_chunk_context = Some(ZarrCacheEntry { chunk_no, ctx });
+            res
+        }
+    }
+} */
+
+impl ZarrContext<3> {
+    fn get(&mut self, index: [usize; 3]) -> u8 {
+        if index[0] > self.array.def.shape[0]
+            || index[1] > self.array.def.shape[1]
+            || index[2] > self.array.def.shape[2]
+        {
+            return 0;
+        }
+        let chunk_no = [index[0] / 500, index[1] / 500, index[2] / 500];
+        let chunk_offset = [index[0] % 500, index[1] % 500, index[2] % 500];
+
+        //let idx = chunk_offset[0] * 500 * 500 + chunk_offset[1] * 500 + chunk_offset[2];
+        let idx = ((chunk_offset[0] * self.array.def.chunks[1]) + chunk_offset[1]) * self.array.def.chunks[2]
+            + chunk_offset[2];
+
+        if self.cache.contains_key(&chunk_no) {
+            self.cache.get_mut(&chunk_no).unwrap().get(idx)
+        } else {
+            let chunk = self.array.load_chunk(chunk_no);
+            let mut ctx = chunk.into_ctx();
+            let res = ctx.get(idx);
+            self.cache.insert(chunk_no, ctx);
+            res
+        }
+        /* if self.last_chunk_context.as_ref().is_some_and(|e| e.chunk_no == chunk_no) {
+            self.last_chunk_context.as_mut().unwrap().ctx.get(idx)
+        } else {
+            let chunk = self.array.load_chunk(chunk_no);
+            let mut ctx = chunk.into_ctx();
+            let res = ctx.get(idx);
+            self.last_chunk_context = Some(ZarrCacheEntry { chunk_no, ctx });
+            res
+        } */
+    }
+}
+
+impl PaintVolume for ZarrContext<3> {
+    fn paint(
+        &mut self,
+        xyz: [i32; 3],
+        u_coord: usize,
+        v_coord: usize,
+        plane_coord: usize,
+        width: usize,
+        height: usize,
+        _sfactor: u8,
+        paint_zoom: u8,
+        _config: &crate::volume::DrawingConfig,
+        buffer: &mut crate::volume::Image,
+    ) {
+        assert!(_sfactor == 1);
+        let fi32 = _sfactor as f64;
+
+        for im_u in 0..width {
+            for im_v in 0..height {
+                let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32;
+                let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32;
+
+                let mut uvw: [f64; 3] = [0.; 3];
+                uvw[u_coord] = (xyz[u_coord] + im_rel_u) as f64 / fi32;
+                uvw[v_coord] = (xyz[v_coord] + im_rel_v) as f64 / fi32;
+                uvw[plane_coord] = (xyz[plane_coord]) as f64 / fi32;
+
+                // x1961:5393 , y2135:5280, z7000:11249
+                let x = -1961.0 + uvw[0];
+                let y = -2135.0 + uvw[1];
+                let z = -7000.0 + uvw[2];
+
+                if x < 0.0 || y < 0.0 || z < 0.0 {
+                    continue;
+                }
+
+                let v = self.get([z as usize, y as usize, x as usize]);
+                if v != 0 {
+                    let color = match v {
+                        1 => Color32::RED,
+                        2 => Color32::GREEN,
+                        3 => Color32::YELLOW,
+                        _ => Color32::BLUE,
+                    };
+                    buffer.set(im_u, im_v, color);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 pub fn test_zarr() {
     let zarr: ZarrArray<3, u8> =
         ZarrArray::from_path("/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr");
+    let mut zarr = zarr.into_ctx();
 
-    let start_time = std::time::Instant::now();
-    let comp = std::fs::read("/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr/b0.lz4").unwrap();
-    println!("Read compressed file in {:?}", start_time.elapsed());
-    let uncomp = lz4_compression::decompress::decompress(&comp).unwrap();
+    let at0 = [1, 21, 115];
+    let at1 = [1, 21, 116];
+    let at2 = [1, 21, 117];
+    let at3 = [1, 21, 118];
 
-    std::fs::write(
-        "/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr/b0.lz4.decomp",
-        &uncomp,
-    )
-    .unwrap();
-    println!("Decompressed to len {:?}", uncomp.len());
-
-    let at = [1, 21, 118];
+    let start = std::time::Instant::now();
+    let at = [1, 21, 115];
     let val = zarr.get(at);
-    println!("Value at {:?}: {:?}", at, val);
+    println!("Value at {:?}: {:?} elapsed: {:?}", at, val, start.elapsed());
+
+    let start = std::time::Instant::now();
+    let at = [1, 21, 116];
+    let val = zarr.get(at);
+    println!("Value at {:?}: {:?} elapsed: {:?}", at, val, start.elapsed());
+
+    let start = std::time::Instant::now();
+    let at = [1, 21, 117];
+    let val = zarr.get(at);
+    println!("Value at {:?}: {:?} elapsed: {:?}", at, val, start.elapsed());
+
+    let start = std::time::Instant::now();
+    let at = [1, 21, 118];
+    let mut sum = 0;
+    for i in 0..100000000 {
+        sum += zarr.get(at0);
+        sum += zarr.get(at1);
+        sum += zarr.get(at2);
+        sum += zarr.get(at3);
+    }
+    let elapsed = start.elapsed();
+    println!(
+        "Value at {:?} sum: {} elapsed: {:?} per element: {:?}",
+        at,
+        sum,
+        &elapsed,
+        elapsed / 100000000 / 4,
+    );
 
     todo!()
 }
