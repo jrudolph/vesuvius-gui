@@ -5,3 +5,4 @@ pub mod downloader;
 pub mod gui;
 pub mod model;
 pub mod volume;
+pub mod zarr;

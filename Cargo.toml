@@ -6,6 +6,7 @@ rust-version = "1.70"
 
 [dependencies]
 base64        = { version = "0.22" }
+derive_more   = { version = "1", features = [ "debug" ] }
 directories   = { version = "5" }
 eframe        = { version = "0.28", default-features = false, features = [
     #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
@@ -21,6 +22,7 @@ image         = { version = "0.25", default-features=false, features = ["png","t
 itertools     = { version = "0.13" }
 libm          = { version = "0.2" }
 log           = { version = "0.4" }
+lz4-compression = "0.7.0"
 rayon         = { version = "1" }
 regex         = { version = "1", default-features=false, features = ["unicode-perl"] }
 ruzstd        = { version = "0.7" }
