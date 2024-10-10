@@ -129,22 +129,28 @@ pub struct BloscChunk<T> {
     phantom_t: std::marker::PhantomData<T>,
 }
 
-struct BlockCacheEntry {
-    block_idx: usize,
-    uncompressed: Vec<u8>,
-}
-
 struct BloscContext {
     chunk: Rc<BloscChunk<u8>>,
     cache: HashMap<usize, Vec<u8>>,
+    last_block_idx: usize,
+    last_entry: Option<Vec<u8>>,
 }
 impl BloscContext {
     fn get(&mut self, index: usize) -> u8 {
         let block_idx = index * self.chunk.header.typesize as usize / self.chunk.header.blocksize as usize;
         let idx = (index * self.chunk.header.typesize as usize) % self.chunk.header.blocksize as usize;
 
-        if self.cache.contains_key(&block_idx) {
-            self.cache.get_mut(&block_idx).unwrap()[idx]
+        if block_idx == self.last_block_idx {
+            self.last_entry.as_ref().unwrap()[idx]
+        } else if self.cache.contains_key(&block_idx) {
+            let block = self.cache.remove(&block_idx).unwrap();
+            if let Some(last_block) = self.last_entry.take() {
+                self.cache.insert(self.last_block_idx, last_block);
+            }
+            let res = block[idx];
+            self.last_block_idx = block_idx;
+            self.last_entry = Some(block);
+            res
         } else {
             let block_offset = self.chunk.offsets[block_idx] as usize;
             let block_compressed_length =
@@ -156,32 +162,6 @@ impl BloscContext {
 
             uncompressed[idx]
         }
-
-        /* if self.last_entry.as_ref().is_some_and(|e| e.block_idx == block_idx) {
-            return self.last_entry.as_ref().unwrap().uncompressed[idx];
-        } else {
-            let block_offset = self.chunk.offsets[block_idx] as usize;
-            let block_compressed_length =
-                u32::from_le_bytes(self.chunk.data[block_offset..block_offset + 4].try_into().unwrap()) as usize;
-            let block_compressed_data = &self.chunk.data[block_offset + 4..block_offset + block_compressed_length + 4];
-            /*
-            dbg!(
-                "Block: {:?} {:?} {:x} {}",
-                index,
-                idx,
-                block_idx,
-                block_offset,
-                block_compressed_length
-            ); */
-
-            let uncompressed = lz4_compression::decompress::decompress(&block_compressed_data).unwrap();
-            self.last_entry = Some(BlockCacheEntry {
-                block_idx,
-                uncompressed: uncompressed.clone(),
-            });
-
-            uncompressed[idx]
-        } */
     }
 }
 
@@ -190,6 +170,8 @@ impl BloscChunk<u8> {
         BloscContext {
             chunk: Rc::new(self),
             cache: HashMap::new(),
+            last_block_idx: usize::MAX,
+            last_entry: None,
         }
     }
     fn get(&self, index: usize) -> u8 {
@@ -273,6 +255,8 @@ impl<const N: usize> ZarrArray<N, u8> {
         ZarrContext {
             array: Rc::new(self),
             cache: HashMap::new(),
+            last_chunk_no: [usize::MAX; N],
+            last_context: None,
         }
     }
     fn get(&self, index: [usize; N]) -> u8 {
@@ -311,6 +295,8 @@ struct ZarrCacheEntry<const N: usize> {
 pub struct ZarrContext<const N: usize> {
     array: Rc<ZarrArray<N, u8>>,
     cache: HashMap<[usize; N], BloscContext>,
+    last_chunk_no: [usize; N],
+    last_context: Option<BloscContext>,
 }
 /* impl<const N: usize> ZarrContext<N> {
     fn get(&mut self, index: [usize; N]) -> u8 {
@@ -361,24 +347,28 @@ impl ZarrContext<3> {
         let idx = ((chunk_offset[0] * self.array.def.chunks[1]) + chunk_offset[1]) * self.array.def.chunks[2]
             + chunk_offset[2];
 
-        if self.cache.contains_key(&chunk_no) {
-            self.cache.get_mut(&chunk_no).unwrap().get(idx)
+        if chunk_no == self.last_chunk_no {
+            self.last_context.as_mut().unwrap().get(idx)
+        } else if self.cache.contains_key(&chunk_no) {
+            let mut last = self.cache.remove(&chunk_no).unwrap();
+            if let Some(last) = self.last_context.take() {
+                self.cache.insert(self.last_chunk_no, last);
+            }
+            let res = last.get(idx);
+            self.last_chunk_no = chunk_no;
+            self.last_context = Some(last);
+            res
         } else {
             let chunk = self.array.load_chunk(chunk_no);
             let mut ctx = chunk.into_ctx();
             let res = ctx.get(idx);
-            self.cache.insert(chunk_no, ctx);
+            if let Some(last) = self.last_context.take() {
+                self.cache.insert(self.last_chunk_no, last);
+            }
+            self.last_chunk_no = chunk_no;
+            self.last_context = Some(ctx);
             res
         }
-        /* if self.last_chunk_context.as_ref().is_some_and(|e| e.chunk_no == chunk_no) {
-            self.last_chunk_context.as_mut().unwrap().ctx.get(idx)
-        } else {
-            let chunk = self.array.load_chunk(chunk_no);
-            let mut ctx = chunk.into_ctx();
-            let res = ctx.get(idx);
-            self.last_chunk_context = Some(ZarrCacheEntry { chunk_no, ctx });
-            res
-        } */
     }
 }
 
