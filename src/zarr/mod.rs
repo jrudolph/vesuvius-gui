@@ -9,6 +9,7 @@ use std::{
     io::Write,
     ops::Index,
     rc::Rc,
+    sync::Mutex,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -570,11 +571,11 @@ pub struct ConnectedFullMapVolume {
     mmap: memmap::Mmap,
 }
 impl ConnectedFullMapVolume {
-    pub fn new() -> FullMapVolume {
+    pub fn new() -> ConnectedFullMapVolume {
         let file = File::open("/tmp/fiber-points-connected.map").unwrap();
         let map = unsafe { MmapOptions::new().map(&file) }.unwrap();
 
-        FullMapVolume { mmap: map }
+        ConnectedFullMapVolume { mmap: map }
     }
 }
 impl PaintVolume for ConnectedFullMapVolume {
@@ -592,6 +593,8 @@ impl PaintVolume for ConnectedFullMapVolume {
         buffer: &mut crate::volume::Image,
     ) {
         assert!(sfactor == 1);
+        //let mut color_idx = 0;
+        //let mut colors = HashMap::new();
         let fi32 = sfactor as f64;
 
         for im_u in 0..width {
@@ -614,13 +617,18 @@ impl PaintVolume for ConnectedFullMapVolume {
                 }
 
                 let idx = index_of(x as u16, y as u16, z as u16);
-                if self.mmap[idx * 2] != 0 {
-                    let v = self.mmap[idx * 2] as u16 | ((self.mmap[idx * 2 + 1] as u16) << 8);
-                    /* let color = match v {
+                if self.mmap[idx] > 1 {
+                    //let v = self.mmap[idx * 2] as u16 | ((self.mmap[idx * 2 + 1] as u16) << 8);
+                    let v = self.mmap[idx];
+                    /* let color = match v & 7 {
                         1 => Color32::RED,
                         2 => Color32::GREEN,
                         3 => Color32::YELLOW,
-                        _ => Color32::BLUE,
+                        4 => Color32::BLUE,
+                        5 => Color32::KHAKI,
+                        6 => Color32::DARK_RED,
+                        7 => Color32::GOLD,
+                        _ => panic!(),
                     }; */
                     fn from_hsb(h: f64, s: f64, b: f64) -> Color32 {
                         let h = h % 360.0;
@@ -644,7 +652,23 @@ impl PaintVolume for ConnectedFullMapVolume {
                         Color32::from_rgb(to_byte(r1), to_byte(g1), to_byte(b1))
                     }
                     //Color32::
-                    let color = from_hsb(((v % 50) as f64) / 50.0, 1.0, 1.0);
+                    let color_id = v % 60;
+                    let b = (color_id % 2) as f64 / 2.0 + 0.5;
+                    let h = (color_id / 2) as f64 / 30.0 * 360.0;
+                    let color = from_hsb(h, 1.0, b);
+                    /* let color = if let Some(color) = colors.get(&v) {
+                        *color
+                    } else {
+                        if colors.len() > 50 {
+                            Color32::WHITE
+                        } else {
+                            let color = from_hsb(((color_idx % 50) as f64) / 50.0 * 360.0, 1.0, 1.0);
+                            colors.insert(v, color);
+                            println!("Color {} is {:?}", v, color);
+                            color_idx += 1;
+                            color
+                        }
+                    }; */
                     buffer.set(im_u, im_v, color);
                 }
             }
@@ -652,7 +676,7 @@ impl PaintVolume for ConnectedFullMapVolume {
     }
 }
 
-fn connected_components(array: &ZarrContext<3>, full: &FullMapVolume) {
+fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
     let shape = array.array.def.shape.clone();
 
     let file = OpenOptions::new()
@@ -664,12 +688,17 @@ fn connected_components(array: &ZarrContext<3>, full: &FullMapVolume) {
 
     file.set_len(8192 * 8192 * 8192 * 2).unwrap();
     let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+    let mut read_map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
 
     //let mut id1 = 1u16;
     //let mut id2 = 3u16;
-    let mut id = 2u16;
+    let mut id = 2u8;
 
-    for z in 0..shape[0] as u16 {
+    let locked = Mutex::new((map, id));
+
+    use rayon::prelude::*;
+
+    (20..shape[0] as u16).into_par_iter().for_each(|z| {
         if z % 1 == 0 {
             //println!("z: {} id1: {} id2: {}", z, id1, id2);
             println!("z: {} id: {}", z, id);
@@ -679,8 +708,9 @@ fn connected_components(array: &ZarrContext<3>, full: &FullMapVolume) {
                 let idx = index_of(x, y, z);
                 //let idx = [z, y, x];
                 let v = full.mmap[idx];
+                //let v = array.get([z as usize, y as usize, x as usize]);
                 let mut count = 0;
-                if v != 0 && map[idx * 2] == 0 {
+                if v != 0 && read_map[idx] == 0 {
                     /* if v == 1 {
                         // keep even odd for horizontal / vertical
                         let res = id1;
@@ -702,6 +732,7 @@ fn connected_components(array: &ZarrContext<3>, full: &FullMapVolume) {
                     while let Some([x, y, z]) = work_list.pop() {
                         let next_idx = index_of(x, y, z);
                         let v2 = full.mmap[next_idx];
+                        //let v2 = array.get([z as usize, y as usize, x as usize]);
                         //println!("Checking at {:?}, found {}", [x, y, z], v2);
                         if v2 == v && !visited.contains(&next_idx) {
                             count += 1;
@@ -722,7 +753,7 @@ fn connected_components(array: &ZarrContext<3>, full: &FullMapVolume) {
                                         let x = x as i32 + dx;
                                         let y = y as i32 + dy;
                                         let z = z as i32 + dz;
-                                        if x >= 0 && y >= 0 && z >= 0 {
+                                        if x >= 0 && y >= 0 && z >= 20 {
                                             work_list.push([x as u16, y as u16, z as u16]);
                                         }
                                     }
@@ -734,30 +765,36 @@ fn connected_components(array: &ZarrContext<3>, full: &FullMapVolume) {
                         visited.insert(next_idx);
                     }
 
-                    let new_id = if visited.len() > 20000 {
-                        id += 1;
-                        if id & 0xff == 0 {
-                            id += 1;
+                    {
+                        let (map, id) = &mut *locked.lock().unwrap();
+                        let new_id = if visited.len() > 200000 {
+                            *id += 1;
+                            if *id & 0xff < 2 {
+                                *id += 1;
+                            }
+                            *id
+                        } else {
+                            1
+                        };
+
+                        for idx in visited.iter() {
+                            //map[idx * 2] = (new_id & 0xff) as u8;
+                            //map[idx * 2 + 1] = ((new_id & 0xff00) >> 8) as u8;
+                            map[*idx] = new_id;
                         }
-                        id
-                    } else {
-                        1
-                    };
 
-                    for idx in visited.iter() {
-                        map[idx * 2] = (new_id & 0xff) as u8;
-                        map[idx * 2 + 1] = ((new_id & 0xff00) >> 8) as u8;
+                        if new_id > 1 {
+                            println!(
+                                "new_id {} starting at {:4}/{:4}/{:4} had {} elements",
+                                new_id, x, y, z, count
+                            );
+                        }
                     }
-
-                    println!(
-                        "new_id {} starting at {:4}/{:4}/{:4} had {} elements",
-                        new_id, x, y, z, count
-                    );
                     //panic!();
                 }
             }
         }
-    }
+    });
 }
 
 fn write_points2(array: &mut ZarrContext<3>) -> SparsePointCloud {
@@ -803,7 +840,7 @@ pub fn test_zarr() {
 
     //write_points2(&mut zarr);
     let full = FullMapVolume::new();
-    connected_components(&zarr, &full);
+    connected_components(&mut zarr, &full);
 
     let at0 = [1, 21, 115];
     let at1 = [1, 21, 116];
