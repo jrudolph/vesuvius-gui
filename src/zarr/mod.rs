@@ -510,7 +510,7 @@ pub struct FullMapVolume {
 }
 impl FullMapVolume {
     pub fn new() -> FullMapVolume {
-        let file = File::open("/tmp/fiber-points.map").unwrap();
+        let file = File::open("data/fiber-points.map").unwrap();
         let map = unsafe { MmapOptions::new().map(&file) }.unwrap();
 
         FullMapVolume { mmap: map }
@@ -572,7 +572,7 @@ pub struct ConnectedFullMapVolume {
 }
 impl ConnectedFullMapVolume {
     pub fn new() -> ConnectedFullMapVolume {
-        let file = File::open("/tmp/fiber-points-connected.map").unwrap();
+        let file = File::open("data/fiber-points-connected.map").unwrap();
         let map = unsafe { MmapOptions::new().map(&file) }.unwrap();
 
         ConnectedFullMapVolume { mmap: map }
@@ -683,7 +683,7 @@ fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
         .read(true)
         .write(true)
         .create(true)
-        .open("/tmp/fiber-points-connected.map")
+        .open("data/fiber-points-connected.map")
         .unwrap();
 
     file.set_len(8192 * 8192 * 8192 * 2).unwrap();
