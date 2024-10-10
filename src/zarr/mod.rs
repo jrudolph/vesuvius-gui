@@ -4,7 +4,7 @@ use egui::Color32;
 use memmap::MmapOptions;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::Write,
     ops::Index,
@@ -566,6 +566,200 @@ impl PaintVolume for FullMapVolume {
     }
 }
 
+pub struct ConnectedFullMapVolume {
+    mmap: memmap::Mmap,
+}
+impl ConnectedFullMapVolume {
+    pub fn new() -> FullMapVolume {
+        let file = File::open("/tmp/fiber-points-connected.map").unwrap();
+        let map = unsafe { MmapOptions::new().map(&file) }.unwrap();
+
+        FullMapVolume { mmap: map }
+    }
+}
+impl PaintVolume for ConnectedFullMapVolume {
+    fn paint(
+        &mut self,
+        xyz: [i32; 3],
+        u_coord: usize,
+        v_coord: usize,
+        plane_coord: usize,
+        width: usize,
+        height: usize,
+        sfactor: u8,
+        paint_zoom: u8,
+        _config: &crate::volume::DrawingConfig,
+        buffer: &mut crate::volume::Image,
+    ) {
+        assert!(sfactor == 1);
+        let fi32 = sfactor as f64;
+
+        for im_u in 0..width {
+            for im_v in 0..height {
+                let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32;
+                let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32;
+
+                let mut uvw: [f64; 3] = [0.; 3];
+                uvw[u_coord] = (xyz[u_coord] + im_rel_u) as f64 / fi32;
+                uvw[v_coord] = (xyz[v_coord] + im_rel_v) as f64 / fi32;
+                uvw[plane_coord] = (xyz[plane_coord]) as f64 / fi32;
+
+                // x1961:5393 , y2135:5280, z7000:11249
+                let x = -1961.0 + uvw[0];
+                let y = -2135.0 + uvw[1];
+                let z = -7000.0 + uvw[2];
+
+                if x < 0.0 || y < 0.0 || z < 0.0 {
+                    continue;
+                }
+
+                let idx = index_of(x as u16, y as u16, z as u16);
+                if self.mmap[idx * 2] != 0 {
+                    let v = self.mmap[idx * 2] as u16 | ((self.mmap[idx * 2 + 1] as u16) << 8);
+                    /* let color = match v {
+                        1 => Color32::RED,
+                        2 => Color32::GREEN,
+                        3 => Color32::YELLOW,
+                        _ => Color32::BLUE,
+                    }; */
+                    fn from_hsb(h: f64, s: f64, b: f64) -> Color32 {
+                        let h = h % 360.0;
+                        let s = s.clamp(0.0, 1.0);
+                        let b = b.clamp(0.0, 1.0);
+
+                        let c = b * s;
+                        let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+                        let m = b - c;
+
+                        let (r1, g1, b1) = match (h / 60.0) as u32 {
+                            0 => (c, x, 0.0),
+                            1 => (x, c, 0.0),
+                            2 => (0.0, c, x),
+                            3 => (0.0, x, c),
+                            4 => (x, 0.0, c),
+                            _ => (c, 0.0, x),
+                        };
+
+                        let to_byte = |v: f64| ((v + m) * 255.0).round() as u8;
+                        Color32::from_rgb(to_byte(r1), to_byte(g1), to_byte(b1))
+                    }
+                    //Color32::
+                    let color = from_hsb(((v % 50) as f64) / 50.0, 1.0, 1.0);
+                    buffer.set(im_u, im_v, color);
+                }
+            }
+        }
+    }
+}
+
+fn connected_components(array: &ZarrContext<3>, full: &FullMapVolume) {
+    let shape = array.array.def.shape.clone();
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("/tmp/fiber-points-connected.map")
+        .unwrap();
+
+    file.set_len(8192 * 8192 * 8192 * 2).unwrap();
+    let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+
+    //let mut id1 = 1u16;
+    //let mut id2 = 3u16;
+    let mut id = 2u16;
+
+    for z in 0..shape[0] as u16 {
+        if z % 1 == 0 {
+            //println!("z: {} id1: {} id2: {}", z, id1, id2);
+            println!("z: {} id: {}", z, id);
+        }
+        for y in 0..shape[1] as u16 {
+            for x in 0..shape[2] as u16 {
+                let idx = index_of(x, y, z);
+                //let idx = [z, y, x];
+                let v = full.mmap[idx];
+                let mut count = 0;
+                if v != 0 && map[idx * 2] == 0 {
+                    /* if v == 1 {
+                        // keep even odd for horizontal / vertical
+                        let res = id1;
+                        id1 += 4;
+                        res
+                    } else {
+                        let res = id2;
+                        id2 += 4;
+                        res
+                    }; */
+                    //assert!(new_id > 2);
+
+                    //println!("Found a value of {} at {:?}", v, [x, y, z]);
+
+                    // flood current zone with fill_id
+                    let mut work_list = vec![[x, y, z]];
+                    let mut visited = HashSet::new();
+
+                    while let Some([x, y, z]) = work_list.pop() {
+                        let next_idx = index_of(x, y, z);
+                        let v2 = full.mmap[next_idx];
+                        //println!("Checking at {:?}, found {}", [x, y, z], v2);
+                        if v2 == v && !visited.contains(&next_idx) {
+                            count += 1;
+
+                            /* if count % 1000000 == 0 {
+                                println!(
+                                    "new_id {} with value {} had {} elements (at x: {:4} y: {:4} z: {:4}",
+                                    new_id, v, count, x, y, z
+                                );
+                            } */
+
+                            const MAX_DIST: i32 = 1;
+                            // add neighbors to work_list
+                            // for now just consider neighbors that share a full face of the voxel cube
+                            for dx in -1..=MAX_DIST {
+                                for dy in -1..=MAX_DIST {
+                                    for dz in -1..=MAX_DIST {
+                                        let x = x as i32 + dx;
+                                        let y = y as i32 + dy;
+                                        let z = z as i32 + dz;
+                                        if x >= 0 && y >= 0 && z >= 0 {
+                                            work_list.push([x as u16, y as u16, z as u16]);
+                                        }
+                                    }
+                                }
+                            }
+                            //println!("Worklist now has {} elements", work_list.len());
+                        }
+
+                        visited.insert(next_idx);
+                    }
+
+                    let new_id = if visited.len() > 20000 {
+                        id += 1;
+                        if id & 0xff == 0 {
+                            id += 1;
+                        }
+                        id
+                    } else {
+                        1
+                    };
+
+                    for idx in visited.iter() {
+                        map[idx * 2] = (new_id & 0xff) as u8;
+                        map[idx * 2 + 1] = ((new_id & 0xff00) >> 8) as u8;
+                    }
+
+                    println!(
+                        "new_id {} starting at {:4}/{:4}/{:4} had {} elements",
+                        new_id, x, y, z, count
+                    );
+                    //panic!();
+                }
+            }
+        }
+    }
+}
+
 fn write_points2(array: &mut ZarrContext<3>) -> SparsePointCloud {
     let shape = array.array.def.shape.clone();
 
@@ -607,7 +801,9 @@ pub fn test_zarr() {
         ZarrArray::from_path("/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr");
     let mut zarr = zarr.into_ctx();
 
-    write_points2(&mut zarr);
+    //write_points2(&mut zarr);
+    let full = FullMapVolume::new();
+    connected_components(&zarr, &full);
 
     let at0 = [1, 21, 115];
     let at1 = [1, 21, 116];

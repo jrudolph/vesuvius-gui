@@ -9,6 +9,7 @@ use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
+use crate::zarr::ConnectedFullMapVolume;
 use crate::zarr::FullMapVolume;
 use crate::zarr::ZarrArray;
 use crate::zarr::ZarrContext;
@@ -232,7 +233,8 @@ impl TemplateApp {
         app.overlay = Some({
             //let zarr: ZarrArray<3, u8> = ZarrArray::from_path("/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr");
             //Box::new(zarr.into_ctx())
-            Box::new(FullMapVolume::new())
+            Box::new(ConnectedFullMapVolume::new())
+            //Box::new(FullMapVolume::new())
         });
 
         app
