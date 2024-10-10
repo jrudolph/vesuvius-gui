@@ -9,6 +9,7 @@ use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
+use crate::zarr::FullMapVolume;
 use crate::zarr::ZarrArray;
 use crate::zarr::ZarrContext;
 use directories::BaseDirs;
@@ -131,7 +132,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     notification_receiver: Receiver<UINotification>,
     #[serde(skip)]
-    zarr_overlay: Option<ZarrContext<3>>,
+    overlay: Option<Box<dyn PaintVolume>>,
 }
 
 impl Default for TemplateApp {
@@ -167,7 +168,7 @@ impl Default for TemplateApp {
             downloading_segment: None,
             notification_sender,
             notification_receiver,
-            zarr_overlay: None,
+            overlay: None,
         }
     }
 }
@@ -228,10 +229,10 @@ impl TemplateApp {
             app.setup_segment(&segment_file, 1000, 1000);
         }
 
-        app.zarr_overlay = Some({
-            let zarr: ZarrArray<3, u8> =
-                ZarrArray::from_path("/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr");
-            zarr.into_ctx()
+        app.overlay = Some({
+            //let zarr: ZarrArray<3, u8> = ZarrArray::from_path("/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr");
+            //Box::new(zarr.into_ctx())
+            Box::new(FullMapVolume::new())
         });
 
         app
@@ -485,7 +486,7 @@ impl TemplateApp {
         if !segment_pane
         /* && d_coord == 2 */
         {
-            if let Some(zarr) = self.zarr_overlay.as_mut() {
+            if let Some(zarr) = self.overlay.as_mut() {
                 zarr.paint(
                     coords,
                     u_coord,

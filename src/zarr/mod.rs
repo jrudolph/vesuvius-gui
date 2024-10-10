@@ -3,7 +3,13 @@ use derive_more::Debug;
 use egui::Color32;
 use memmap::MmapOptions;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs::File, ops::Index, rc::Rc};
+use std::{
+    collections::HashMap,
+    fs::{File, OpenOptions},
+    io::Write,
+    ops::Index,
+    rc::Rc,
+};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum ZarrDataType {
@@ -129,11 +135,16 @@ pub struct BloscChunk<T> {
     phantom_t: std::marker::PhantomData<T>,
 }
 
+struct BloscBlock {
+    id: u16, // FIXME
+    data: Vec<u8>,
+}
+
 struct BloscContext {
     chunk: Rc<BloscChunk<u8>>,
-    cache: HashMap<usize, Vec<u8>>,
+    cache: HashMap<usize, BloscBlock>,
     last_block_idx: usize,
-    last_entry: Option<Vec<u8>>,
+    last_entry: Option<BloscBlock>,
 }
 impl BloscContext {
     fn get(&mut self, index: usize) -> u8 {
@@ -141,26 +152,35 @@ impl BloscContext {
         let idx = (index * self.chunk.header.typesize as usize) % self.chunk.header.blocksize as usize;
 
         if block_idx == self.last_block_idx {
-            self.last_entry.as_ref().unwrap()[idx]
+            self.last_entry.as_ref().unwrap().data[idx]
         } else if self.cache.contains_key(&block_idx) {
             let block = self.cache.remove(&block_idx).unwrap();
             if let Some(last_block) = self.last_entry.take() {
                 self.cache.insert(self.last_block_idx, last_block);
             }
-            let res = block[idx];
+            let res = block.data[idx];
             self.last_block_idx = block_idx;
             self.last_entry = Some(block);
             res
         } else {
+            if self.cache.len() > 20 {
+                self.cache.clear();
+            }
+
             let block_offset = self.chunk.offsets[block_idx] as usize;
             let block_compressed_length =
                 u32::from_le_bytes(self.chunk.data[block_offset..block_offset + 4].try_into().unwrap()) as usize;
             let block_compressed_data = &self.chunk.data[block_offset + 4..block_offset + block_compressed_length + 4];
 
             let uncompressed = lz4_compression::decompress::decompress(&block_compressed_data).unwrap();
-            self.cache.insert(block_idx, uncompressed.clone());
+            let res = uncompressed[idx];
+            let block = BloscBlock {
+                id: block_idx as u16,
+                data: uncompressed,
+            };
+            self.cache.insert(block_idx, block);
 
-            uncompressed[idx]
+            res
         }
     }
 }
@@ -423,11 +443,171 @@ impl PaintVolume for ZarrContext<3> {
     }
 }
 
+struct SparsePointCloud {
+    points: HashMap<[u16; 3], u8>,
+}
+fn write_points(array: &mut ZarrContext<3>) -> SparsePointCloud {
+    // write all points out into a simple binary file
+
+    let file1 = File::create("fiber-points-1.raw").unwrap();
+    let file2 = File::create("fiber-points-2.raw").unwrap();
+    let mut writer1 = std::io::BufWriter::new(file1);
+    let mut writer2 = std::io::BufWriter::new(file2);
+
+    fn write(writer: &mut std::io::BufWriter<std::fs::File>, x: usize, y: usize, z: usize) {
+        writer.write((x as u16).to_le_bytes().as_ref()).unwrap();
+        writer.write((y as u16).to_le_bytes().as_ref()).unwrap();
+        writer.write((z as u16).to_le_bytes().as_ref()).unwrap();
+    }
+
+    let shape = array.array.def.shape.clone();
+    let mut count: u64 = 0;
+    for z in 0..shape[0] {
+        if z % 1 == 0 {
+            println!("z: {} count: {}", z, count);
+        }
+        for y in 0..shape[1] {
+            for x in 0..shape[2] {
+                let idx = [z, y, x];
+                let v = array.get(idx);
+                if v != 0 {
+                    count += 1;
+                    if v == 1 {
+                        write(&mut writer1, x, y, z);
+                    } else {
+                        write(&mut writer2, x, y, z);
+                    }
+                }
+            }
+        }
+    }
+    println!("Count: {}", count);
+
+    todo!() //SparsePointCloud {  }
+}
+
+fn index_of(x: u16, y: u16, z: u16) -> usize {
+    let x = x as usize;
+    let y = y as usize;
+    let z = z as usize;
+
+    // use z-ordering
+    // instead of zzzzzzzzzzzzzzzzyyyyyyyyyyyyyyyyxxxxxxxxxxxxxxxx use
+    //            zzzzzzzzyyyyyyyyxxxxxxxxzzzzyyyyxxxxzzzzyyyyxxxx
+
+    // 4x4x4 => 4x4x4 =>
+
+    let page = ((z & 0x1f00) << 2) | ((y & 0x1f00) >> 3) | ((x & 0x1f00) >> 8);
+    let line = ((z & 0xf0) << 4) | (y & 0xf0) | ((x & 0xf0) >> 4);
+    let addr = ((z & 0xf) << 8) | ((y & 0xf) << 4) | (x & 0xf);
+
+    (page << 24) | (line << 12) | addr
+}
+
+pub struct FullMapVolume {
+    mmap: memmap::Mmap,
+}
+impl FullMapVolume {
+    pub fn new() -> FullMapVolume {
+        let file = File::open("/tmp/fiber-points.map").unwrap();
+        let map = unsafe { MmapOptions::new().map(&file) }.unwrap();
+
+        FullMapVolume { mmap: map }
+    }
+}
+impl PaintVolume for FullMapVolume {
+    fn paint(
+        &mut self,
+        xyz: [i32; 3],
+        u_coord: usize,
+        v_coord: usize,
+        plane_coord: usize,
+        width: usize,
+        height: usize,
+        sfactor: u8,
+        paint_zoom: u8,
+        _config: &crate::volume::DrawingConfig,
+        buffer: &mut crate::volume::Image,
+    ) {
+        assert!(sfactor == 1);
+        let fi32 = sfactor as f64;
+
+        for im_u in 0..width {
+            for im_v in 0..height {
+                let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32;
+                let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32;
+
+                let mut uvw: [f64; 3] = [0.; 3];
+                uvw[u_coord] = (xyz[u_coord] + im_rel_u) as f64 / fi32;
+                uvw[v_coord] = (xyz[v_coord] + im_rel_v) as f64 / fi32;
+                uvw[plane_coord] = (xyz[plane_coord]) as f64 / fi32;
+
+                // x1961:5393 , y2135:5280, z7000:11249
+                let x = -1961.0 + uvw[0];
+                let y = -2135.0 + uvw[1];
+                let z = -7000.0 + uvw[2];
+
+                if x < 0.0 || y < 0.0 || z < 0.0 {
+                    continue;
+                }
+
+                let v = self.mmap[index_of(x as u16, y as u16, z as u16)];
+                if v != 0 {
+                    let color = match v {
+                        1 => Color32::RED,
+                        2 => Color32::GREEN,
+                        3 => Color32::YELLOW,
+                        _ => Color32::BLUE,
+                    };
+                    buffer.set(im_u, im_v, color);
+                }
+            }
+        }
+    }
+}
+
+fn write_points2(array: &mut ZarrContext<3>) -> SparsePointCloud {
+    let shape = array.array.def.shape.clone();
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("/tmp/fiber-points.map")
+        .unwrap();
+
+    file.set_len(8192 * 8192 * 8192).unwrap();
+    let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+
+    let mut count: u64 = 0;
+    for z in 0..shape[0] {
+        if z % 1 == 0 {
+            println!("z: {} count: {}", z, count);
+        }
+        for y in 0..shape[1] {
+            for x in 0..shape[2] {
+                let idx = [z, y, x];
+                let v = array.get(idx);
+                if v != 0 {
+                    let idx = index_of(x as u16, y as u16, z as u16); //(z * shape[1] + y) * shape[2] + x;
+                    map[idx] = v;
+                    count += 1;
+                }
+            }
+        }
+    }
+    println!("Count: {}", count);
+
+    todo!() //SparsePointCloud {  }
+}
+
 #[test]
 pub fn test_zarr() {
     let zarr: ZarrArray<3, u8> =
         ZarrArray::from_path("/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr");
     let mut zarr = zarr.into_ctx();
+
+    write_points2(&mut zarr);
 
     let at0 = [1, 21, 115];
     let at1 = [1, 21, 116];
