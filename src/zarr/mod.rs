@@ -492,7 +492,6 @@ fn index_of(x: u16, y: u16, z: u16) -> usize {
     let y = y as usize;
     let z = z as usize;
 
-    // use z-ordering
     // instead of zzzzzzzzzzzzzzzzyyyyyyyyyyyyyyyyxxxxxxxxxxxxxxxx use
     //            zzzzzzzzyyyyyyyyxxxxxxxxzzzzyyyyxxxxzzzzyyyyxxxx
 
@@ -747,7 +746,16 @@ fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
                             const MAX_DIST: i32 = 1;
                             // add neighbors to work_list
                             // for now just consider neighbors that share a full face of the voxel cube
-                            for dx in -1..=MAX_DIST {
+                            work_list.push([x as u16 - 1, y as u16, z as u16]);
+                            work_list.push([x as u16 + 1, y as u16, z as u16]);
+
+                            work_list.push([x as u16, y as u16 - 1, z as u16]);
+                            work_list.push([x as u16, y as u16 + 1, z as u16]);
+
+                            work_list.push([x as u16, y as u16, z as u16 - 1]);
+                            work_list.push([x as u16, y as u16, z as u16 + 1]);
+
+                            /* for dx in -1..=MAX_DIST {
                                 for dy in -1..=MAX_DIST {
                                     for dz in -1..=MAX_DIST {
                                         let x = x as i32 + dx;
@@ -758,7 +766,7 @@ fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
                                         }
                                     }
                                 }
-                            }
+                            } */
                             //println!("Worklist now has {} elements", work_list.len());
                         }
 
