@@ -233,8 +233,8 @@ impl TemplateApp {
         app.overlay = Some({
             //let zarr: ZarrArray<3, u8> = ZarrArray::from_path("/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr");
             //Box::new(zarr.into_ctx())
-            Box::new(ConnectedFullMapVolume::new())
-            //Box::new(FullMapVolume::new())
+            //Box::new(ConnectedFullMapVolume::new())
+            Box::new(FullMapVolume::new())
         });
 
         app

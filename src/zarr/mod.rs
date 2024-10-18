@@ -9,7 +9,10 @@ use std::{
     io::Write,
     ops::Index,
     rc::Rc,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Mutex,
+    },
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -692,16 +695,20 @@ fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
     //let mut id1 = 1u16;
     //let mut id2 = 3u16;
     let mut id = 2u8;
+    let mut global_id = 1u32;
 
-    let locked = Mutex::new((map, id));
+    let locked = Mutex::new((map, id, global_id));
 
     use rayon::prelude::*;
 
+    let z_completed = AtomicU32::new(0);
+
     (20..shape[0] as u16).into_par_iter().for_each(|z| {
-        if z % 1 == 0 {
-            //println!("z: {} id1: {} id2: {}", z, id1, id2);
-            println!("z: {} id: {}", z, id);
-        }
+        let mut work_list = vec![];
+        let mut visited = HashSet::new();
+        let mut selected = vec![];
+        let mut selected_coords = vec![];
+
         for y in 0..shape[1] as u16 {
             for x in 0..shape[2] as u16 {
                 let idx = index_of(x, y, z);
@@ -725,8 +732,11 @@ fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
                     //println!("Found a value of {} at {:?}", v, [x, y, z]);
 
                     // flood current zone with fill_id
-                    let mut work_list = vec![[x, y, z]];
-                    let mut visited = HashSet::new();
+                    work_list.clear();
+                    work_list.push([x, y, z]);
+                    visited.clear();
+                    selected.clear();
+                    selected_coords.clear();
 
                     while let Some([x, y, z]) = work_list.pop() {
                         let next_idx = index_of(x, y, z);
@@ -734,6 +744,32 @@ fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
                         //let v2 = array.get([z as usize, y as usize, x as usize]);
                         //println!("Checking at {:?}, found {}", [x, y, z], v2);
                         if v2 == v && !visited.contains(&next_idx) {
+                            // do erosion check
+                            /* const MAX_DIST: i32 = 5;
+
+                            fn is_inner(full: &FullMapVolume, x: u16, y: u16, z: u16, v: u8) -> bool {
+                                for dx in -MAX_DIST..=MAX_DIST {
+                                    for dy in -MAX_DIST..=MAX_DIST {
+                                        for dz in -MAX_DIST..=MAX_DIST {
+                                            let x = x as i32 + dx;
+                                            let y = y as i32 + dy;
+                                            let z = z as i32 + dz;
+
+                                            if x >= 0
+                                                && y >= 0
+                                                && z >= 0
+                                                && !full.mmap[index_of(x as u16, y as u16, z as u16)] == v
+                                            {
+                                                return false;
+                                            }
+                                        }
+                                    }
+                                }
+                                true
+                            }
+                            if is_inner(full, x, y, z, v) { */
+                            selected.push(next_idx);
+                            selected_coords.push([x, y, z]);
                             count += 1;
 
                             /* if count % 1000000 == 0 {
@@ -743,7 +779,6 @@ fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
                                 );
                             } */
 
-                            const MAX_DIST: i32 = 1;
                             // add neighbors to work_list
                             // for now just consider neighbors that share a full face of the voxel cube
                             work_list.push([x as u16 - 1, y as u16, z as u16]);
@@ -768,39 +803,74 @@ fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
                                 }
                             } */
                             //println!("Worklist now has {} elements", work_list.len());
+                            //}
                         }
 
                         visited.insert(next_idx);
                     }
 
-                    {
-                        let (map, id) = &mut *locked.lock().unwrap();
-                        let new_id = if visited.len() > 200000 {
-                            *id += 1;
-                            if *id & 0xff < 2 {
+                    let this_global = {
+                        let (map, id, global_id) = &mut *locked.lock().unwrap();
+                        if map[selected[0]] == 0 {
+                            let new_id = if selected.len() > 200000 {
                                 *id += 1;
+                                if *id & 0xff < 2 {
+                                    *id += 1;
+                                }
+                                *id
+                            } else {
+                                1
+                            };
+
+                            for idx in selected.iter() {
+                                //map[idx * 2] = (new_id & 0xff) as u8;
+                                //map[idx * 2 + 1] = ((new_id & 0xff00) >> 8) as u8;
+                                map[*idx] = new_id;
                             }
-                            *id
+
+                            let this_global = if selected.len() > 200000 {
+                                *global_id += 1;
+                                *global_id
+                            } else {
+                                1
+                            };
+
+                            if new_id > 1 {
+                                println!(
+                                    "new_id {} / {} starting at {:4}/{:4}/{:4} had {} elements",
+                                    new_id, this_global, x, y, z, count
+                                );
+                            }
+
+                            this_global
                         } else {
-                            1
-                        };
-
-                        for idx in visited.iter() {
-                            //map[idx * 2] = (new_id & 0xff) as u8;
-                            //map[idx * 2 + 1] = ((new_id & 0xff00) >> 8) as u8;
-                            map[*idx] = new_id;
-                        }
-
-                        if new_id > 1 {
                             println!(
-                                "new_id {} starting at {:4}/{:4}/{:4} had {} elements",
-                                new_id, x, y, z, count
+                                "Skipping at {}/{}/{} because already set to {}",
+                                x, y, z, map[selected[0]]
                             );
+                            1
+                        }
+                    };
+
+                    if this_global != 1 {
+                        let file_name = format!("data/connected/{}.raw", this_global);
+                        let file = OpenOptions::new().write(true).create(true).open(file_name).unwrap();
+
+                        let mut writer = std::io::BufWriter::new(file);
+
+                        for [x, y, z] in selected_coords.iter() {
+                            writer.write((*x).to_le_bytes().as_ref()).unwrap();
+                            writer.write((*y).to_le_bytes().as_ref()).unwrap();
+                            writer.write((*z).to_le_bytes().as_ref()).unwrap();
                         }
                     }
-                    //panic!();
                 }
             }
+        }
+        let completed = z_completed.fetch_add(1, Ordering::Relaxed);
+        if z % 1 == 0 {
+            //println!("z: {} id1: {} id2: {}", z, id1, id2);
+            println!("z: {} id: {} completed: {}", z, id, completed);
         }
     });
 }
