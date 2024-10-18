@@ -956,7 +956,7 @@ impl TemplateApp {
                                         }
 
                                         row.col(|ui| {
-                                            let cached = self.obj_repository.is_cached(&segment.id);
+                                            let cached = self.obj_repository.is_cached(segment);
                                             let mut text = RichText::new(&segment.id);
                                             if cached {
                                                 text = text.color(Color32::DARK_GREEN);

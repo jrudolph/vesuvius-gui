@@ -7,20 +7,34 @@ use std::{
     sync::mpsc::{Receiver, Sender},
 };
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SegmentId {
+    pub scroll_id: String,
+    pub segment_id: String,
+}
+impl From<&Segment> for SegmentId {
+    fn from(segment: &Segment) -> Self {
+        Self {
+            scroll_id: segment.scroll.id.clone(),
+            segment_id: segment.id.clone(),
+        }
+    }
+}
+
 pub struct ObjRepository {
-    cached_objs: HashSet<String>, // by segment id
-    download_notifier: Receiver<String>,
-    download_notify_sender: Sender<String>,
+    cached_objs: HashSet<SegmentId>, // by segment id
+    download_notifier: Receiver<SegmentId>,
+    download_notify_sender: Sender<SegmentId>,
 }
 impl ObjRepository {
     pub fn new(catalog: &Catalog) -> Self {
-        let mut cached_objs = HashSet::new();
+        let mut cached_objs: HashSet<SegmentId> = HashSet::new();
 
         for s in catalog.scrolls.iter() {
             for seg in catalog.segments_by_scroll.get(s).unwrap() {
                 let file = Self::file_for(seg);
                 if file.exists() {
-                    cached_objs.insert(seg.id.clone());
+                    cached_objs.insert(seg.into());
                 }
             }
         }
@@ -33,12 +47,12 @@ impl ObjRepository {
         }
     }
 
-    pub fn is_cached(&mut self, id: &str) -> bool {
+    pub fn is_cached(&mut self, segment: &Segment) -> bool {
         self.handle_notifications();
-        self.cached_objs.contains(id)
+        self.cached_objs.contains(&segment.into())
     }
     pub fn get(&mut self, segment: &Segment) -> Option<PathBuf> {
-        if self.is_cached(&segment.id) {
+        if self.is_cached(segment) {
             Some(Self::file_for(segment))
         } else {
             None
@@ -62,7 +76,7 @@ impl ObjRepository {
                 let bytes = response.bytes;
                 println!("Downloaded {} bytes", bytes.len());
                 std::io::copy(&mut Cursor::new(bytes), &mut file).unwrap();
-                let _ = sender.send(s.id.clone()); // ignore result
+                let _ = sender.send((&s).into()); // ignore result
                 on_done(s);
             }
         });
