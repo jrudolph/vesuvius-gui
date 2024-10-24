@@ -227,15 +227,14 @@ impl TemplateApp {
         }
 
         if let Some(segment_file) = segment_file {
-            app.setup_segment(&segment_file, 1000, 1000);
+            //app.setup_segment(&segment_file, 1000, 1000);
+            app.overlay = Some({
+                let zarr: ZarrArray<3, u8> = ZarrArray::from_path(&segment_file);
+                Box::new(zarr.into_ctx())
+                //Box::new(ConnectedFullMapVolume::new())
+                //Box::new(FullMapVolume::new())
+            });
         }
-
-        app.overlay = Some({
-            //let zarr: ZarrArray<3, u8> = ZarrArray::from_path("/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr");
-            //Box::new(zarr.into_ctx())
-            //Box::new(ConnectedFullMapVolume::new())
-            Box::new(FullMapVolume::new())
-        });
 
         app
     }

@@ -167,7 +167,7 @@ impl BloscContext {
             self.last_entry = Some(block);
             res
         } else {
-            if self.cache.len() > 20 {
+            if self.cache.len() > 10000 {
                 self.cache.clear();
             }
 
