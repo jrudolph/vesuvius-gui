@@ -1,18 +1,13 @@
-use crate::{
-    volume::{PaintVolume, VoxelVolume},
-    zstd_decompress,
-};
+use crate::{volume::PaintVolume, zstd_decompress};
 use derive_more::Debug;
 use egui::Color32;
 use memmap::MmapOptions;
 use serde::{Deserialize, Serialize};
 use std::{
-    cell::RefCell,
     collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::Write,
-    ops::{Deref, DerefMut, Index},
-    rc::Rc,
+    ops::{Deref, DerefMut},
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc, Mutex,
@@ -102,6 +97,7 @@ pub enum BloscCompressor {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct BloscHeader {
     version: u8,
     version_lz: u8,
@@ -154,6 +150,7 @@ pub struct BloscChunk<T> {
     phantom_t: std::marker::PhantomData<T>,
 }
 
+#[allow(dead_code)]
 struct BloscBlock {
     id: u16, // FIXME
     data: Vec<u8>,
@@ -296,6 +293,7 @@ impl<const N: usize> ZarrArray<N, u8> {
         let cache = Arc::new(Mutex::new(ZarrContextCache::new(&self.def)));
         ZarrContextBase { array: self, cache }
     }
+    #[allow(dead_code)]
     fn get(&self, index: [usize; N]) -> u8 {
         let chunk_no = index
             .iter()
@@ -324,11 +322,6 @@ impl<const N: usize> ZarrArray<N, u8> {
             0
         }
     }
-}
-
-struct ZarrCacheEntry<const N: usize> {
-    chunk_no: [usize; N],
-    ctx: BloscContext,
 }
 
 pub struct ZarrContextBase<const N: usize> {
@@ -449,7 +442,6 @@ impl ZarrContext<3> {
     fn get_from_cache(&mut self, chunk_no: [usize; 3], idx: usize) -> u8 {
         let mut access = self.cache.lock().unwrap();
         access.access_counter += 1;
-        let counter = access.access_counter;
 
         if let Some(last) = self.last_context.take() {
             let entry = access.entry(last);
@@ -467,7 +459,7 @@ impl ZarrContext<3> {
             if entry.is_some() {
                 access.non_empty_entries -= 1;
             }
-            let res = if let Some(mut entry) = entry.as_mut() {
+            let res = if let Some(entry) = entry.as_mut() {
                 let res = entry.get(idx);
                 res
             } else {
@@ -541,9 +533,11 @@ impl PaintVolume for ZarrContext<3> {
     }
 }
 
+#[allow(dead_code)]
 struct SparsePointCloud {
     points: HashMap<[u16; 3], u8>,
 }
+#[allow(dead_code)]
 fn write_points(array: &mut ZarrContext<3>) -> SparsePointCloud {
     // write all points out into a simple binary file
 
@@ -772,6 +766,7 @@ impl PaintVolume for ConnectedFullMapVolume {
     }
 }
 
+#[allow(dead_code)]
 fn connected_components(array: &ZarrContextBase<3> /* , full: &FullMapVolume */) {
     let shape = array.array.def.shape.clone();
 
@@ -783,13 +778,13 @@ fn connected_components(array: &ZarrContextBase<3> /* , full: &FullMapVolume */)
         .unwrap();
 
     file.set_len(8192 * 8192 * 8192 * 2).unwrap();
-    let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
-    let mut read_map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+    let map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+    let read_map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
 
     //let mut id1 = 1u16;
     //let mut id2 = 3u16;
-    let mut id = 2u8;
-    let mut global_id = 1u32;
+    let id = 2u8;
+    let global_id = 1u32;
 
     let locked = Mutex::new((map, id, global_id));
 
@@ -970,6 +965,7 @@ fn connected_components(array: &ZarrContextBase<3> /* , full: &FullMapVolume */)
     });
 }
 
+#[allow(dead_code)]
 fn write_points2(array: &mut ZarrContext<3>) -> SparsePointCloud {
     let shape = array.array.def.shape.clone();
 
