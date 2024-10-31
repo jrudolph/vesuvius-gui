@@ -1,17 +1,21 @@
-use crate::volume::{PaintVolume, VoxelVolume};
+use crate::{
+    volume::{PaintVolume, VoxelVolume},
+    zstd_decompress,
+};
 use derive_more::Debug;
 use egui::Color32;
 use memmap::MmapOptions;
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::Write,
-    ops::Index,
+    ops::{Deref, DerefMut, Index},
     rc::Rc,
     sync::{
         atomic::{AtomicU32, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
 };
 
@@ -39,6 +43,8 @@ enum ZarrOrder {
 enum ZarrCompressionName {
     #[serde(rename = "lz4")]
     Lz4,
+    #[serde(rename = "zstd")]
+    Zstd,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -59,35 +65,6 @@ struct ZarrCompressor {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ZarrFilters {}
-
-/*
-{
-    "chunks": [
-        500,
-        500,
-        500
-    ],
-    "compressor": {
-        "blocksize": 0,
-        "clevel": 5,
-        "cname": "lz4",
-        "id": "blosc",
-        "shuffle": 1
-    },
-    "dtype": "|u1",
-    "fill_value": 0,
-    "filters": null,
-    "order": "C",
-    "shape": [
-        4251,
-        3145,
-        3432
-    ],
-    "zarr_format": 2
-}%
-
-*/
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ZarrArrayDef {
     chunks: Vec<usize>,
@@ -98,12 +75,30 @@ struct ZarrArrayDef {
     order: ZarrOrder,
     shape: Vec<usize>,
     zarr_format: u8,
+    dimension_separator: Option<String>,
 }
 
+#[derive(Debug, Clone)]
 pub struct ZarrArray<const N: usize, T> {
     path: String,
     def: ZarrArrayDef,
     phantom_t: std::marker::PhantomData<T>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BloscShuffle {
+    None,
+    Bit,
+    Byte,
+}
+
+#[derive(Debug, Clone)]
+pub enum BloscCompressor {
+    Blosclz,
+    Lz4,
+    Snappy,
+    Zlib,
+    Zstd,
 }
 
 #[derive(Debug, Clone)]
@@ -115,17 +110,37 @@ struct BloscHeader {
     nbytes: usize,
     blocksize: usize,
     cbytes: usize,
+    shuffle: BloscShuffle,
+    compressor: BloscCompressor,
 }
 impl BloscHeader {
     fn from_bytes(bytes: &[u8]) -> Self {
+        let flags = bytes[2];
+        let shuffle = match flags & 0x7 {
+            0 | 1 => BloscShuffle::None,
+            2 => BloscShuffle::Byte,
+            4 => BloscShuffle::Bit,
+            x => panic!("Invalid shuffle value {x}"),
+        };
+        let compressor = match flags >> 5 {
+            0 => BloscCompressor::Blosclz,
+            1 => BloscCompressor::Lz4,
+            2 => BloscCompressor::Snappy,
+            3 => BloscCompressor::Zlib,
+            4 => BloscCompressor::Zstd,
+            x => panic!("Invalid compressor value {x}"),
+        };
+
         BloscHeader {
             version: bytes[0],
             version_lz: bytes[1],
-            flags: bytes[2],
+            flags,
             typesize: bytes[3] as usize,
             nbytes: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize,
             blocksize: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize,
             cbytes: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize,
+            shuffle,
+            compressor,
         }
     }
 }
@@ -145,7 +160,7 @@ struct BloscBlock {
 }
 
 struct BloscContext {
-    chunk: Rc<BloscChunk<u8>>,
+    chunk: BloscChunk<u8>,
     cache: HashMap<usize, BloscBlock>,
     last_block_idx: usize,
     last_entry: Option<BloscBlock>,
@@ -167,16 +182,11 @@ impl BloscContext {
             self.last_entry = Some(block);
             res
         } else {
-            if self.cache.len() > 10000 {
+            if self.cache.len() > 1000 {
                 self.cache.clear();
             }
 
-            let block_offset = self.chunk.offsets[block_idx] as usize;
-            let block_compressed_length =
-                u32::from_le_bytes(self.chunk.data[block_offset..block_offset + 4].try_into().unwrap()) as usize;
-            let block_compressed_data = &self.chunk.data[block_offset + 4..block_offset + block_compressed_length + 4];
-
-            let uncompressed = lz4_compression::decompress::decompress(&block_compressed_data).unwrap();
+            let uncompressed = self.chunk.decompress(block_idx);
             let res = uncompressed[idx];
             let block = BloscBlock {
                 id: block_idx as u16,
@@ -190,41 +200,8 @@ impl BloscContext {
 }
 
 impl BloscChunk<u8> {
-    fn into_ctx(self) -> BloscContext {
-        BloscContext {
-            chunk: Rc::new(self),
-            cache: HashMap::new(),
-            last_block_idx: usize::MAX,
-            last_entry: None,
-        }
-    }
-    fn get(&self, index: usize) -> u8 {
-        let block_idx = index * self.header.typesize as usize / self.header.blocksize as usize;
-        let idx = (index * self.header.typesize as usize) % self.header.blocksize as usize;
-        let block_offset = self.offsets[block_idx] as usize;
-        let block_compressed_length =
-            u32::from_le_bytes(self.data[block_offset..block_offset + 4].try_into().unwrap()) as usize;
-        let block_compressed_data = &self.data[block_offset + 4..block_offset + block_compressed_length + 4];
-
-        dbg!(
-            "Block: {:?} {:?} {:x} {}",
-            index,
-            idx,
-            block_idx,
-            block_offset,
-            block_compressed_length
-        );
-
-        let uncompressed = lz4_compression::decompress::decompress(&block_compressed_data).unwrap();
-
-        uncompressed[idx]
-    }
-}
-
-impl<const N: usize, T> ZarrArray<N, T> {
-    fn load_chunk(&self, chunk_no: [usize; N]) -> BloscChunk<T> {
-        let chunk_path = self.chunk_path(chunk_no);
-        let file = File::open(chunk_path.clone()).unwrap();
+    fn load(file: &str) -> Self {
+        let file = File::open(file).unwrap();
         let chunk = unsafe { MmapOptions::new().map(&file) }.unwrap();
 
         // parse 16 byte blosc header
@@ -246,17 +223,57 @@ impl<const N: usize, T> ZarrArray<N, T> {
             phantom_t: std::marker::PhantomData,
         }
     }
+    fn into_ctx(self) -> BloscContext {
+        BloscContext {
+            chunk: self,
+            cache: HashMap::new(),
+            last_block_idx: usize::MAX,
+            last_entry: None,
+        }
+    }
+    fn get(&self, index: usize) -> u8 {
+        let block_idx = index * self.header.typesize as usize / self.header.blocksize as usize;
+        let idx = (index * self.header.typesize as usize) % self.header.blocksize as usize;
 
+        self.decompress(block_idx)[idx]
+    }
+    fn decompress(&self, block_idx: usize) -> Vec<u8> {
+        let block_offset = self.offsets[block_idx] as usize;
+        let block_compressed_length =
+            u32::from_le_bytes(self.data[block_offset..block_offset + 4].try_into().unwrap()) as usize;
+        let block_compressed_data = &self.data[block_offset + 4..block_offset + block_compressed_length + 4];
+
+        match self.header.compressor {
+            BloscCompressor::Lz4 => lz4_compression::decompress::decompress(&block_compressed_data).unwrap(),
+            BloscCompressor::Zstd => zstd_decompress(block_compressed_data),
+            _ => todo!(),
+        }
+    }
+}
+
+impl<const N: usize, T> ZarrArray<N, T> {
     fn chunk_path(&self, chunk_no: [usize; N]) -> String {
         format!(
             "{}/{}",
             self.path,
-            chunk_no.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(".")
+            chunk_no
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(self.def.dimension_separator.as_deref().unwrap_or("."))
         )
     }
 }
 
 impl<const N: usize> ZarrArray<N, u8> {
+    fn load_chunk(&self, chunk_no: [usize; N]) -> Option<BloscChunk<u8>> {
+        let chunk_path = self.chunk_path(chunk_no);
+        if !std::path::Path::new(&chunk_path).exists() {
+            None
+        } else {
+            Some(BloscChunk::load(&chunk_path))
+        }
+    }
     pub fn from_path(path: &str) -> Self {
         // read and parse path/.zarray into ZarrArrayDef
 
@@ -275,13 +292,9 @@ impl<const N: usize> ZarrArray<N, u8> {
         }
     }
 
-    pub fn into_ctx(self) -> ZarrContext<N> {
-        ZarrContext {
-            array: Rc::new(self),
-            cache: HashMap::new(),
-            last_chunk_no: [usize::MAX; N],
-            last_context: None,
-        }
+    pub fn into_ctx(self) -> ZarrContextBase<N> {
+        let cache = Arc::new(Mutex::new(ZarrContextCache::new(&self.def)));
+        ZarrContextBase { array: self, cache }
     }
     fn get(&self, index: [usize; N]) -> u8 {
         let chunk_no = index
@@ -298,16 +311,18 @@ impl<const N: usize> ZarrArray<N, u8> {
             .map(|(i, c)| i % c)
             .collect::<Vec<_>>();
 
-        let chunk = self.load_chunk(chunk_no);
-
-        println!("Chunk: {:?}", chunk);
-        let idx = chunk_offset
-            .iter()
-            .zip(self.def.chunks.iter())
-            //.rev() // FIXME: only if row-major
-            .fold(0, |acc, (i, c)| acc * c + i);
-        println!("Index for {:?}: {:?}", chunk_offset, idx);
-        chunk.get(idx)
+        if let Some(chunk) = self.load_chunk(chunk_no) {
+            println!("Chunk: {:?}", chunk);
+            let idx = chunk_offset
+                .iter()
+                .zip(self.def.chunks.iter())
+                //.rev() // FIXME: only if row-major
+                .fold(0, |acc, (i, c)| acc * c + i);
+            println!("Index for {:?}: {:?}", chunk_offset, idx);
+            chunk.get(idx)
+        } else {
+            0
+        }
     }
 }
 
@@ -316,45 +331,86 @@ struct ZarrCacheEntry<const N: usize> {
     ctx: BloscContext,
 }
 
-pub struct ZarrContext<const N: usize> {
-    array: Rc<ZarrArray<N, u8>>,
-    cache: HashMap<[usize; N], BloscContext>,
-    last_chunk_no: [usize; N],
-    last_context: Option<BloscContext>,
+pub struct ZarrContextBase<const N: usize> {
+    array: ZarrArray<N, u8>,
+    cache: Arc<Mutex<ZarrContextCache<N>>>,
 }
-/* impl<const N: usize> ZarrContext<N> {
-    fn get(&mut self, index: [usize; N]) -> u8 {
-        let chunk_no = index
-            .iter()
-            .zip(self.array.def.chunks.iter())
-            .map(|(i, c)| i / c)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-
-        let chunk_offset = index
-            .iter()
-            .zip(self.array.def.chunks.iter())
-            .map(|(i, c)| i % c)
-            .collect::<Vec<_>>();
-
-        let idx = chunk_offset
-            .iter()
-            .zip(self.array.def.chunks.iter())
-            //.rev() // FIXME: only if row-major
-            .fold(0, |acc, (i, c)| acc * c + i);
-
-        if self.last_chunk_context.as_ref().is_some_and(|e| e.chunk_no == chunk_no) {
-            self.last_chunk_context.as_mut().unwrap().ctx.get(idx)
-        } else {
-            let chunk = self.array.load_chunk(chunk_no);
-            let mut ctx = chunk.into_ctx();
-            let res = ctx.get(idx);
-            self.last_chunk_context = Some(ZarrCacheEntry { chunk_no, ctx });
-            res
+impl<const N: usize> ZarrContextBase<N> {
+    pub fn into_ctx(&self) -> ZarrContext<N> {
+        ZarrContext {
+            array: self.array.clone(),
+            cache: self.cache.clone(),
+            last_chunk_no: [usize::MAX; N],
+            last_context: None,
         }
     }
-} */
+}
+
+struct ZarrContextCacheEntry {
+    ctx: BloscContext,
+    last_access: u64,
+}
+impl Deref for ZarrContextCacheEntry {
+    type Target = BloscContext;
+    fn deref(&self) -> &Self::Target { &self.ctx }
+}
+impl DerefMut for ZarrContextCacheEntry {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.ctx }
+}
+
+struct ZarrContextCache<const N: usize> {
+    cache: HashMap<[usize; N], Option<ZarrContextCacheEntry>>,
+    access_counter: u64,
+    non_empty_entries: usize,
+    max_entries: usize,
+}
+impl<const N: usize> ZarrContextCache<N> {
+    fn new(def: &ZarrArrayDef) -> Self {
+        ZarrContextCache {
+            cache: HashMap::new(),
+            access_counter: 0,
+            non_empty_entries: 0,
+            max_entries: 2000000000 / def.chunks.iter().product::<usize>(),
+        }
+    }
+    fn entry(&self, ctx: Option<BloscContext>) -> Option<ZarrContextCacheEntry> {
+        ctx.map(|ctx| ZarrContextCacheEntry {
+            ctx,
+            last_access: self.access_counter,
+        })
+    }
+    fn cleanup(&mut self) {
+        if self.non_empty_entries > self.max_entries {
+            // FIXME: make configurable
+            // purge oldest n% of entries
+            let mut entries = self
+                .cache
+                .iter()
+                .filter_map(|(k, e)| e.as_ref().map(|e| (*k, e.last_access)))
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|(_, e)| *e);
+            let n = (self.non_empty_entries as f64 * 0.2) as usize; // FIXME: make configurable
+            let before = self.non_empty_entries;
+            let sorted_entries_len = entries.len();
+            for (k, _) in entries.into_iter().take(n) {
+                if self.cache.remove(&k).is_some() {
+                    self.non_empty_entries -= 1;
+                }
+            }
+            println!(
+                "Purged {} entries {} from {} (sorted: {})",
+                n, self.non_empty_entries, before, sorted_entries_len
+            );
+        }
+    }
+}
+
+pub struct ZarrContext<const N: usize> {
+    array: ZarrArray<N, u8>,
+    cache: Arc<Mutex<ZarrContextCache<N>>>,
+    last_chunk_no: [usize; N],
+    last_context: Option<Option<BloscContext>>,
+}
 
 impl ZarrContext<3> {
     fn get(&mut self, index: [usize; 3]) -> u8 {
@@ -364,34 +420,75 @@ impl ZarrContext<3> {
         {
             return 0;
         }
-        let chunk_no = [index[0] / 500, index[1] / 500, index[2] / 500];
-        let chunk_offset = [index[0] % 500, index[1] % 500, index[2] % 500];
+        let chunk_no = [
+            index[0] / self.array.def.chunks[0],
+            index[1] / self.array.def.chunks[1],
+            index[2] / self.array.def.chunks[2],
+        ];
+        let chunk_offset = [
+            index[0] % self.array.def.chunks[0],
+            index[1] % self.array.def.chunks[1],
+            index[2] % self.array.def.chunks[2],
+        ];
 
-        //let idx = chunk_offset[0] * 500 * 500 + chunk_offset[1] * 500 + chunk_offset[2];
         let idx = ((chunk_offset[0] * self.array.def.chunks[1]) + chunk_offset[1]) * self.array.def.chunks[2]
             + chunk_offset[2];
 
+        // fast path
         if chunk_no == self.last_chunk_no {
-            self.last_context.as_mut().unwrap().get(idx)
-        } else if self.cache.contains_key(&chunk_no) {
-            let mut last = self.cache.remove(&chunk_no).unwrap();
-            if let Some(last) = self.last_context.take() {
-                self.cache.insert(self.last_chunk_no, last);
+            if let Some(last) = self.last_context.as_mut().unwrap() {
+                last.get(idx)
+            } else {
+                0
             }
-            let res = last.get(idx);
+        } else {
+            // slow path goes through mutex
+            self.get_from_cache(chunk_no, idx)
+        }
+    }
+    fn get_from_cache(&mut self, chunk_no: [usize; 3], idx: usize) -> u8 {
+        let mut access = self.cache.lock().unwrap();
+        access.access_counter += 1;
+        let counter = access.access_counter;
+
+        if let Some(last) = self.last_context.take() {
+            let entry = access.entry(last);
+            if entry.is_some() {
+                access.non_empty_entries += 1;
+            }
+            access.cache.insert(self.last_chunk_no, entry);
+        }
+
+        access.cleanup();
+        let cache = &mut access.cache;
+
+        if cache.contains_key(&chunk_no) {
+            let mut entry = cache.remove(&chunk_no).unwrap();
+            if entry.is_some() {
+                access.non_empty_entries -= 1;
+            }
+            let res = if let Some(mut entry) = entry.as_mut() {
+                let res = entry.get(idx);
+                res
+            } else {
+                // chunk wasn't found on disk
+                0
+            };
             self.last_chunk_no = chunk_no;
-            self.last_context = Some(last);
+            self.last_context = Some(entry.map(|e| e.ctx));
             res
         } else {
-            let chunk = self.array.load_chunk(chunk_no);
-            let mut ctx = chunk.into_ctx();
-            let res = ctx.get(idx);
-            if let Some(last) = self.last_context.take() {
-                self.cache.insert(self.last_chunk_no, last);
+            if let Some(chunk) = self.array.load_chunk(chunk_no) {
+                let mut ctx = chunk.into_ctx();
+                let res = ctx.get(idx);
+                self.last_chunk_no = chunk_no;
+                self.last_context = Some(Some(ctx));
+                res
+            } else {
+                self.last_chunk_no = chunk_no;
+                self.last_context = Some(None);
+                0
             }
-            self.last_chunk_no = chunk_no;
-            self.last_context = Some(ctx);
-            res
         }
     }
 }
@@ -423,10 +520,7 @@ impl PaintVolume for ZarrContext<3> {
                 uvw[v_coord] = (xyz[v_coord] + im_rel_v) as f64 / fi32;
                 uvw[plane_coord] = (xyz[plane_coord]) as f64 / fi32;
 
-                // x1961:5393 , y2135:5280, z7000:11249
-                let x = -1961.0 + uvw[0];
-                let y = -2135.0 + uvw[1];
-                let z = -7000.0 + uvw[2];
+                let [x, y, z] = uvw;
 
                 if x < 0.0 || y < 0.0 || z < 0.0 {
                     continue;
@@ -610,9 +704,9 @@ impl PaintVolume for ConnectedFullMapVolume {
                 uvw[plane_coord] = (xyz[plane_coord]) as f64 / fi32;
 
                 // x1961:5393 , y2135:5280, z7000:11249
-                let x = -1961.0 + uvw[0];
-                let y = -2135.0 + uvw[1];
-                let z = -7000.0 + uvw[2];
+                let x = /* -1961.0 + */ uvw[0];
+                let y = /* -2135.0 + */ uvw[1];
+                let z = /* -7000.0 + */ uvw[2];
 
                 if x < 0.0 || y < 0.0 || z < 0.0 {
                     continue;
@@ -678,7 +772,7 @@ impl PaintVolume for ConnectedFullMapVolume {
     }
 }
 
-fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
+fn connected_components(array: &ZarrContextBase<3> /* , full: &FullMapVolume */) {
     let shape = array.array.def.shape.clone();
 
     let file = OpenOptions::new()
@@ -704,6 +798,7 @@ fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
     let z_completed = AtomicU32::new(0);
 
     (20..shape[0] as u16).into_par_iter().for_each(|z| {
+        let mut array = array.into_ctx();
         let mut work_list = vec![];
         let mut visited = HashSet::new();
         let mut selected = vec![];
@@ -713,8 +808,8 @@ fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
             for x in 0..shape[2] as u16 {
                 let idx = index_of(x, y, z);
                 //let idx = [z, y, x];
-                let v = full.mmap[idx];
-                //let v = array.get([z as usize, y as usize, x as usize]);
+                //let v = full.mmap[idx];
+                let v = array.get([z as usize, y as usize, x as usize]);
                 let mut count = 0;
                 if v != 0 && read_map[idx] == 0 {
                     /* if v == 1 {
@@ -740,8 +835,8 @@ fn connected_components(array: &mut ZarrContext<3>, full: &FullMapVolume) {
 
                     while let Some([x, y, z]) = work_list.pop() {
                         let next_idx = index_of(x, y, z);
-                        let v2 = full.mmap[next_idx];
-                        //let v2 = array.get([z as usize, y as usize, x as usize]);
+                        //let v2 = full.mmap[next_idx];
+                        let v2 = array.get([z as usize, y as usize, x as usize]);
                         //println!("Checking at {:?}, found {}", [x, y, z], v2);
                         if v2 == v && !visited.contains(&next_idx) {
                             // do erosion check
@@ -885,7 +980,7 @@ fn write_points2(array: &mut ZarrContext<3>) -> SparsePointCloud {
         .open("/tmp/fiber-points.map")
         .unwrap();
 
-    file.set_len(8192 * 8192 * 8192).unwrap();
+    file.set_len(8192 * 8192 * 16384).unwrap();
     let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
 
     let mut count: u64 = 0;
@@ -912,14 +1007,15 @@ fn write_points2(array: &mut ZarrContext<3>) -> SparsePointCloud {
 
 #[test]
 pub fn test_zarr() {
-    let zarr: ZarrArray<3, u8> =
-        ZarrArray::from_path("/home/johannes/tmp/pap/fiber-predictions/7000_11249_predictions.zarr");
+    let zarr: ZarrArray<3, u8> = ZarrArray::from_path("/home/johannes/tmp/pap/bruniss/mask-fiber-only_rescaled.zarr");
     let mut zarr = zarr.into_ctx();
+    //write_points2(&mut zarr);
 
     //write_points2(&mut zarr);
-    let full = FullMapVolume::new();
-    connected_components(&mut zarr, &full);
+    //let full = FullMapVolume::new();
+    connected_components(&mut zarr /* , &full */);
 
+    let mut zarr = zarr.into_ctx();
     let at0 = [1, 21, 115];
     let at1 = [1, 21, 116];
     let at2 = [1, 21, 117];
@@ -995,3 +1091,22 @@ b4 02 69 00 cbytes = 0x6902b4 = 6881972
 
 
 */
+
+#[test]
+fn test_scroll1_zarr() {
+    let file = "/tmp/25";
+    let mut chunk = BloscChunk::<u8>::load(file).into_ctx();
+    println!("Chunk: {:?}", chunk.chunk.header);
+    let v0 = chunk.get(1000);
+    println!("Value at 1000: {:?}", v0);
+
+    let mut buf = vec![0; 131072];
+    for i in 0..131072 {
+        buf[i] = chunk.get(i);
+    }
+    // write to file
+    let file = "/tmp/25-block0.raw";
+    let file = File::create(file).unwrap();
+    let mut writer = std::io::BufWriter::new(file);
+    writer.write(&buf).unwrap();
+}
