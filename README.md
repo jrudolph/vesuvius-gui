@@ -66,10 +66,10 @@ Options:
           Override the data directory. By default, a directory in the user's cache is used
   -o, --overlay <OVERLAY>
           A directory that contains data to overlay. Only zarr arrays are currently supported
+  -v, --volume <VOLUME>
+          The id of a volume to open
   -h, --help
           Print help
-  -V, --version
-          Print version
 ```
 
 ## Data License

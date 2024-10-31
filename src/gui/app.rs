@@ -86,6 +86,7 @@ enum UINotification {
 pub struct VesuviusConfig {
     pub data_dir: Option<String>,
     pub overlay_dir: Option<String>,
+    pub volume: Option<&'static dyn VolumeReference>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -215,6 +216,13 @@ impl TemplateApp {
             let name = p.file_name().unwrap().to_str().unwrap_or("");
             regex::Regex::new(r"(\d{5})\.tif").unwrap().captures(name).is_some()
         });
+
+        if let Some(volume) = config.volume {
+            app.volume_id = <dyn VolumeReference>::VOLUMES
+                .iter()
+                .position(|v| v.id() == volume.id())
+                .unwrap();
+        }
 
         if contains_cell_files {
             app.mode = Mode::Cells;
