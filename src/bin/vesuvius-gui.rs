@@ -36,7 +36,7 @@ impl TryFrom<Args> for VesuviusConfig {
                     .join("\n")
             ));
         }
-        let v = v.unwrap();
+        let v = v.map(|x| x.unwrap());
         let volume = v
             .clone()
             .map(|vol| <dyn VolumeReference>::VOLUMES.iter().find(|v| v.id() == vol).cloned());
