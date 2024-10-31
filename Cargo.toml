@@ -5,33 +5,33 @@ edition = "2021"
 rust-version = "1.70"
 
 [dependencies]
-base64        = { version = "0.22" }
-derive_more   = { version = "1", features = [ "debug" ] }
-directories   = { version = "5" }
-eframe        = { version = "0.28", default-features = false, features = [
+base64          = { version = "0.22" }
+derive_more     = { version = "1", features = [ "debug" ] }
+directories     = { version = "5" }
+eframe          = { version = "0.28", default-features = false, features = [
     #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     #"default_fonts", # Embed the default egui fonts.
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
     "persistence",   # Enable restoring app state when restarting the app.
 ] }
-egui          = { version = "0.28" }
-egui_extras   = { version = "0.28", features = [ "all_loaders" ] }
-ehttp         = { version = "0.5" }
-emath         = { version = "0.28"}
-image         = { version = "0.25", default-features=false, features = ["png","tiff"] }
-itertools     = { version = "0.13" }
-libm          = { version = "0.2" }
-log           = { version = "0.4" }
-lz4-compression = "0.7.0"
-rayon         = { version = "1" }
-regex         = { version = "1", default-features=false, features = ["unicode-perl"] }
-ruzstd        = { version = "0.7" }
-serde         = { version = "1", features = ["derive"] }
-serde_json    = { version = "1" }
-tiff          = { version = "0.9" }
-wavefront_obj = { version = "10.0" }
+egui            = { version = "0.28" }
+egui_extras     = { version = "0.28", features = [ "all_loaders" ] }
+ehttp           = { version = "0.5" }
+emath           = { version = "0.28"}
+image           = { version = "0.25", default-features=false, features = ["png","tiff"] }
+itertools       = { version = "0.13" }
+libm            = { version = "0.2" }
+log             = { version = "0.4" }
+lz4-compression = { version = "0.7" }
+rayon           = { version = "1" }
+regex           = { version = "1", default-features=false, features = ["unicode-perl"] }
+ruzstd          = { version = "0.7" }
+serde           = { version = "1", features = ["derive"] }
+serde_json      = { version = "1" }
+tiff            = { version = "0.9" }
+wavefront_obj   = { version = "10.0" }
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = { version = "0.11", default-features = false, features = [] }
-memmap = "0.7"
+memmap     = { version = "0.7" }
