@@ -6,6 +6,7 @@ rust-version = "1.70"
 
 [dependencies]
 base64          = { version = "0.22" }
+clap            = { version = "4.4", features = [ "derive" ] }
 derive_more     = { version = "1", features = [ "debug" ] }
 directories     = { version = "5" }
 eframe          = { version = "0.28", default-features = false, features = [

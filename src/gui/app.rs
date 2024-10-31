@@ -83,6 +83,11 @@ enum UINotification {
     ObjDownloadReady(Segment),
 }
 
+pub struct VesuviusConfig {
+    pub data_dir: Option<String>,
+    pub overlay_dir: Option<String>,
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TemplateApp {
@@ -179,12 +184,7 @@ impl TemplateApp {
     //const TILE_SERVER: &'static str = "http://localhost:8095";
 
     /// Called once before the first frame.
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        catalog: Catalog,
-        data_dir: Option<String>,
-        segment_file: Option<String>,
-    ) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, catalog: Catalog, config: VesuviusConfig) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
         let mut app: TemplateApp = if let Some(storage) = cc.storage {
@@ -194,7 +194,7 @@ impl TemplateApp {
         };
         app.obj_repository = ObjRepository::new(&catalog);
         app.catalog = catalog;
-        if let Some(dir) = data_dir {
+        if let Some(dir) = config.data_dir {
             app.data_dir = dir;
         } else {
             let dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
@@ -226,7 +226,7 @@ impl TemplateApp {
             app.select_volume(app.volume_id);
         }
 
-        if let Some(segment_file) = segment_file {
+        if let Some(segment_file) = config.overlay_dir {
             if segment_file.ends_with(".zarr") {
                 app.overlay = Some({
                     let zarr: ZarrArray<3, u8> = ZarrArray::from_path(&segment_file);
