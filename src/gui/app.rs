@@ -9,6 +9,10 @@ use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
+use crate::zarr::ConnectedFullMapVolume;
+use crate::zarr::FullMapVolume;
+use crate::zarr::ZarrArray;
+use crate::zarr::ZarrContext;
 use directories::BaseDirs;
 use egui::Color32;
 use egui::Label;
@@ -79,6 +83,11 @@ enum UINotification {
     ObjDownloadReady(Segment),
 }
 
+pub struct VesuviusConfig {
+    pub data_dir: Option<String>,
+    pub overlay_dir: Option<String>,
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TemplateApp {
@@ -128,6 +137,8 @@ pub struct TemplateApp {
     notification_sender: Sender<UINotification>,
     #[serde(skip)]
     notification_receiver: Receiver<UINotification>,
+    #[serde(skip)]
+    overlay: Option<Box<dyn PaintVolume>>,
 }
 
 impl Default for TemplateApp {
@@ -163,6 +174,7 @@ impl Default for TemplateApp {
             downloading_segment: None,
             notification_sender,
             notification_receiver,
+            overlay: None,
         }
     }
 }
@@ -172,12 +184,7 @@ impl TemplateApp {
     //const TILE_SERVER: &'static str = "http://localhost:8095";
 
     /// Called once before the first frame.
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        catalog: Catalog,
-        data_dir: Option<String>,
-        segment_file: Option<String>,
-    ) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, catalog: Catalog, config: VesuviusConfig) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
         let mut app: TemplateApp = if let Some(storage) = cc.storage {
@@ -187,7 +194,7 @@ impl TemplateApp {
         };
         app.obj_repository = ObjRepository::new(&catalog);
         app.catalog = catalog;
-        if let Some(dir) = data_dir {
+        if let Some(dir) = config.data_dir {
             app.data_dir = dir;
         } else {
             let dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
@@ -219,8 +226,15 @@ impl TemplateApp {
             app.select_volume(app.volume_id);
         }
 
-        if let Some(segment_file) = segment_file {
-            app.setup_segment(&segment_file, 1000, 1000);
+        if let Some(segment_file) = config.overlay_dir {
+            if segment_file.ends_with(".zarr") {
+                app.overlay = Some({
+                    let zarr: ZarrArray<3, u8> = ZarrArray::from_path(&segment_file);
+                    Box::new(zarr.into_ctx().into_ctx())
+                    //Box::new(ConnectedFullMapVolume::new())
+                    //Box::new(FullMapVolume::new())
+                });
+            }
         }
 
         app
@@ -469,6 +483,25 @@ impl TemplateApp {
                 &self.drawing_config,
                 &mut image,
             );
+        }
+
+        if !segment_pane
+        /* && d_coord == 2 */
+        {
+            if let Some(zarr) = self.overlay.as_mut() {
+                zarr.paint(
+                    coords,
+                    u_coord,
+                    v_coord,
+                    d_coord,
+                    width,
+                    height,
+                    1,
+                    paint_zoom,
+                    &self.drawing_config,
+                    &mut image,
+                );
+            }
         }
 
         if self.is_segment_mode() && !segment_pane && self.segment_mode.as_ref().unwrap().show_segment_outlines {

@@ -1,13 +1,12 @@
 pub mod obj_repository;
 
-use crate::model::{DynamicFullVolumeReference, VolumeReference};
+use crate::{
+    model::{DynamicFullVolumeReference, VolumeReference},
+    zstd_decompress,
+};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    io::Cursor,
-    io::Read,
-};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
@@ -95,11 +94,7 @@ impl Catalog {
 
 pub fn load_segments() -> Vec<Segment> {
     let zst_compressed = include_bytes!("../../vesuvius-segments-2024-09-26.json.zst");
-    let mut uncompressed = Vec::new();
-    ruzstd::StreamingDecoder::new(Cursor::new(zst_compressed))
-        .unwrap()
-        .read_to_end(&mut uncompressed)
-        .unwrap();
+    let uncompressed = zstd_decompress(zst_compressed);
 
     // interpret as utf8
     let json = String::from_utf8(uncompressed).unwrap();

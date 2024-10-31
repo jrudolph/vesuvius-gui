@@ -52,18 +52,25 @@ Install required X11 libraries:
 
 When run without any arguments, the app will download the volume data from the tiles server and cache them in a local directory (below the OS-specific cache directory).
 
-### Specifying a data directory:
+### Specifying options:
 
-Run the app with `./vesuvius-gui <optional-path-to-ppm> <optional-path-to-data-directory>`.
+Use the `--help` flag to see all available options:
 
-If you pass a path to a ppm file, the app will use that to calculate a surface volume on the fly from the data in the ppm file. This is currently limited to Scroll 1 automatically.
+```
+Vesuvius GUI, an app to visualize and explore 3D data of the Vesuvius Challenge (https://scrollprize.org)
 
-Alternatively, you can provide a path to a directory containing volume grid files of the format `cell_yxz_`. In that case, the app will
-only show local data without attempting to download from the blocks server.
+Usage: vesuvius-gui [OPTIONS]
 
-To run directly from sources run `cargo run --release -- <optional-path-to-ppm> <optional-path-to-data-directory>`.
-
-Proper argument parsing is planned for the next release.
+Options:
+  -d, --data-directory <DATA_DIRECTORY>
+          Override the data directory. By default, a directory in the user's cache is used
+  -o, --overlay <OVERLAY>
+          A directory that contains data to overlay. Only zarr arrays are currently supported
+  -h, --help
+          Print help
+  -V, --version
+          Print version
+```
 
 ## Data License
 
