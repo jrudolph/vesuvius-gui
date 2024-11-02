@@ -65,6 +65,7 @@ jobs:
       - name: Build archive
         shell: bash
         run: |
+          ls -lash target/${{ matrix.target }}/release
           suffix="${{ env.VERSION }}-${{ matrix.target }}"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             ext=".exe"
@@ -76,9 +77,15 @@ jobs:
           echo "ASSET1=vesuvius-gui-$suffix$ext" >> $GITHUB_ENV
           echo "ASSET2=vesuvius-render-$suffix$ext" >> $GITHUB_ENV
 
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mv "target/${{ matrix.target }}/release/vesuvius_gui.pdb" vesuvius_gui-$suffix.pdb
+            echo "ASSET3=vesuvius_gui-$suffix.pdb" >> $GITHUB_ENV
+          fi
+
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             ${{ env.ASSET1 }}
             ${{ env.ASSET2 }}
+            ${{ env.ASSET3 }}
