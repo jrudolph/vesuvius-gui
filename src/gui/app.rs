@@ -80,8 +80,15 @@ enum UINotification {
     ObjDownloadReady(Segment),
 }
 
+pub struct ObjFileConfig {
+    pub obj_file: String,
+    pub width: usize,
+    pub height: usize,
+}
+
 pub struct VesuviusConfig {
     pub data_dir: Option<String>,
+    pub obj_file: Option<ObjFileConfig>,
     pub overlay_dir: Option<String>,
     pub volume: Option<&'static dyn VolumeReference>,
 }
@@ -229,6 +236,15 @@ impl TemplateApp {
             app.load_from_layers();
         } else {
             app.select_volume(app.volume_id);
+        }
+
+        if let Some(ObjFileConfig {
+            obj_file,
+            width,
+            height,
+        }) = config.obj_file
+        {
+            app.setup_segment(&obj_file, width, height);
         }
 
         if let Some(segment_file) = config.overlay_dir {

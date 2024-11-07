@@ -64,9 +64,15 @@ Usage: vesuvius-gui [OPTIONS]
 Options:
   -d, --data-directory <DATA_DIRECTORY>
           Override the data directory. By default, a directory in the user's cache is used
+      --obj <OBJ>
+          Browse segment from obj file. You need to also provide --width and --height. Provide the --volume if the segment does not target Scroll 1a / 20230205180739
+      --width <WIDTH>
+          Width of the segment file when browsing obj files
+      --height <HEIGHT>
+          Height of the segment file when browsing obj files
   -o, --overlay <OVERLAY>
           A directory that contains data to overlay. Only zarr arrays are currently supported
-  -v, --volume <VOLUME>
+  -v, --volume [<VOLUME>]
           The id of a volume to open
   -h, --help
           Print help

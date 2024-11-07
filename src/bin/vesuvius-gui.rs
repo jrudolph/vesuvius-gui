@@ -1,5 +1,5 @@
 use vesuvius_gui::catalog::load_catalog;
-use vesuvius_gui::gui::{TemplateApp, VesuviusConfig};
+use vesuvius_gui::gui::{ObjFileConfig, TemplateApp, VesuviusConfig};
 
 use clap::Parser;
 use vesuvius_gui::model::VolumeReference;
@@ -11,6 +11,17 @@ pub struct Args {
     /// Override the data directory. By default, a directory in the user's cache is used
     #[clap(short, long)]
     data_directory: Option<String>,
+
+    /// Browse segment from obj file. You need to also provide --width and --height. Provide the --volume if the segment does not target Scroll 1a / 20230205180739
+    #[clap(long)]
+    obj: Option<String>,
+
+    /// Width of the segment file when browsing obj files
+    #[clap(long)]
+    width: Option<usize>,
+    /// Height of the segment file when browsing obj files
+    #[clap(long)]
+    height: Option<usize>,
 
     /// A directory that contains data to overlay. Only zarr arrays are currently supported
     #[clap(short, long)]
@@ -52,8 +63,24 @@ impl TryFrom<Args> for VesuviusConfig {
                     .join("\n")
             ));
         }
+
+        let obj_file = if let Some(obj_file) = args.obj {
+            if let (Some(width), Some(height)) = (args.width, args.height) {
+                Some(ObjFileConfig {
+                    obj_file,
+                    width,
+                    height,
+                })
+            } else {
+                return Err("Error: You need to provide --width and --height when using --obj".to_string());
+            }
+        } else {
+            None
+        };
+
         Ok(VesuviusConfig {
             data_dir: args.data_directory,
+            obj_file,
             overlay_dir: args.overlay,
             volume: volume.map(|x| x.unwrap()),
         })

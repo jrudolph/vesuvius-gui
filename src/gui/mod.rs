@@ -1,3 +1,3 @@
 mod app;
 
-pub use app::{TemplateApp, VesuviusConfig};
+pub use app::{ObjFileConfig, TemplateApp, VesuviusConfig};
