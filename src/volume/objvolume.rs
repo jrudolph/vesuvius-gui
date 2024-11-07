@@ -5,12 +5,46 @@ use wavefront_obj::obj::{self, Object, Primitive, Vertex};
 struct ObjFile {
     object: Object,
 }
+impl ObjFile {
+    fn has_inverted_uv_tris(&self) -> bool {
+        for s in self.object.geometry[0].shapes.iter().skip(1) {
+            match s.primitive {
+                Primitive::Triangle(i1, i2, i3) => {
+                    let v1 = &self.object.tex_vertices[i1.1.unwrap()];
+                    let v2 = &self.object.tex_vertices[i2.1.unwrap()];
+                    let v3 = &self.object.tex_vertices[i3.1.unwrap()];
+
+                    let u1 = (v1.u * 100000.) as i32;
+                    let v1 = (v1.v * 100000.) as i32;
+
+                    let u2 = (v2.u * 100000.) as i32;
+                    let v2 = (v2.v * 100000.) as i32;
+
+                    let u3 = (v3.u * 100000.) as i32;
+                    let v3 = (v3.v * 100000.) as i32;
+
+                    let u = (u1 + u2 + u3) / 3;
+                    let v = (v1 + v2 + v3) / 3;
+
+                    let w0 = orient2d(u2, v2, u3, v3, u, v);
+                    let w1 = orient2d(u3, v3, u1, v1, u, v);
+                    let w2 = orient2d(u1, v1, u2, v2, u, v);
+
+                    return w0 >= 0 && w1 >= 0 && w2 >= 0;
+                }
+                _ => (),
+            }
+        }
+        false
+    }
+}
 
 pub struct ObjVolume {
     volume: Arc<RefCell<dyn VoxelPaintVolume>>,
     obj: ObjFile,
     width: usize,
     height: usize,
+    invert_tris: bool,
 }
 impl ObjVolume {
     pub fn new(
@@ -32,12 +66,14 @@ impl ObjVolume {
 
         let object = objects.remove(0);
         let obj = ObjFile { object };
+        let invert_tris = obj.has_inverted_uv_tris();
 
         Self {
             volume: base_volume,
             obj,
             width,
             height,
+            invert_tris,
         }
     }
 
@@ -69,13 +105,13 @@ impl ObjVolume {
                     let v3 = &obj.tex_vertices[i3.1.unwrap()];
 
                     let u1 = (v1.u * self.width() as f64) as i32;
-                    let v1 = ((1.0 - v1.v) * self.height() as f64) as i32;
+                    let v1 = (self.v(v1.v) * self.height() as f64) as i32;
 
                     let u2 = (v2.u * self.width() as f64) as i32;
-                    let v2 = ((1.0 - v2.v) * self.height() as f64) as i32;
+                    let v2 = (self.v(v2.v) * self.height() as f64) as i32;
 
                     let u3 = (v3.u * self.width() as f64) as i32;
-                    let v3 = ((1.0 - v3.v) * self.height() as f64) as i32;
+                    let v3 = (self.v(v3.v) * self.height() as f64) as i32;
 
                     let min_u_t = u1.min(u2).min(u3);
                     let max_u_t = u1.max(u2).max(u3);
@@ -123,6 +159,14 @@ impl ObjVolume {
         }
 
         [-1, -1, -1]
+    }
+
+    fn v(&self, v: f64) -> f64 {
+        if self.invert_tris {
+            v
+        } else {
+            1.0 - v
+        }
     }
 }
 
@@ -178,13 +222,13 @@ impl PaintVolume for ObjVolume {
                     let v3 = &obj.tex_vertices[i3.1.unwrap()];
 
                     let u1 = (v1.u * self.width() as f64) as i32;
-                    let v1 = ((1.0 - v1.v) * self.height() as f64) as i32;
+                    let v1 = (self.v(v1.v) * self.height() as f64) as i32;
 
                     let u2 = (v2.u * self.width() as f64) as i32;
-                    let v2 = ((1.0 - v2.v) * self.height() as f64) as i32;
+                    let v2 = (self.v(v2.v) * self.height() as f64) as i32;
 
                     let u3 = (v3.u * self.width() as f64) as i32;
-                    let v3 = ((1.0 - v3.v) * self.height() as f64) as i32;
+                    let v3 = (self.v(v3.v) * self.height() as f64) as i32;
 
                     let min_u_t = u1.min(u2).min(u3);
                     let max_u_t = u1.max(u2).max(u3);
