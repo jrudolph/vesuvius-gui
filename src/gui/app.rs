@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
-const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+const ZOOM_RES_FACTOR: f32 = 0.1;//1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
 #[derive(PartialEq, Eq)]
 enum Mode {
@@ -257,6 +257,11 @@ impl TemplateApp {
                 });
             }
         }
+
+        app.world = {
+            let zarr = ZarrArray::<3, u8>::from_path("/home/johannes/tmp/pap/54keV_7.91um_Scroll1A.zarr/0");
+            Arc::new(RefCell::new(crate::zarr::ZarrVoxelArray(zarr.into_ctx().into_ctx())))
+        };
 
         app
     }

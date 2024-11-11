@@ -1,4 +1,4 @@
-use crate::{volume::PaintVolume, zstd_decompress};
+use crate::{volume::{PaintVolume, VoxelPaintVolume, VoxelVolume}, zstd_decompress};
 use derive_more::Debug;
 use egui::Color32;
 use memmap::MmapOptions;
@@ -484,6 +484,60 @@ impl ZarrContext<3> {
         }
     }
 }
+
+pub struct ZarrVoxelArray(pub ZarrContext<3>);
+impl PaintVolume for ZarrVoxelArray {
+    fn paint(
+        &mut self,
+        xyz: [i32; 3],
+        u_coord: usize,
+        v_coord: usize,
+        plane_coord: usize,
+        width: usize,
+        height: usize,
+        _sfactor: u8,
+        paint_zoom: u8,
+        _config: &crate::volume::DrawingConfig,
+        buffer: &mut crate::volume::Image,
+    ) {
+        //assert!(_sfactor == 1);
+        if (_sfactor != 1) {
+            return;
+        }
+        let fi32 = _sfactor as f64;
+
+        for im_u in 0..width {
+            for im_v in 0..height {
+                let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32;
+                let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32;
+
+                let mut uvw: [f64; 3] = [0.; 3];
+                uvw[u_coord] = (xyz[u_coord] + im_rel_u) as f64 / fi32;
+                uvw[v_coord] = (xyz[v_coord] + im_rel_v) as f64 / fi32;
+                uvw[plane_coord] = (xyz[plane_coord]) as f64 / fi32;
+
+                let [x, y, z] = uvw;
+
+                if x < 0.0 || y < 0.0 || z < 0.0 {
+                    continue;
+                }
+
+                let v = self.0.get([z as usize, y as usize, x as usize]);
+                buffer.set_gray(im_u, im_v, v);                
+            }
+        }
+    }
+}
+impl VoxelVolume for ZarrVoxelArray {
+    fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        let x = xyz[0] as usize;
+        let y = xyz[1] as usize;
+        let z = xyz[2] as usize;
+
+        self.0.get([z, y, x])
+    }
+}
+//impl VoxelPaintVolume for ZarrVoxelArray {}
 
 impl PaintVolume for ZarrContext<3> {
     fn paint(
