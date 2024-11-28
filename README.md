@@ -12,6 +12,7 @@ All the published volumes published so far are supported:
 - Scroll 2
 - Scroll 0332
 - Scroll 1667
+- Scroll 172
 - Fragments 1 - 4 (from the Kaggle competition)
 - Fragment PHerc0051Cr04Fr08
 - Fragment PHerc1667Cr01Fr03
