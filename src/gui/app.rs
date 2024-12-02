@@ -246,12 +246,15 @@ impl TemplateApp {
         }
 
         if let Some(segment_file) = config.overlay_dir {
-            if segment_file.ends_with(".zarr") {
+            if segment_file.contains(".zarr") {
                 app.overlay = Some({
-                    let zarr: ZarrArray<3, u8> = ZarrArray::from_path(&segment_file);
+                    let zarr = if segment_file.starts_with("http") {
+                        println!("Loading zarr from url: {}", segment_file);
+                        ZarrArray::from_url_to_default_cache_dir(&segment_file)
+                    } else {
+                        ZarrArray::from_path(&segment_file)
+                    };
                     Box::new(zarr.into_ctx().into_ctx())
-                    //Box::new(ConnectedFullMapVolume::new())
-                    //Box::new(FullMapVolume::new())
                 });
             }
         }
