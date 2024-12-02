@@ -74,50 +74,58 @@ struct ZarrArrayDef {
     dimension_separator: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ZarrArray<const N: usize, T> {
-    path: String,
+    access: Arc<dyn ZarrFileAccess>,
     def: ZarrArrayDef,
     phantom_t: std::marker::PhantomData<T>,
 }
 
-impl<const N: usize, T> ZarrArray<N, T> {
-    fn chunk_path(&self, chunk_no: [usize; N]) -> String {
-        format!(
+trait ZarrFileAccess: Send + Sync + Debug {
+    fn load_array_def(&self) -> ZarrArrayDef;
+    fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>>;
+}
+
+#[derive(Debug, Clone)]
+struct ZarrDirectory {
+    path: String,
+}
+impl ZarrFileAccess for ZarrDirectory {
+    fn load_array_def(&self) -> ZarrArrayDef {
+        let zarray = std::fs::read_to_string(format!("{}/.zarray", self.path)).unwrap();
+        serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
+    }
+    fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>> {
+        let chunk_path = format!(
             "{}/{}",
             self.path,
             chunk_no
                 .iter()
                 .map(|i| i.to_string())
                 .collect::<Vec<_>>()
-                .join(self.def.dimension_separator.as_deref().unwrap_or("."))
-        )
-    }
-}
-
-impl<const N: usize> ZarrArray<N, u8> {
-    fn load_chunk(&self, chunk_no: [usize; N]) -> Option<BloscChunk<u8>> {
-        let chunk_path = self.chunk_path(chunk_no);
+                .join(array_def.dimension_separator.as_deref().unwrap_or("."))
+        );
         if !std::path::Path::new(&chunk_path).exists() {
             None
         } else {
             Some(BloscChunk::load(&chunk_path))
         }
     }
+}
+
+impl<const N: usize> ZarrArray<N, u8> {
+   fn load_chunk(&self, chunk_no: [usize; N]) -> Option<BloscChunk<u8>> {
+       self.access.load_chunk(&self.def, &chunk_no)
+    }
     pub fn from_path(path: &str) -> Self {
-        // read and parse path/.zarray into ZarrArrayDef
-
-        let zarray = std::fs::read_to_string(format!("{}/.zarray", path)).unwrap();
-        println!("Read ZarrArrayDef: {}", zarray);
-        let zarray_def = serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap();
-
-        println!("Loaded ZarrArrayDef: {:?}", zarray_def);
-
-        assert!(zarray_def.shape.len() == N);
-
+       println!("Loading ZarrArray from path: {}", path);
+       Self::from_access(Arc::new(ZarrDirectory { path: path.to_string() }))
+    }
+    fn from_access(access: Arc<dyn ZarrFileAccess>) -> Self {
+        let def = access.load_array_def();
         ZarrArray {
-            path: path.to_string(),
-            def: zarray_def,
+            access,
+            def,
             phantom_t: std::marker::PhantomData,
         }
     }
@@ -125,35 +133,6 @@ impl<const N: usize> ZarrArray<N, u8> {
     pub fn into_ctx(self) -> ZarrContextBase<N> {
         let cache = Arc::new(Mutex::new(ZarrContextCache::new(&self.def)));
         ZarrContextBase { array: self, cache }
-    }
-    #[allow(dead_code)]
-    fn get(&self, index: [usize; N]) -> u8 {
-        let chunk_no = index
-            .iter()
-            .zip(self.def.chunks.iter())
-            .map(|(i, c)| i / c)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-
-        let chunk_offset = index
-            .iter()
-            .zip(self.def.chunks.iter())
-            .map(|(i, c)| i % c)
-            .collect::<Vec<_>>();
-
-        if let Some(chunk) = self.load_chunk(chunk_no) {
-            println!("Chunk: {:?}", chunk);
-            let idx = chunk_offset
-                .iter()
-                .zip(self.def.chunks.iter())
-                //.rev() // FIXME: only if row-major
-                .fold(0, |acc, (i, c)| acc * c + i);
-            println!("Index for {:?}: {:?}", chunk_offset, idx);
-            chunk.get(idx)
-        } else {
-            0
-        }
     }
 }
 
