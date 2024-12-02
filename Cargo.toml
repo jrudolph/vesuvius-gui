@@ -9,16 +9,17 @@ base64          = { version = "0.22" }
 clap            = { version = "4.4", features = [ "derive" ] }
 derive_more     = { version = "1", features = [ "debug" ] }
 directories     = { version = "5" }
-eframe          = { version = "0.28", default-features = false, features = [
+eframe          = { version = "0.30", default-features = false, features = [
     #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     #"default_fonts", # Embed the default egui fonts.
+    "x11", "wayland",
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
     "persistence",   # Enable restoring app state when restarting the app.
 ] }
-egui            = { version = "0.28" }
-egui_extras     = { version = "0.28", features = [ "all_loaders" ] }
+egui            = { version = "0.30" }
+egui_extras     = { version = "0.30", features = [ "all_loaders" ] }
 ehttp           = { version = "0.5" }
-emath           = { version = "0.28"}
+emath           = { version = "0.30"}
 image           = { version = "0.25", default-features=false, features = ["png","tiff"] }
 itertools       = { version = "0.13" }
 libm            = { version = "0.2" }
