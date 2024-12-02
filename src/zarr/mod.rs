@@ -8,8 +8,10 @@ use derive_more::Debug;
 use egui::Color32;
 use ehttp::Request;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
+use sha2::Sha256;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
 };
@@ -83,6 +85,7 @@ pub struct ZarrArray<const N: usize, T> {
 trait ZarrFileAccess: Send + Sync + Debug {
     fn load_array_def(&self) -> ZarrArrayDef;
     fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>>;
+    fn cache_missing(&self) -> bool;
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +112,102 @@ impl ZarrFileAccess for ZarrDirectory {
         } else {
             Some(BloscChunk::load(&chunk_path))
         }
+    }
+    fn cache_missing(&self) -> bool {
+        true
+    }
+}
+
+trait Downloader: Sync + Send + Debug {
+    fn download(&self, from_url: &str, to_path: &str);
+}
+
+#[derive(Debug)]
+struct SimpleDownloader {
+    channel: std::sync::mpsc::Sender<(String, String)>,
+}
+impl SimpleDownloader {
+    fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
+        std::thread::spawn(move || {
+            let mut ongoing: HashSet<String> = HashSet::new();
+            for (from, to) in rx {
+                if ongoing.contains(&from.to_string()) {
+                    continue;
+                }
+                ongoing.insert(from.clone());
+                println!("Starting download from {} to {}", from, to);
+                ehttp::fetch(Request::get(&from), move |result| {
+                    println!("Downloaded from {} to {}", from, to);
+                    let response = result.unwrap();
+                    if response.status == 200 {
+                        let data = response.bytes.to_vec();
+                        std::fs::create_dir_all(std::path::Path::new(&to).parent().unwrap()).unwrap();
+                        let tmp_file = format!("{}.tmp", to);
+                        std::fs::write(&tmp_file, &data).unwrap();
+                        std::fs::rename(tmp_file, to).unwrap();
+                    } else {
+                        println!("Failed to download from {}, status {}", from, response.status);
+                    }
+                });
+            }
+        });
+        Self { channel: tx }
+    }
+}
+impl Downloader for SimpleDownloader {
+    fn download(&self, from_url: &str, to_path: &str) {
+        self.channel.send((from_url.to_string(), to_path.to_string())).unwrap();
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RemoteZarrDirectory {
+    url: String,
+    local_cache_dir: String,
+    downloader: Arc<dyn Downloader>,
+}
+impl ZarrFileAccess for RemoteZarrDirectory {
+    fn load_array_def(&self) -> ZarrArrayDef {
+        let target_file = format!("{}/.zarray", self.local_cache_dir);
+        if !std::path::Path::new(&target_file).exists() {
+            let data = ehttp::fetch_blocking(&Request::get(&format!("{}/.zarray", self.url)))
+                .unwrap()
+                .bytes
+                .to_vec();
+            std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
+            std::fs::write(&target_file, &data).unwrap();
+        }
+
+        let zarray = std::fs::read_to_string(&target_file).unwrap();
+        serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
+    }
+    fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>> {
+        let target_file = format!(
+            "{}/{}",
+            self.local_cache_dir,
+            chunk_no.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/")
+        );
+
+        if std::path::Path::new(&target_file).exists() {
+            Some(BloscChunk::load(&target_file))
+        } else {
+            let target_url = format!(
+                "{}/{}",
+                self.url,
+                chunk_no
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(array_def.dimension_separator.as_deref().unwrap_or("."))
+            );
+            self.downloader.download(&target_url, &target_file);
+
+            None
+        }
+    }
+    fn cache_missing(&self) -> bool {
+        false
     }
 }
 
@@ -152,11 +251,22 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
                     .join(array_def.dimension_separator.as_deref().unwrap_or("."))
             );
             println!("Downloading chunk from {}", target_url);
-            let data = ehttp::fetch_blocking(&Request::get(target_url)).unwrap().bytes.to_vec();
+            let response = ehttp::fetch_blocking(&Request::get(&target_url)).unwrap();
+            if response.status != 200 {
+                println!(
+                    "Failed to download chunk from {}, status {}",
+                    target_url, response.status
+                );
+                return None;
+            }
+            let data = response.bytes.to_vec();
             std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
             std::fs::write(&target_file, &data).unwrap();
             Some(BloscChunk::load(&target_file))
         }
+    }
+    fn cache_missing(&self) -> bool {
+        true
     }
 }
 
@@ -175,6 +285,20 @@ impl<const N: usize> ZarrArray<N, u8> {
             local_cache_dir: local_cache_dir.to_string(),
         }))
     }
+    pub fn from_url(url: &str, local_cache_dir: &str) -> Self {
+        println!("Loading ZarrArray from url: {}", url);
+        Self::from_access(Arc::new(RemoteZarrDirectory {
+            url: url.to_string(),
+            local_cache_dir: local_cache_dir.to_string(),
+            downloader: Arc::new(SimpleDownloader::new()),
+        }))
+    }
+    pub fn from_url_to_default_cache_dir(url: &str) -> Self {
+        let canonical_url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
+        let sha256 = format!("{:x}", Sha256::digest(canonical_url.as_bytes()));
+        let local_cache_dir = std::env::temp_dir().join("vesuvius-gui").join(sha256);
+        Self::from_url(url, local_cache_dir.to_str().unwrap())
+    }
     fn from_access(access: Arc<dyn ZarrFileAccess>) -> Self {
         let def = access.load_array_def();
         ZarrArray {
@@ -186,13 +310,19 @@ impl<const N: usize> ZarrArray<N, u8> {
 
     pub fn into_ctx(self) -> ZarrContextBase<N> {
         let cache = Arc::new(Mutex::new(ZarrContextCache::new(&self.def)));
-        ZarrContextBase { array: self, cache }
+        let cache_missing = self.access.cache_missing();
+        ZarrContextBase {
+            array: self,
+            cache,
+            cache_missing,
+        }
     }
 }
 
 pub struct ZarrContextBase<const N: usize> {
     array: ZarrArray<N, u8>,
     cache: Arc<Mutex<ZarrContextCache<N>>>,
+    cache_missing: bool,
 }
 impl<const N: usize> ZarrContextBase<N> {
     pub fn into_ctx(&self) -> ZarrContext<N> {
@@ -201,6 +331,7 @@ impl<const N: usize> ZarrContextBase<N> {
             cache: self.cache.clone(),
             last_chunk_no: [usize::MAX; N],
             last_context: None,
+            cache_missing: self.cache_missing,
         }
     }
 }
@@ -273,6 +404,7 @@ pub struct ZarrContext<const N: usize> {
     cache: Arc<Mutex<ZarrContextCache<N>>>,
     last_chunk_no: [usize; N],
     last_context: Option<Option<BloscContext>>,
+    cache_missing: bool,
 }
 
 impl ZarrContext<3> {
@@ -347,8 +479,13 @@ impl ZarrContext<3> {
                 self.last_context = Some(Some(ctx));
                 res
             } else {
-                self.last_chunk_no = chunk_no;
-                self.last_context = Some(None);
+                if self.cache_missing {
+                    self.last_chunk_no = chunk_no;
+                    self.last_context = Some(None);
+                } else {
+                    self.last_chunk_no = [usize::MAX; 3];
+                    self.last_context = None;
+                }
                 0
             }
         }
