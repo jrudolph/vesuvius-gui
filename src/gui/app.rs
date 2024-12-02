@@ -167,7 +167,7 @@ impl Default for TemplateApp {
             last_size: Vec2::ZERO,
             download_notifier: None,
             drawing_config: Default::default(),
-            ranges: [0..=10000, 0..=10000, 0..=15000],
+            ranges: [0..=10000, 0..=10000, 0..=21000],
             //ppm_file: None,
             //obj_file: None,
             mode: Mode::Blocks,
