@@ -23,6 +23,7 @@ use egui_extras::TableBuilder;
 use std::cell::RefCell;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use egui::SliderClamping;
 
 const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
@@ -582,7 +583,7 @@ impl TemplateApp {
             enabled: bool,
         ) -> Response {
             ui.label(label);
-            let slider = egui::Slider::new(value, range).clamp_to_range(true);
+            let slider = egui::Slider::new(value, range).clamping(SliderClamping::Always);
             let slider = if logarithmic { slider.logarithmic(true) } else { slider };
             let sl = ui.add_enabled(enabled, slider);
             ui.end_row();
@@ -605,7 +606,7 @@ impl TemplateApp {
                     ui.label(format!("Browsing layers in {}", self.data_dir));
                 } else {
                     ui.add_enabled_ui(!self.is_segment_mode(), |ui| {
-                        egui::ComboBox::from_id_source("Volume")
+                        egui::ComboBox::from_id_salt("Volume")
                             .selected_text(self.selected_volume().label())
                             .show_ui(ui, |ui| {
                                 // iterate over indices and values of VolumeReference::VOLUMES
