@@ -53,7 +53,9 @@ impl Segment {
 }
 
 impl PartialEq for Segment {
-    fn eq(&self, other: &Self) -> bool { self.id == other.id && self.scroll == other.scroll }
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.scroll == other.scroll
+    }
 }
 
 #[derive(Default)]
@@ -85,7 +87,9 @@ impl Catalog {
             scrolls,
         }
     }
-    pub fn scrolls(&self) -> Vec<Scroll> { self.scrolls.clone() }
+    pub fn scrolls(&self) -> Vec<Scroll> {
+        self.scrolls.clone()
+    }
     /// Returns an iterator over the segments for the given scroll
     pub fn segments(&self, scroll: &Scroll) -> impl Iterator<Item = &Segment> {
         self.segments_by_scroll.get(scroll).into_iter().flat_map(|v| v.iter())
@@ -99,4 +103,6 @@ pub fn load_segments() -> Vec<Segment> {
     serde_json::from_str(&json).unwrap()
 }
 
-pub fn load_catalog() -> Catalog { Catalog::from_segments(load_segments()) }
+pub fn load_catalog() -> Catalog {
+    Catalog::from_segments(load_segments())
+}

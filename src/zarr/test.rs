@@ -1,4 +1,8 @@
-use crate::{volume::PaintVolume, zarr::{blosc::BloscChunk, ZarrArray}};
+use super::{ZarrContext, ZarrContextBase};
+use crate::{
+    volume::PaintVolume,
+    zarr::{blosc::BloscChunk, ZarrArray},
+};
 use egui::Color32;
 use memmap::MmapOptions;
 use std::{
@@ -10,7 +14,6 @@ use std::{
         Mutex,
     },
 };
-use super::{ZarrContext, ZarrContextBase};
 
 #[allow(dead_code)]
 struct SparsePointCloud {

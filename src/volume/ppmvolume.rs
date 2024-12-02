@@ -70,7 +70,9 @@ impl PPMVolume {
             interpolate: false,
         }
     }
-    pub fn enable_bilinear_interpolation(&mut self) { self.interpolate = true; }
+    pub fn enable_bilinear_interpolation(&mut self) {
+        self.interpolate = true;
+    }
     pub fn convert_to_world_coords(&self, coord: [i32; 3]) -> [i32; 3] {
         let xyz = self.ppm.get(coord[0] as usize, coord[1] as usize);
         [
@@ -79,8 +81,12 @@ impl PPMVolume {
             (xyz[2] + coord[2] as f64 * xyz[5]) as i32,
         ]
     }
-    pub fn width(&self) -> usize { self.ppm.width }
-    pub fn height(&self) -> usize { self.ppm.height }
+    pub fn width(&self) -> usize {
+        self.ppm.width
+    }
+    pub fn height(&self) -> usize {
+        self.ppm.height
+    }
 }
 
 impl VoxelVolume for PPMVolume {
