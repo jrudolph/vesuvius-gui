@@ -3,17 +3,16 @@ mod blosc;
 mod test;
 
 use crate::volume::PaintVolume;
+use blosc::{BloscChunk, BloscContext};
 use derive_more::Debug;
 use egui::Color32;
+use ehttp::Request;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
-    sync::{
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
 };
-use blosc::{BloscChunk, BloscContext};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum ZarrDataType {
@@ -157,10 +156,14 @@ struct ZarrContextCacheEntry {
 }
 impl Deref for ZarrContextCacheEntry {
     type Target = BloscContext;
-    fn deref(&self) -> &Self::Target { &self.ctx }
+    fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
 }
 impl DerefMut for ZarrContextCacheEntry {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.ctx }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ctx
+    }
 }
 
 struct ZarrContextCache<const N: usize> {

@@ -1,10 +1,7 @@
 use crate::zstd_decompress;
 use derive_more::Debug;
 use memmap::MmapOptions;
-use std::{
-    collections::HashMap,
-    fs::File,
-};
+use std::{collections::HashMap, fs::File};
 
 #[derive(Debug, Clone)]
 pub enum BloscShuffle {
