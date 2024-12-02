@@ -14,6 +14,7 @@ use directories::BaseDirs;
 use egui::Color32;
 use egui::Label;
 use egui::RichText;
+use egui::SliderClamping;
 use egui::Stroke;
 use egui::Vec2;
 use egui::WidgetText;
@@ -23,7 +24,6 @@ use egui_extras::TableBuilder;
 use std::cell::RefCell;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use egui::SliderClamping;
 
 const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
@@ -342,7 +342,9 @@ impl TemplateApp {
         };
     }
 
-    pub fn is_segment_mode(&self) -> bool { self.segment_mode.is_some() }
+    pub fn is_segment_mode(&self) -> bool {
+        self.segment_mode.is_some()
+    }
 
     fn load_from_cells(&mut self) {
         let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
@@ -366,7 +368,9 @@ impl TemplateApp {
         }
     }
 
-    fn selected_volume(&self) -> &'static dyn VolumeReference { <dyn VolumeReference>::VOLUMES[self.volume_id] }
+    fn selected_volume(&self) -> &'static dyn VolumeReference {
+        <dyn VolumeReference>::VOLUMES[self.volume_id]
+    }
 
     pub fn clear_textures(&mut self) {
         self.texture_xy = None;
@@ -571,7 +575,9 @@ impl TemplateApp {
             }
         }
     }
-    fn should_sync_coords(&self) -> bool { self.segment_mode.as_ref().map_or(false, |s| s.sync_coordinates) }
+    fn should_sync_coords(&self) -> bool {
+        self.segment_mode.as_ref().map_or(false, |s| s.sync_coordinates)
+    }
 
     fn controls(&mut self, _frame: &eframe::Frame, ui: &mut Ui) {
         fn slider<T: emath::Numeric>(
@@ -1035,6 +1041,10 @@ impl TemplateApp {
 
 impl eframe::App for TemplateApp {
     /// Called by the frame work to save state before shutdown.
-    fn save(&mut self, storage: &mut dyn eframe::Storage) { eframe::set_value(storage, eframe::APP_KEY, self); }
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) { self.update_main(ctx, frame); }
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, eframe::APP_KEY, self);
+    }
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.update_main(ctx, frame);
+    }
 }

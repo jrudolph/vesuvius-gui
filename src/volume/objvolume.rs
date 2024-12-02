@@ -89,8 +89,12 @@ impl ObjVolume {
         obj::parse(obj_file).unwrap()
     }
 
-    pub fn width(&self) -> usize { self.width }
-    pub fn height(&self) -> usize { self.height }
+    pub fn width(&self) -> usize {
+        self.width
+    }
+    pub fn height(&self) -> usize {
+        self.height
+    }
     pub fn convert_to_volume_coords(&self, coord: [i32; 3]) -> [i32; 3] {
         let u = coord[0];
         let v = coord[1];
@@ -456,7 +460,9 @@ impl SurfaceVolume for ObjVolume {
                         || minz > maxs[2]
                         || maxz < mins[2])
                     {
-                        fn coord(v: &Vertex) -> [f64; 3] { [v.x, v.y, v.z] }
+                        fn coord(v: &Vertex) -> [f64; 3] {
+                            [v.x, v.y, v.z]
+                        }
                         fn intersects(v1: &Vertex, v2: &Vertex, w: i32, plane_coord: usize) -> bool {
                             (coord(v1)[plane_coord] - w as f64).signum() != (coord(v2)[plane_coord] - w as f64).signum()
                         }
@@ -515,7 +521,9 @@ fn paint_zoom_align(v: i32, paint_zoom: u8) -> i32 {
     let v = v / paint_zoom as i32;
     v * paint_zoom as i32
 }
-fn paint_zoom_align_up(v: i32, paint_zoom: u8) -> i32 { paint_zoom_align(v + paint_zoom as i32 - 1, paint_zoom) }
+fn paint_zoom_align_up(v: i32, paint_zoom: u8) -> i32 {
+    paint_zoom_align(v + paint_zoom as i32 - 1, paint_zoom)
+}
 
 #[allow(dead_code)] // useful for debugging triangle shapes
 fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut Image, width: usize, height: usize, r: u8, g: u8, b: u8) {
@@ -549,5 +557,7 @@ fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut Image, width: usize, he
 }
 
 impl VoxelVolume for ObjVolume {
-    fn get(&mut self, _xyz: [f64; 3], _downsampling: i32) -> u8 { todo!() }
+    fn get(&mut self, _xyz: [f64; 3], _downsampling: i32) -> u8 {
+        todo!()
+    }
 }
