@@ -397,6 +397,9 @@ impl<const N: usize> ZarrContextCache<N> {
             );
         }
     }
+    fn purge_missing(&mut self) {
+        self.cache.retain(|_, e| if e.is_none() { false } else { true });
+    }
 }
 
 pub struct ZarrContext<const N: usize> {
@@ -479,13 +482,8 @@ impl ZarrContext<3> {
                 self.last_context = Some(Some(ctx));
                 res
             } else {
-                if self.cache_missing {
-                    self.last_chunk_no = chunk_no;
-                    self.last_context = Some(None);
-                } else {
-                    self.last_chunk_no = [usize::MAX; 3];
-                    self.last_context = None;
-                }
+                self.last_chunk_no = chunk_no;
+                self.last_context = Some(None);
                 0
             }
         }
@@ -507,6 +505,12 @@ impl PaintVolume for ZarrContext<3> {
         buffer: &mut crate::volume::Image,
     ) {
         assert!(_sfactor == 1);
+        if !self.cache_missing {
+            // clean missing entries from cache
+            let mut access = self.cache.lock().unwrap();
+            access.purge_missing();
+        }
+
         let fi32 = _sfactor as f64;
 
         for im_u in 0..width {
