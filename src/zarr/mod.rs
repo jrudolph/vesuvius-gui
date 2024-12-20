@@ -1,6 +1,10 @@
 mod blosc;
+mod ome;
 #[cfg(test)]
 mod test;
+
+pub use ome::OmeZarrContext;
+pub use ome::{ColorScheme, FourColors, GrayScale};
 
 use crate::volume::PaintVolume;
 use blosc::{BloscChunk, BloscContext};
@@ -8,8 +12,10 @@ use derive_more::Debug;
 use egui::Color32;
 use ehttp::Request;
 use serde::{Deserialize, Serialize};
+use sha2::digest::block_buffer::Block;
 use sha2::Digest;
 use sha2::Sha256;
+use std::sync::atomic::Ordering;
 use std::{
     collections::{HashMap, HashSet},
     ops::{Deref, DerefMut},
@@ -65,7 +71,7 @@ struct ZarrFilters {}
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ZarrArrayDef {
     chunks: Vec<usize>,
-    compressor: ZarrCompressor,
+    compressor: Option<ZarrCompressor>,
     dtype: String,
     fill_value: u8,
     filters: Option<ZarrFilters>,
@@ -84,7 +90,8 @@ pub struct ZarrArray<const N: usize, T> {
 
 trait ZarrFileAccess: Send + Sync + Debug {
     fn load_array_def(&self) -> ZarrArrayDef;
-    fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>>;
+    //fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>>;
+    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String>;
     fn cache_missing(&self) -> bool;
 }
 
@@ -97,7 +104,7 @@ impl ZarrFileAccess for ZarrDirectory {
         let zarray = std::fs::read_to_string(format!("{}/.zarray", self.path)).unwrap();
         serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
     }
-    fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>> {
+    /* fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>> {
         let chunk_path = format!(
             "{}/{}",
             self.path,
@@ -111,6 +118,22 @@ impl ZarrFileAccess for ZarrDirectory {
             None
         } else {
             Some(BloscChunk::load(&chunk_path))
+        }
+    } */
+    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
+        let chunk_path = format!(
+            "{}/{}",
+            self.path,
+            chunk_no
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(array_def.dimension_separator.as_deref().unwrap_or("."))
+        );
+        if !std::path::Path::new(&chunk_path).exists() {
+            None
+        } else {
+            Some(chunk_path)
         }
     }
     fn cache_missing(&self) -> bool {
@@ -131,15 +154,23 @@ impl SimpleDownloader {
         let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
         std::thread::spawn(move || {
             let mut ongoing: HashSet<String> = HashSet::new();
+            let downloading = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             for (from, to) in rx {
                 if ongoing.contains(&from.to_string()) {
                     continue;
                 }
+                if downloading.load(Ordering::Relaxed) > 10 {
+                    continue;
+                }
+
                 ongoing.insert(from.clone());
+                downloading.fetch_add(1, Ordering::Acquire);
                 println!("Starting download from {} to {}", from, to);
+                let inner_counter = downloading.clone();
                 ehttp::fetch(Request::get(&from), move |result| {
                     println!("Downloaded from {} to {}", from, to);
                     let response = result.unwrap();
+                    inner_counter.fetch_sub(1, Ordering::Acquire);
                     if response.status == 200 {
                         let data = response.bytes.to_vec();
                         std::fs::create_dir_all(std::path::Path::new(&to).parent().unwrap()).unwrap();
@@ -182,7 +213,7 @@ impl ZarrFileAccess for RemoteZarrDirectory {
         let zarray = std::fs::read_to_string(&target_file).unwrap();
         serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
     }
-    fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>> {
+    /* fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>> {
         let target_file = format!(
             "{}/{}",
             self.local_cache_dir,
@@ -191,6 +222,30 @@ impl ZarrFileAccess for RemoteZarrDirectory {
 
         if std::path::Path::new(&target_file).exists() {
             Some(BloscChunk::load(&target_file))
+        } else {
+            let target_url = format!(
+                "{}/{}",
+                self.url,
+                chunk_no
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(array_def.dimension_separator.as_deref().unwrap_or("."))
+            );
+            self.downloader.download(&target_url, &target_file);
+
+            None
+        }
+    } */
+    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
+        let target_file = format!(
+            "{}/{}",
+            self.local_cache_dir,
+            chunk_no.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/")
+        );
+
+        if std::path::Path::new(&target_file).exists() {
+            Some(target_file)
         } else {
             let target_url = format!(
                 "{}/{}",
@@ -231,7 +286,7 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
         let zarray = std::fs::read_to_string(&target_file).unwrap();
         serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
     }
-    fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>> {
+    /* fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>> {
         let target_file = format!(
             "{}/{}",
             self.local_cache_dir,
@@ -261,8 +316,46 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
             }
             let data = response.bytes.to_vec();
             std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
-            std::fs::write(&target_file, &data).unwrap();
+            let tmp = format!("{}.tmp", target_file);
+            std::fs::write(&tmp, &data).unwrap();
+            std::fs::rename(&tmp, &target_file).unwrap();
             Some(BloscChunk::load(&target_file))
+        }
+    } */
+    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
+        let target_file = format!(
+            "{}/{}",
+            self.local_cache_dir,
+            chunk_no.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/")
+        );
+
+        if std::path::Path::new(&target_file).exists() {
+            Some(target_file)
+        } else {
+            let target_url = format!(
+                "{}/{}",
+                self.url,
+                chunk_no
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(array_def.dimension_separator.as_deref().unwrap_or("."))
+            );
+            println!("Downloading chunk from {}", target_url);
+            let response = ehttp::fetch_blocking(&Request::get(&target_url)).unwrap();
+            if response.status != 200 {
+                println!(
+                    "Failed to download chunk from {}, status {}",
+                    target_url, response.status
+                );
+                return None;
+            }
+            let data = response.bytes.to_vec();
+            std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
+            let tmp = format!("{}.tmp", target_file);
+            std::fs::write(&tmp, &data).unwrap();
+            std::fs::rename(&tmp, &target_file).unwrap();
+            Some(target_file)
         }
     }
     fn cache_missing(&self) -> bool {
@@ -271,8 +364,19 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
 }
 
 impl<const N: usize> ZarrArray<N, u8> {
-    fn load_chunk(&self, chunk_no: [usize; N]) -> Option<BloscChunk<u8>> {
+    /* fn load_chunk(&self, chunk_no: [usize; N]) -> Option<BloscChunk<u8>> {
         self.access.load_chunk(&self.def, &chunk_no)
+    } */
+    fn load_chunk_context(&self, chunk_no: [usize; N]) -> Option<ChunkContext> {
+        self.access
+            .chunk_file_for(&self.def, &chunk_no)
+            .map(|chunk_file| match &self.def.compressor {
+                Some(compressor) => match compressor.id.as_str() {
+                    "blosc" => ChunkContext::Blosc(BloscChunk::load(&chunk_file).into_ctx()),
+                    _ => panic!("Unsupported compressor: {}", compressor.id),
+                },
+                _ => ChunkContext::Raw(RawContext::load(&chunk_file)),
+            })
     }
     pub fn from_path(path: &str) -> Self {
         println!("Loading ZarrArray from path: {}", path);
@@ -286,7 +390,7 @@ impl<const N: usize> ZarrArray<N, u8> {
         }))
     }
     pub fn from_url(url: &str, local_cache_dir: &str) -> Self {
-        println!("Loading ZarrArray from url: {}", url);
+        println!("Loading ZarrArray from url: {} to: {} ", url, local_cache_dir);
         Self::from_access(Arc::new(RemoteZarrDirectory {
             url: url.to_string(),
             local_cache_dir: local_cache_dir.to_string(),
@@ -336,12 +440,39 @@ impl<const N: usize> ZarrContextBase<N> {
     }
 }
 
+pub struct RawContext {
+    data: memmap::Mmap,
+}
+impl RawContext {
+    fn load(chunk_file: &str) -> RawContext {
+        let file = std::fs::File::open(chunk_file).unwrap();
+        let data = unsafe { memmap::Mmap::map(&file).unwrap() };
+        RawContext { data }
+    }
+    fn get(&self, idx: usize) -> u8 {
+        self.data[idx]
+    }
+}
+
+enum ChunkContext {
+    Blosc(BloscContext),
+    Raw(RawContext),
+}
+impl ChunkContext {
+    fn get(&mut self, idx: usize) -> u8 {
+        match self {
+            ChunkContext::Blosc(ctx) => ctx.get(idx),
+            ChunkContext::Raw(raw) => raw.get(idx),
+        }
+    }
+}
+
 struct ZarrContextCacheEntry {
-    ctx: BloscContext,
+    ctx: ChunkContext,
     last_access: u64,
 }
 impl Deref for ZarrContextCacheEntry {
-    type Target = BloscContext;
+    type Target = ChunkContext;
     fn deref(&self) -> &Self::Target {
         &self.ctx
     }
@@ -364,10 +495,10 @@ impl<const N: usize> ZarrContextCache<N> {
             cache: HashMap::new(),
             access_counter: 0,
             non_empty_entries: 0,
-            max_entries: 2000000000 / def.chunks.iter().product::<usize>(),
+            max_entries: 200000000 / def.chunks.iter().product::<usize>(),
         }
     }
-    fn entry(&self, ctx: Option<BloscContext>) -> Option<ZarrContextCacheEntry> {
+    fn entry(&self, ctx: Option<ChunkContext>) -> Option<ZarrContextCacheEntry> {
         ctx.map(|ctx| ZarrContextCacheEntry {
             ctx,
             last_access: self.access_counter,
@@ -406,17 +537,17 @@ pub struct ZarrContext<const N: usize> {
     array: ZarrArray<N, u8>,
     cache: Arc<Mutex<ZarrContextCache<N>>>,
     last_chunk_no: [usize; N],
-    last_context: Option<Option<BloscContext>>,
+    last_context: Option<Option<ChunkContext>>,
     cache_missing: bool,
 }
 
 impl ZarrContext<3> {
-    fn get(&mut self, index: [usize; 3]) -> u8 {
+    fn get(&mut self, index: [usize; 3]) -> Option<u8> {
         if index[0] > self.array.def.shape[0]
             || index[1] > self.array.def.shape[1]
             || index[2] > self.array.def.shape[2]
         {
-            return 0;
+            return None; // FIXME: or just return 0?
         }
         let chunk_no = [
             index[0] / self.array.def.chunks[0],
@@ -435,16 +566,16 @@ impl ZarrContext<3> {
         // fast path
         if chunk_no == self.last_chunk_no {
             if let Some(last) = self.last_context.as_mut().unwrap() {
-                last.get(idx)
+                Some(last.get(idx))
             } else {
-                0
+                None
             }
         } else {
             // slow path goes through mutex
             self.get_from_cache(chunk_no, idx)
         }
     }
-    fn get_from_cache(&mut self, chunk_no: [usize; 3], idx: usize) -> u8 {
+    fn get_from_cache(&mut self, chunk_no: [usize; 3], idx: usize) -> Option<u8> {
         let mut access = self.cache.lock().unwrap();
         access.access_counter += 1;
 
@@ -466,25 +597,24 @@ impl ZarrContext<3> {
             }
             let res = if let Some(entry) = entry.as_mut() {
                 let res = entry.get(idx);
-                res
+                Some(res)
             } else {
-                // chunk wasn't found on disk
-                0
+                None
             };
             self.last_chunk_no = chunk_no;
             self.last_context = Some(entry.map(|e| e.ctx));
             res
         } else {
-            if let Some(chunk) = self.array.load_chunk(chunk_no) {
-                let mut ctx = chunk.into_ctx();
+            if let Some(mut ctx) = self.array.load_chunk_context(chunk_no) {
+                //let mut ctx: BloscContext = chunk.into_ctx();
                 let res = ctx.get(idx);
                 self.last_chunk_no = chunk_no;
                 self.last_context = Some(Some(ctx));
-                res
+                Some(res)
             } else {
                 self.last_chunk_no = chunk_no;
                 self.last_context = Some(None);
-                0
+                None
             }
         }
     }
@@ -529,8 +659,9 @@ impl PaintVolume for ZarrContext<3> {
                     continue;
                 }
 
-                let v = self.get([z as usize, y as usize, x as usize]);
+                let v = self.get([z as usize, y as usize, x as usize]).unwrap_or(0);
                 if v != 0 {
+                    println!("painting at {} {} {} {}", x, y, z, v);
                     let color = match v {
                         1 => Color32::RED,
                         2 => Color32::GREEN,
