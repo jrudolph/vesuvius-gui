@@ -9,16 +9,16 @@ base64          = { version = "0.22" }
 clap            = { version = "4.4", features = [ "derive" ] }
 derive_more     = { version = "1", features = [ "debug" ] }
 directories     = { version = "5" }
-eframe          = { version = "0.28", default-features = false, features = [
+eframe          = { version = "0.29", default-features = false, features = [
     #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     #"default_fonts", # Embed the default egui fonts.
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
     "persistence",   # Enable restoring app state when restarting the app.
 ] }
-egui            = { version = "0.28" }
-egui_extras     = { version = "0.28", features = [ "all_loaders" ] }
+egui            = { version = "0.29" }
+egui_extras     = { version = "0.29", features = [ "all_loaders" ] }
 ehttp           = { version = "0.5" }
-emath           = { version = "0.28"}
+emath           = { version = "0.29"}
 image           = { version = "0.25", default-features=false, features = ["png","tiff"] }
 itertools       = { version = "0.13" }
 libm            = { version = "0.2" }
@@ -29,6 +29,7 @@ regex           = { version = "1", default-features=false, features = ["unicode-
 ruzstd          = { version = "0.7" }
 serde           = { version = "1", features = ["derive"] }
 serde_json      = { version = "1" }
+sha2            = { version = "0.10" }
 tiff            = { version = "0.9" }
 wavefront_obj   = { version = "10.0" }
 
