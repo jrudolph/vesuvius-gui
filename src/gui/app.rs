@@ -14,6 +14,7 @@ use directories::BaseDirs;
 use egui::Color32;
 use egui::Label;
 use egui::RichText;
+use egui::SliderClamping;
 use egui::Stroke;
 use egui::Vec2;
 use egui::WidgetText;
@@ -23,7 +24,6 @@ use egui_extras::TableBuilder;
 use std::cell::RefCell;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use egui::SliderClamping;
 
 const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
@@ -305,7 +305,7 @@ impl TemplateApp {
             } else {
                 old
             };
-            let obj_volume = ObjVolume::new(&segment_file, base, width, height);
+            let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height);
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
 
