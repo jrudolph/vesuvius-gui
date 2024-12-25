@@ -2,17 +2,25 @@ use super::{Image, PaintVolume, SurfaceVolume, VoxelPaintVolume, VoxelVolume};
 use std::{cell::RefCell, sync::Arc};
 use wavefront_obj::obj::{self, Object, Primitive, Vertex};
 
-struct ObjFile {
+pub struct ObjFile {
     object: Object,
+    has_inverted_uv_tris: bool,
 }
 impl ObjFile {
-    fn has_inverted_uv_tris(&self) -> bool {
-        for s in self.object.geometry[0].shapes.iter().skip(1) {
+    pub fn new(object: Object) -> Self {
+        let has_inverted_uv_tris = Self::has_inverted_uv_tris(object.clone());
+        Self {
+            object,
+            has_inverted_uv_tris,
+        }
+    }
+    fn has_inverted_uv_tris(obj: Object) -> bool {
+        for s in obj.geometry[0].shapes.iter().skip(1) {
             match s.primitive {
                 Primitive::Triangle(i1, i2, i3) => {
-                    let v1 = &self.object.tex_vertices[i1.1.unwrap()];
-                    let v2 = &self.object.tex_vertices[i2.1.unwrap()];
-                    let v3 = &self.object.tex_vertices[i3.1.unwrap()];
+                    let v1 = &obj.tex_vertices[i1.1.unwrap()];
+                    let v2 = &obj.tex_vertices[i2.1.unwrap()];
+                    let v3 = &obj.tex_vertices[i3.1.unwrap()];
 
                     let u1 = (v1.u * 100000.) as i32;
                     let v1 = (v1.v * 100000.) as i32;
@@ -39,21 +47,48 @@ impl ObjFile {
     }
 }
 
+#[derive(Clone)]
 pub struct ObjVolume {
     volume: Arc<RefCell<dyn VoxelPaintVolume>>,
-    obj: ObjFile,
+    obj: Arc<ObjFile>,
     width: usize,
     height: usize,
-    invert_tris: bool,
 }
 impl ObjVolume {
-    pub fn new(
+    pub fn load_from_obj(
         obj_file_path: &str,
         base_volume: Arc<RefCell<dyn VoxelPaintVolume>>,
         width: usize,
         height: usize,
     ) -> Self {
-        let mut objects = Self::load_obj(obj_file_path).objects;
+        Self::new(Arc::new(Self::load_obj(obj_file_path)), base_volume, width, height)
+    }
+    pub fn new(
+        obj: Arc<ObjFile>,
+        base_volume: Arc<RefCell<dyn VoxelPaintVolume>>,
+        width: usize,
+        height: usize,
+    ) -> Self {
+        Self {
+            volume: base_volume,
+            obj,
+            width,
+            height,
+        }
+    }
+
+    pub fn load_obj(file_path: &str) -> ObjFile {
+        let obj_file = std::fs::read_to_string(file_path).unwrap();
+        // filter out material definitions that wavefront_obj does not cope well with
+        let obj_file = obj_file
+            .lines()
+            .filter(|line| !line.starts_with("mtllib"))
+            .filter(|line| !line.starts_with("usemtl"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let obj_set = obj::parse(obj_file).unwrap();
+
+        let mut objects = obj_set.objects;
         println!("Loaded obj file with {} objects", objects.len());
         for o in objects.iter() {
             println!(
@@ -65,32 +100,15 @@ impl ObjVolume {
         }
 
         let object = objects.remove(0);
-        let obj = ObjFile { object };
-        let invert_tris = obj.has_inverted_uv_tris();
-
-        Self {
-            volume: base_volume,
-            obj,
-            width,
-            height,
-            invert_tris,
-        }
+        ObjFile::new(object)
     }
 
-    fn load_obj(file_path: &str) -> obj::ObjSet {
-        let obj_file = std::fs::read_to_string(file_path).unwrap();
-        // filter out material definitions that wavefront_obj does not cope well with
-        let obj_file = obj_file
-            .lines()
-            .filter(|line| !line.starts_with("mtllib"))
-            .filter(|line| !line.starts_with("usemtl"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        obj::parse(obj_file).unwrap()
+    pub fn width(&self) -> usize {
+        self.width
     }
-
-    pub fn width(&self) -> usize { self.width }
-    pub fn height(&self) -> usize { self.height }
+    pub fn height(&self) -> usize {
+        self.height
+    }
     pub fn convert_to_volume_coords(&self, coord: [i32; 3]) -> [i32; 3] {
         let u = coord[0];
         let v = coord[1];
@@ -162,7 +180,7 @@ impl ObjVolume {
     }
 
     fn v(&self, v: f64) -> f64 {
-        if self.invert_tris {
+        if self.obj.has_inverted_uv_tris {
             v
         } else {
             1.0 - v
@@ -456,7 +474,9 @@ impl SurfaceVolume for ObjVolume {
                         || minz > maxs[2]
                         || maxz < mins[2])
                     {
-                        fn coord(v: &Vertex) -> [f64; 3] { [v.x, v.y, v.z] }
+                        fn coord(v: &Vertex) -> [f64; 3] {
+                            [v.x, v.y, v.z]
+                        }
                         fn intersects(v1: &Vertex, v2: &Vertex, w: i32, plane_coord: usize) -> bool {
                             (coord(v1)[plane_coord] - w as f64).signum() != (coord(v2)[plane_coord] - w as f64).signum()
                         }
@@ -515,7 +535,9 @@ fn paint_zoom_align(v: i32, paint_zoom: u8) -> i32 {
     let v = v / paint_zoom as i32;
     v * paint_zoom as i32
 }
-fn paint_zoom_align_up(v: i32, paint_zoom: u8) -> i32 { paint_zoom_align(v + paint_zoom as i32 - 1, paint_zoom) }
+fn paint_zoom_align_up(v: i32, paint_zoom: u8) -> i32 {
+    paint_zoom_align(v + paint_zoom as i32 - 1, paint_zoom)
+}
 
 #[allow(dead_code)] // useful for debugging triangle shapes
 fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut Image, width: usize, height: usize, r: u8, g: u8, b: u8) {
@@ -549,5 +571,7 @@ fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut Image, width: usize, he
 }
 
 impl VoxelVolume for ObjVolume {
-    fn get(&mut self, _xyz: [f64; 3], _downsampling: i32) -> u8 { todo!() }
+    fn get(&mut self, _xyz: [f64; 3], _downsampling: i32) -> u8 {
+        todo!()
+    }
 }
