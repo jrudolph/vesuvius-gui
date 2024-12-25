@@ -83,11 +83,13 @@ fn main() {
     let obj_file = Arc::new(ObjVolume::load_obj(obj_file));
 
     let style =
-        ProgressStyle::with_template("[{elapsed_precise}] {bar:80.cyan/blue} {pos}/{len} ({eta}) {msg}").unwrap();
+        ProgressStyle::with_template("{spinner} {msg:30} {bar:80.cyan/blue} {pos}/{len} [{elapsed_precise}] ({eta}) ")
+            .unwrap()
+            .tick_chars("→↘↓↙←↖↑↗");
     let requested_tiles = tiles
         .into_par_iter()
         .progress_with_style(style.clone())
-        .with_message("Scanning tiles to download...")
+        .with_message("Mapping segment...")
         .flat_map(|(u, v, w)| {
             let dummy = Arc::new(RefCell::new(DummyVolume2::new()));
             //let world = Arc::new(RefCell::new(dummy.clone()));
@@ -132,6 +134,7 @@ fn main() {
     println!("Total tiles: {}", requested_tiles.len());
 
     let dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
+    // FIXME: proper base path missing
 
     let requested_tiles = requested_tiles
         .iter()
@@ -166,8 +169,12 @@ fn main() {
     );
 
     // queue max 16 tiles to downloader and only schedule new when one is finished
-    let dstyle = ProgressStyle::with_template("[{elapsed_precise}] {bar:80.cyan/blue} {decimal_bytes}/{decimal_total_bytes} ({decimal_bytes_per_sec}) ({eta})").unwrap();
-    let bar = ProgressBar::new(requested_tiles.len() as u64 * 64 * 64 * 64).with_style(dstyle);
+    let dstyle = ProgressStyle::with_template("{spinner} {msg:30} {bar:80.cyan/blue} [{elapsed_precise}] ({eta}) {decimal_bytes}/{decimal_total_bytes} ({decimal_bytes_per_sec})")
+    .unwrap().tick_chars("→↘↓↙←↖↑↗");
+
+    let bar = ProgressBar::new(requested_tiles.len() as u64 * 64 * 64 * 64)
+        .with_style(dstyle)
+        .with_message("Downloading tiles");
     let queue = requested_tiles.iter().cloned().collect::<Vec<_>>();
     let mut iter = queue.iter();
     let mut running = 0;
@@ -187,15 +194,26 @@ fn main() {
                     },
                 ));
                 running += 1;
+                //println!("[{},{}] Queued downloading tile: {},{},{}", running, finished, x, y, z);
             } else {
-                println!("No more tiles to download, finished: {}", finished);
+                /* println!(
+                    "No more tiles to download, running: {} finished: {}/{}",
+                    running,
+                    finished,
+                    requested_tiles.len()
+                ); */
                 std::thread::sleep(std::time::Duration::from_millis(1000));
-                //break;
+                break;
             }
         }
         while running > 0 && receiver.try_recv().is_ok() {
             finished += 1;
             running -= 1;
+            /* println!(
+                "[{},{}] Finished downloading tile: {},{},{}",
+                running, finished, x, y, z
+            ); */
+
             bar.inc(64 * 64 * 64);
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
