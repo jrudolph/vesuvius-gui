@@ -66,7 +66,7 @@ pub trait VoxelVolume {
 pub struct Image {
     width: usize,
     height: usize,
-    data: Vec<Color32>,
+    pub data: Vec<Color32>,
 }
 impl Image {
     pub fn new(width: usize, height: usize) -> Self {

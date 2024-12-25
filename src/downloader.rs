@@ -32,24 +32,34 @@ impl DownloadState {
     }
 }
 
-type DownloadTask = (Arc<Mutex<DownloadState>>, usize, usize, usize, Quality);
+pub type DownloadTask = (Arc<Mutex<DownloadState>>, usize, usize, usize, Quality);
 
 enum DownloadMessage {
     Download(DownloadTask),
     Position(i32, i32, i32, usize, usize),
 }
 
-pub struct Downloader {
+pub trait Downloader {
+    fn queue(&mut self, task: DownloadTask);
+}
+
+pub struct SimpleDownloader {
     download_queue: Sender<DownloadMessage>,
 }
-impl Downloader {
+impl Downloader for SimpleDownloader {
+    fn queue(&mut self, task: DownloadTask) {
+        self.download_queue.send(DownloadMessage::Download(task)).unwrap();
+    }
+}
+impl SimpleDownloader {
     pub fn new(
         dir: &str,
         tile_server_base: &'static str,
         volume: &dyn VolumeReference,
         authorization: Option<String>,
-        download_notifier: Sender<()>,
-    ) -> Downloader {
+        download_notifier: Sender<(usize, usize, usize, Quality)>,
+        log_downloads: bool,
+    ) -> Self {
         let (sender, receiver) = std::sync::mpsc::channel::<DownloadMessage>();
 
         let count = Arc::new(AtomicUsize::new(0));
@@ -64,7 +74,7 @@ impl Downloader {
                     DownloadMessage::Position(x, y, z, width, height) => _pos = (x, y, z, width, height),
                     DownloadMessage::Download((state, x, y, z, quality)) => {
                         let cur = count.load(Ordering::Acquire);
-                        if cur >= 16 {
+                        if cur >= 32 {
                             *state.lock().unwrap() = DownloadState::Pruned;
                             continue;
                         }
@@ -75,7 +85,9 @@ impl Downloader {
                         {
                             {
                                 *state.lock().unwrap() = DownloadState::Downloading;
-                                println!("Downloading {} {} {} {}", x, y, z, quality.downsampling_factor);
+                                if log_downloads {
+                                    println!("Downloading {} {} {} {}", x, y, z, quality.downsampling_factor);
+                                }
                                 //let url = format!("https://vesuvius.virtual-void.net/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                                 //let url = format!("http://localhost:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
                                 //let url = format!("http://5.161.229.51:8095/tiles/scroll/332/volume/20231027191953/download/128-16?x={}&y={}&z={}", x, y, z);
@@ -107,15 +119,17 @@ impl Downloader {
                                 ehttp::fetch(request, move |response| {
                                     if let Ok(res) = response {
                                         if res.status == 200 {
-                                            println!(
-                                                "got tile {}/{}/{} q{} after {} ms (downloading: {})",
-                                                x,
-                                                y,
-                                                z,
-                                                quality.downsampling_factor,
-                                                start.elapsed().as_millis(),
-                                                c2.load(Ordering::Acquire) - 1
-                                            );
+                                            if log_downloads {
+                                                println!(
+                                                    "got tile {}/{}/{} q{} after {} ms (downloading: {})",
+                                                    x,
+                                                    y,
+                                                    z,
+                                                    quality.downsampling_factor,
+                                                    start.elapsed().as_millis(),
+                                                    c2.load(Ordering::Acquire) - 1
+                                                );
+                                            }
                                             let bytes = res.bytes;
                                             // save bytes to file
                                             let file_name = format!(
@@ -136,7 +150,7 @@ impl Downloader {
                                             .unwrap();
                                             std::fs::write(file_name, bytes).unwrap();
                                             *state.lock().unwrap() = DownloadState::Done;
-                                            let _ = notifier.send(());
+                                            let _ = notifier.send((x, y, z, quality));
                                         } else if res.status == 420 {
                                             println!("delayed tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
                                             *state.lock().unwrap() = DownloadState::Delayed;
@@ -168,7 +182,7 @@ impl Downloader {
             }
         });
 
-        Downloader { download_queue: sender }
+        Self { download_queue: sender }
     }
 
     pub fn check_authorization(tile_server_base: &'static str, authorization: Option<String>) -> bool {
@@ -203,7 +217,6 @@ impl Downloader {
         }
     }
 
-    pub fn queue(&self, task: DownloadTask) { self.download_queue.send(DownloadMessage::Download(task)).unwrap(); }
     pub fn position(&self, x: i32, y: i32, z: i32, width: usize, height: usize) {
         self.download_queue
             .send(DownloadMessage::Position(x, y, z, width, height))

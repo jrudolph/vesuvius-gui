@@ -117,7 +117,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     last_size: Vec2,
     #[serde(skip)]
-    download_notifier: Option<Receiver<()>>,
+    download_notifier: Option<Receiver<(usize, usize, usize, Quality)>>,
     drawing_config: DrawingConfig,
     #[serde(skip)]
     ranges: [RangeInclusive<i32>; 3],
@@ -330,19 +330,28 @@ impl TemplateApp {
     }
 
     fn load_data(&mut self, volume: &dyn VolumeReference) {
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = std::sync::mpsc::channel::<(usize, usize, usize, Quality)>();
         self.download_notifier = Some(receiver);
 
         let volume_dir = volume.sub_dir(&self.data_dir);
 
         self.world = {
-            let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, None, sender);
+            let downloader = Box::new(SimpleDownloader::new(
+                &volume_dir,
+                Self::TILE_SERVER,
+                volume,
+                None,
+                sender,
+                false,
+            ));
             let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
             Arc::new(RefCell::new(v))
         };
     }
 
-    pub fn is_segment_mode(&self) -> bool { self.segment_mode.is_some() }
+    pub fn is_segment_mode(&self) -> bool {
+        self.segment_mode.is_some()
+    }
 
     fn load_from_cells(&mut self) {
         let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
