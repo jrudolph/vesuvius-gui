@@ -1,100 +1,14 @@
 use directories::BaseDirs;
 use indicatif::{ProgressBar, ProgressStyle};
-use rayon::iter::IntoParallelIterator;
-use serde::de;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::atomic::AtomicUsize;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, Mutex};
-use vesuvius_gui::downloader::{DownloadState, DownloadTask, Downloader, SimpleDownloader};
-use vesuvius_gui::model::{self, FullVolumeReference};
-use vesuvius_gui::model::{Quality, VolumeReference};
+use vesuvius_gui::downloader::{DownloadState, Downloader, SimpleDownloader};
+use vesuvius_gui::model::FullVolumeReference;
+use vesuvius_gui::model::Quality;
 use vesuvius_gui::volume::{
-    self, DrawingConfig, Image, ObjVolume, PPMVolume, PaintVolume, TrilinearInterpolatedVolume, VoxelPaintVolume,
-    VoxelVolume,
+    self, DrawingConfig, Image, ObjVolume, PaintVolume, TrilinearInterpolatedVolume, VoxelPaintVolume, VoxelVolume,
 };
-use wavefront_obj::obj;
-
-struct DummyDownloader {
-    requested_tiles: HashSet<(usize, usize, usize)>,
-}
-impl DummyDownloader {
-    fn new() -> Self {
-        Self {
-            requested_tiles: HashSet::new(),
-        }
-    }
-}
-
-struct WrappedDummy {
-    inner: Arc<RefCell<DummyDownloader>>,
-}
-impl WrappedDummy {
-    fn new(inner: Arc<RefCell<DummyDownloader>>) -> Self {
-        Self { inner }
-    }
-}
-impl Downloader for WrappedDummy {
-    fn queue(
-        &mut self,
-        (
-            _,
-            x,
-            y,
-            z,
-            Quality {
-                bit_mask,
-                downsampling_factor,
-            },
-        ): DownloadTask,
-    ) {
-        assert!(bit_mask == 255 && downsampling_factor == 1);
-        self.inner.borrow_mut().requested_tiles.insert((x, y, z));
-    }
-}
-
-#[derive(Clone)]
-struct DummyVolume {
-    requested_tiles: Arc<RefCell<HashSet<(usize, usize, usize)>>>,
-    last_requested: Arc<RefCell<(usize, usize, usize)>>,
-}
-impl DummyVolume {
-    fn new() -> Self {
-        Self {
-            requested_tiles: Arc::new(RefCell::new(HashSet::new())),
-            last_requested: Arc::new(RefCell::new((0, 0, 0))), //FIXME: use max,max,max
-        }
-    }
-}
-impl PaintVolume for DummyVolume {
-    fn paint(
-        &mut self,
-        _xyz: [i32; 3],
-        _u_coord: usize,
-        _v_coord: usize,
-        _plane_coord: usize,
-        _width: usize,
-        _height: usize,
-        _sfactor: u8,
-        _paint_zoom: u8,
-        _config: &DrawingConfig,
-        _buffer: &mut Image,
-    ) {
-        panic!();
-    }
-}
-impl VoxelVolume for DummyVolume {
-    fn get(&mut self, xyz: [f64; 3], _downsampling: i32) -> u8 {
-        let xyz2 = ((xyz[0] as usize) >> 6, (xyz[1] as usize) >> 6, (xyz[2] as usize) >> 6);
-        //println!("{:?} -> {:?}", xyz, xyz2);
-        let mut last = self.last_requested.borrow_mut();
-        if *last != xyz2 {
-            *last = xyz2;
-            self.requested_tiles.borrow_mut().insert(xyz2);
-        }
-        0
-    }
-}
 
 #[derive(Clone)]
 struct DummyVolume2 {
@@ -164,7 +78,6 @@ fn main() {
     let tile_height = height / 4;
 
     use indicatif::ParallelProgressIterator;
-    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use rayon::prelude::*;
 
     let obj_file = Arc::new(ObjVolume::load_obj(obj_file));
@@ -298,7 +211,7 @@ fn main() {
         .progress_with_style(style.clone())
         .with_message("Rendering layers")
         .for_each(move |w| {
-            let (sender, receiver) = std::sync::mpsc::channel();
+            let (sender, _) = std::sync::mpsc::channel();
             let downloader = SimpleDownloader::new(
                 dir.to_str().unwrap(),
                 TILE_SERVER,
