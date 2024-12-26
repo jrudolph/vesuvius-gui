@@ -5,6 +5,8 @@ edition = "2021"
 rust-version = "1.70"
 
 [dependencies]
+anyhow = "1.0.95"
+async-recursion = "1.1.1"
 base64          = { version = "0.22" }
 clap            = { version = "4.4", features = [ "derive" ] }
 derive_more     = { version = "1", features = [ "debug" ] }
@@ -20,18 +22,21 @@ egui            = { version = "0.30" }
 egui_extras     = { version = "0.30", features = [ "all_loaders" ] }
 ehttp           = { version = "0.5" }
 emath           = { version = "0.30"}
+futures = "0.3.31"
 image           = { version = "0.25", default-features=false, features = ["png","tiff"] }
 indicatif       = { version = "0.17", features = ["rayon"]}
 itertools       = { version = "0.13" }
 libm            = { version = "0.2" }
 log             = { version = "0.4" }
 lz4-compression = { version = "0.7" }
+num_cpus = "1.16.0"
 rayon           = { version = "1" }
 regex           = { version = "1", default-features=false, features = ["unicode-perl"] }
 ruzstd          = { version = "0.7" }
 serde           = { version = "1", features = ["derive"] }
 serde_json      = { version = "1" }
 tiff            = { version = "0.9" }
+tokio = {version = "1", features = ["rt-multi-thread", "time", "macros", "sync"]}
 wavefront_obj   = { version = "10.0" }
 
 # native:

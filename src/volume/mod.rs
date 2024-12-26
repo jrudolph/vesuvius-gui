@@ -13,7 +13,7 @@ pub use generic::AutoPaintVolume;
 pub use grid500::VolumeGrid500Mapped;
 pub use interpolated::TrilinearInterpolatedVolume;
 pub use layers::LayersMappedVolume;
-pub use objvolume::ObjVolume;
+pub use objvolume::{ObjFile, ObjVolume};
 pub use ppmvolume::PPMVolume;
 pub use volume64x4::VolumeGrid64x4Mapped;
 

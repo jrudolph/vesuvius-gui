@@ -1,13 +1,21 @@
+#![allow(dead_code, unused)]
+use anyhow::{anyhow, Result};
+use async_recursion::async_recursion;
 use directories::BaseDirs;
-use indicatif::{ProgressBar, ProgressStyle};
+use futures::{stream, Stream, StreamExt};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
+use std::future::IntoFuture;
+use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
-use vesuvius_gui::downloader::{DownloadState, Downloader, SimpleDownloader};
-use vesuvius_gui::model::FullVolumeReference;
+use vesuvius_gui::downloader::{DownloadState as DS, Downloader, SimpleDownloader};
+use vesuvius_gui::gui::ObjFileConfig;
 use vesuvius_gui::model::Quality;
+use vesuvius_gui::model::{FullVolumeReference, VolumeReference};
 use vesuvius_gui::volume::{
-    self, DrawingConfig, Image, ObjVolume, PaintVolume, TrilinearInterpolatedVolume, VoxelPaintVolume, VoxelVolume,
+    self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, TrilinearInterpolatedVolume, VoxelPaintVolume,
+    VoxelVolume,
 };
 
 #[derive(Clone)]
@@ -52,7 +60,360 @@ impl VoxelVolume for DummyVolume2 {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main2() {
+    fn slow_op(x: usize) -> (usize, BTreeSet<usize>) {
+        println!("Starting slow op for {}", x);
+        let mut set = BTreeSet::new();
+        for i in 0..x {
+            set.insert(i);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        (x, set)
+    }
+
+    stream::iter(0..1000)
+        .map(|x| async move { tokio::task::spawn_blocking(move || slow_op(x)).await.unwrap() })
+        .buffer_unordered(num_cpus::get())
+        .for_each(|(x, set)| async move {
+            println!("Finished slow op for {}", x);
+        })
+        .await;
+}
+
+#[derive(Clone)]
+struct RenderParams {
+    obj_file: String,
+    width: usize,
+    height: usize,
+    tile_size: usize,
+    w_range: RangeInclusive<usize>,
+    target_dir: String,
+}
+
+#[derive(Debug, Copy, Clone)]
+struct UVTile {
+    u: usize,
+    v: usize,
+    w: usize,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct VolumeChunk {
+    x: usize,
+    y: usize,
+    z: usize,
+}
+impl From<(usize, usize, usize)> for VolumeChunk {
+    fn from((x, y, z): (usize, usize, usize)) -> Self {
+        VolumeChunk { x, y, z }
+    }
+}
+
+const MID_W: i32 = 32;
+
+struct DownloadState {
+    downloaded: BTreeSet<VolumeChunk>,
+    downloader: AsyncDownloader,
+}
+impl DownloadState {
+    fn new(settings: DownloadSettings) -> Self {
+        DownloadState {
+            downloaded: BTreeSet::new(),
+            downloader: AsyncDownloader {
+                semaphore: tokio::sync::Semaphore::new(settings.concurrent_downloads),
+                settings,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DownloadSettings {
+    tile_server_base: String,
+    volume_base_path: String,
+    cache_dir: String,
+    retries: u8,
+    concurrent_downloads: usize,
+}
+
+struct AsyncDownloader {
+    semaphore: tokio::sync::Semaphore,
+    settings: DownloadSettings,
+}
+impl AsyncDownloader {
+    async fn download_chunk(&self, chunk: VolumeChunk) -> Result<()> {
+        self.download_attempt(chunk, self.settings.retries).await
+    }
+
+    #[async_recursion]
+    async fn download_attempt(&self, chunk: VolumeChunk, retries: u8) -> Result<()> {
+        if (retries == 0) {
+            return Err(anyhow!("Failed to download tile"));
+        }
+        println!("Queueing Downloading chunk: {:?}", chunk);
+
+        let permit = self.semaphore.acquire().await.unwrap();
+        println!("Downloading chunk: {:?}", chunk);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let url = self.url_for(chunk);
+        let mut request = ehttp::Request::get(url.clone());
+        ehttp::fetch(request, |result| {
+            sender.send(result).unwrap();
+        });
+
+        let response = receiver.await.unwrap();
+        drop(permit);
+        if let Ok(res) = response {
+            if res.status == 200 {
+                let VolumeChunk { x, y, z } = chunk;
+                let bytes = res.bytes;
+                let file_name = format!(
+                    "{}/64-4/d{:02}/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin",
+                    self.settings.cache_dir, 1, z, x, y, z, 255, 1
+                );
+                std::fs::create_dir_all(format!("{}/64-4/d{:02}/z{:03}", self.settings.cache_dir, 1, z)).unwrap();
+                let tmp_file = format!("{}.tmp", file_name);
+                std::fs::write(&tmp_file, bytes).unwrap();
+                std::fs::rename(tmp_file, file_name).unwrap();
+            } else if res.status == 420 {
+                // retry in 10 seconds
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                return self.download_attempt(chunk, retries - 1).await;
+            } else {
+                todo!();
+            }
+        } else {
+            return Err(anyhow!("Failed to download tile"));
+        }
+
+        Ok(())
+    }
+
+    fn url_for(&self, VolumeChunk { x, y, z }: VolumeChunk) -> String {
+        format!(
+            "{}/tiles/{}download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}",
+            self.settings.tile_server_base, self.settings.volume_base_path, x, y, z, 255, 1
+        )
+    }
+}
+
+#[derive(Clone)]
+struct Rendering {
+    params: RenderParams,
+    obj: Arc<ObjFile>,
+    download_state: Arc<Mutex<DownloadState>>,
+}
+impl Rendering {
+    fn new(params: RenderParams) -> Self {
+        let obj = Arc::new(ObjVolume::load_obj(&params.obj_file));
+        // FIXME: make configurable
+        let volume = FullVolumeReference::SCROLL1;
+
+        let settings = DownloadSettings {
+            tile_server_base: "https://vesuvius.virtual-void.net".to_string(),
+            volume_base_path: volume.url_path_base(),
+            cache_dir: BaseDirs::new()
+                .unwrap()
+                .cache_dir()
+                .join("vesuvius-gui")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            retries: 20,
+            concurrent_downloads: 32,
+        };
+
+        Self {
+            params,
+            obj,
+            download_state: Arc::new(Mutex::new(DownloadState::new(settings))),
+        }
+    }
+    async fn run(&self) -> Result<()> {
+        let multi = MultiProgress::new();
+
+        let count_style = ProgressStyle::with_template(
+            "{spinner} {msg:30} {bar:80.cyan/blue} {pos}/{len} [{elapsed_precise}] ({eta}) ",
+        )
+        .unwrap()
+        .tick_chars("→↘↓↙←↖↑↗");
+
+        let tiles = self.uv_tiles();
+
+        let map_bar = ProgressBar::new(tiles.len() as u64)
+            .with_style(count_style)
+            .with_message("Mapping segment");
+        multi.add(map_bar.clone());
+
+        let dstyle =
+    ProgressStyle::with_template("{spinner} {msg:30} {bar:80.cyan/blue} [{elapsed_precise}] ({eta}) {decimal_bytes}/{decimal_total_bytes} ({decimal_bytes_per_sec})")
+    .unwrap().tick_chars("→↘↓↙←↖↑↗");
+
+        let download_bar = ProgressBar::new(0).with_style(dstyle).with_message("Downloading tiles");
+        multi.add(download_bar.clone());
+
+        let buf_size = 32;
+
+        stream::iter(tiles)
+            .map(move |tile| {
+                let map_bar = map_bar.clone();
+                async move {
+                    let self_clone = self.clone();
+                    let chunks = tokio::task::spawn_blocking(move || self_clone.chunks_for(&tile))
+                        .await
+                        .unwrap();
+                    map_bar.inc(1);
+                    (tile, chunks)
+                }
+            })
+            .buffer_unordered(buf_size)
+            .map(|(tile, chunks)| {
+                let download_bar = download_bar.clone();
+                async move {
+                    self.download_all_chunks(chunks, download_bar).await;
+                    tile
+                }
+            })
+            .buffered(buf_size) // needs ordering because we deduplicate downloads here
+            .map(|tile| async move {
+                self.render_tile(&tile).await;
+                tile
+            })
+            .buffer_unordered(buf_size)
+            .for_each(|tile| async move {
+                self.finish_layer(&tile).await;
+            })
+            .await;
+
+        Ok(())
+    }
+    fn uv_tiles(&self) -> Vec<UVTile> {
+        let mut res = Vec::new();
+        for w in self.params.w_range.clone() {
+            for u in (0..self.params.width).step_by(self.params.tile_size) {
+                for v in (0..self.params.height).step_by(self.params.tile_size) {
+                    let tile = UVTile { u, v, w };
+                    res.push(tile);
+                }
+            }
+        }
+        res
+    }
+    fn chunks_for(&self, UVTile { u, v, w }: &UVTile) -> BTreeSet<VolumeChunk> {
+        let dummy = Arc::new(RefCell::new(DummyVolume2::new()));
+        //let world = Arc::new(RefCell::new(dummy.clone()));
+        let trilinear_interpolation = true;
+        let base: Arc<RefCell<dyn VoxelPaintVolume + 'static>> = if trilinear_interpolation {
+            Arc::new(RefCell::new(TrilinearInterpolatedVolume { base: dummy.clone() }))
+        } else {
+            dummy.clone()
+        };
+        let width = self.params.width;
+        let height = self.params.height;
+        let tile_width = self.params.tile_size;
+        let tile_height = self.params.tile_size;
+        let world = Arc::new(RefCell::new(ObjVolume::new(self.obj.clone(), base, width, height)));
+        let mut world = world.borrow_mut();
+
+        let mut image = Image::new(tile_width, tile_height);
+        let xyz = [
+            *u as i32 + tile_width as i32 / 2,
+            *v as i32 + tile_height as i32 / 2,
+            *w as i32 - MID_W,
+        ];
+        world.paint(
+            xyz,
+            0,
+            1,
+            2,
+            tile_width,
+            tile_height,
+            1,
+            1,
+            &DrawingConfig::default(),
+            &mut image,
+        );
+        let res = dummy.borrow().requested_tiles.clone();
+        //println!("Tile: {},{} [{:?}]-> {:?}", u, v, xyz, res.len());
+        res.into_iter().map(Into::into).collect()
+    }
+    async fn download_all_chunks(&self, mut chunks: BTreeSet<VolumeChunk>, bar: ProgressBar) -> Result<()> {
+        let dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
+        // FIXME: proper base path missing
+
+        let filtered = {
+            let mut downloaded = self.download_state.lock().unwrap();
+            let res = chunks
+                .difference(&downloaded.downloaded)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            downloaded.downloaded.append(&mut chunks);
+            res
+        };
+        let requested_tiles = filtered
+            .into_iter()
+            .filter(|VolumeChunk { x, y, z }| {
+                let file_name = format!(
+                    "{}/64-4/d01/z{:03}/xyz-{:03}-{:03}-{:03}-b255-d01.bin",
+                    dir.to_str().unwrap(),
+                    z,
+                    x,
+                    y,
+                    z
+                );
+                !std::path::Path::new(&file_name).exists()
+            })
+            .collect::<Vec<_>>();
+        let old_len = bar.length().unwrap_or(0);
+        bar.set_length(old_len + requested_tiles.len() as u64 * 64 * 64 * 64);
+
+        stream::iter(requested_tiles)
+            .map(|chunk| {
+                let bar = bar.clone();
+                let c = self.clone();
+                async move {
+                    c.download_state
+                        .lock()
+                        .unwrap()
+                        .downloader
+                        .download_chunk(chunk)
+                        .await
+                        .unwrap();
+                    bar.inc(64 * 64 * 64);
+                }
+            })
+            .buffered(32)
+            .collect::<Vec<_>>()
+            .await;
+
+        Ok(())
+    }
+    async fn render_tile(&self, uv_tile: &UVTile) -> Result<()> {
+        //std::thread::sleep(std::time::Duration::from_millis(1000));
+        Ok(())
+    }
+    async fn finish_layer(&self, uv_tile: &UVTile) -> Result<()> {
+        //std::thread::sleep(std::time::Duration::from_millis(1000));
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let params = RenderParams {
+        obj_file: "/tmp/20231031143852.obj".to_string(),
+        width: 13577,
+        height: 10620,
+        tile_size: 4096,
+        w_range: 25..=41,
+        target_dir: "/tmp".to_string(),
+    };
+    let rendering = Rendering::new(params);
+    rendering.run().await.unwrap();
+}
+
+fn main3() {
     const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
 
     let obj_file = "/tmp/20231031143852.obj";
@@ -169,7 +530,8 @@ fn main() {
     );
 
     // queue max 16 tiles to downloader and only schedule new when one is finished
-    let dstyle = ProgressStyle::with_template("{spinner} {msg:30} {bar:80.cyan/blue} [{elapsed_precise}] ({eta}) {decimal_bytes}/{decimal_total_bytes} ({decimal_bytes_per_sec})")
+    let dstyle =
+    ProgressStyle::with_template("{spinner} {msg:30} {bar:80.cyan/blue} [{elapsed_precise}] ({eta}) {decimal_bytes}/{decimal_total_bytes} ({decimal_bytes_per_sec})")
     .unwrap().tick_chars("→↘↓↙←↖↑↗");
 
     let bar = ProgressBar::new(requested_tiles.len() as u64 * 64 * 64 * 64)
@@ -182,7 +544,7 @@ fn main() {
     while finished < requested_tiles.len() {
         while running < 32 {
             if let Some((x, y, z)) = iter.next() {
-                let state = Arc::new(Mutex::new(DownloadState::Queuing));
+                let state = Arc::new(Mutex::new(DS::Queuing));
                 downloader.queue((
                     state.clone(),
                     *x,
