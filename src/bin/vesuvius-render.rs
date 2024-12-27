@@ -196,7 +196,7 @@ impl Rendering {
                 .unwrap()
                 .to_string(),
             retries: 20,
-            concurrent_downloads: 32,
+            concurrent_downloads: 64,
         };
 
         Self {
@@ -209,9 +209,7 @@ impl Rendering {
             }),
         }
     }
-    async fn run(&self) -> Result<()> {
-        let multi = MultiProgress::new();
-
+    async fn run(&self, multi: &MultiProgress) -> Result<()> {
         let count_style = ProgressStyle::with_template(
             "{spinner} {msg:25} {bar:80.cyan/blue} [{elapsed_precise}] ({eta:>4}) {pos}/{len}",
         )
@@ -233,6 +231,7 @@ impl Rendering {
             .with_style(dstyle)
             .with_message("Downloading chunks");
         multi.add(download_bar.clone());
+        download_bar.tick();
 
         /* let render_bar = ProgressBar::new(tiles.len() as u64)
             .with_style(count_style.clone().tick_chars("▪▫▨▧▦▩"))
@@ -243,8 +242,9 @@ impl Rendering {
             .with_style(count_style.tick_chars("⌷⌸⌹⌺"))
             .with_message("Saving layers");
         multi.add(layers_bar.clone());
+        layers_bar.tick();
 
-        let buf_size = 4096;
+        let buf_size = 64;
 
         stream::iter(tiles)
             .map(move |tile| {
@@ -294,8 +294,8 @@ impl Rendering {
                     res
                 }
             })
-            .buffered(buf_size)
-            .for_each(futures::future::ready)
+            .buffer_unordered(buf_size)
+            .collect::<Vec<_>>()
             .await;
 
         Ok(())
@@ -460,8 +460,18 @@ impl Rendering {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(num_cpus::get())
+        .build()
+        .unwrap()
+        .block_on(main_run());
+}
+
+async fn main_run() {
+    let multi = MultiProgress::new();
+    monitor_runtime_stats(&multi).await;
     /* let params = RenderParams {
         obj_file: "/tmp/20231031143852.obj".to_string(),
         width: 13577,
@@ -472,16 +482,46 @@ async fn main() {
     }; */
 
     let params = RenderParams {
+        obj_file: "/tmp/mesh_window_350414_400414_flatboi.obj".to_string(),
+        width: 40174,
+        height: 16604,
+        tile_size: 4096,
+        w_range: 30..=36,
+        target_dir: "/tmp".to_string(),
+    };
+    // /tmp/mesh_window_900414_950414_flatboi.obj
+    // 15312	16097
+    let params = RenderParams {
+        obj_file: "/tmp/mesh_window_900414_950414_flatboi.obj".to_string(),
+        width: 15312,
+        height: 16097,
+        tile_size: 4096,
+        w_range: 25..=25,
+        target_dir: "/tmp".to_string(),
+    };
+
+    // /tmp/20231221180251.obj
+    //12975	9893
+    let params = RenderParams {
+        obj_file: "/tmp/20231221180251.obj".to_string(),
+        width: 12975,
+        height: 9893,
+        tile_size: 4096,
+        w_range: 25..=41,
+        target_dir: "/tmp".to_string(),
+    };
+
+    /* let params = RenderParams {
         obj_file: "/home/johannes/tmp/pap/20230827161847.obj".to_string(),
         width: 5048,
         height: 9163,
         tile_size: 4096,
         w_range: 25..=41,
         target_dir: "/tmp".to_string(),
-    };
+    }; */
 
     let rendering = Rendering::new(params);
-    rendering.run().await.unwrap();
+    rendering.run(&multi).await.unwrap();
 }
 
 fn main3() {
@@ -710,4 +750,35 @@ fn main3() {
             let image = image::GrayImage::from_raw(width as u32, height as u32, data).unwrap();
             image.save(format!("test_layers/{:02}.png", w)).unwrap();
         });
+}
+
+use tokio::runtime::Handle;
+
+async fn monitor_runtime_stats(multi: &MultiProgress) {
+    let bar = ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap());
+    multi.add(bar.clone());
+    tokio::spawn(async move {
+        loop {
+            let metrics = tokio::runtime::Handle::current().metrics();
+
+            // Print all available metrics
+            /* println!("=== Runtime Metrics ===");
+            println!("Workers: {}", metrics.num_workers());
+            println!("Blocking threads: {}", metrics.num_blocking_threads());
+            println!("Active tasks: {}", metrics.num_alive_tasks());
+            println!("Idle blocking threads: {}", metrics.num_idle_blocking_threads()); */
+
+            let bar_line = format!(
+                "Workers: {} Active tasks: {} Running blocking threads: {} Blocking threads: {} Idle blocking threads: {}",
+                metrics.num_workers(),
+                metrics.num_alive_tasks(),
+                metrics.num_blocking_threads() - metrics.num_idle_blocking_threads(),
+                metrics.num_blocking_threads(),
+                metrics.num_idle_blocking_threads()
+            );
+            bar.set_message(bar_line);
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    });
 }
