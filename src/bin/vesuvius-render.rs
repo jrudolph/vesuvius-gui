@@ -1,22 +1,74 @@
 #![allow(dead_code, unused)]
 use anyhow::{anyhow, Result};
 use async_recursion::async_recursion;
+use clap::Parser;
 use directories::BaseDirs;
-use futures::{stream, Stream, StreamExt};
+use futures::{stream, StreamExt};
+use image::Luma;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashSet};
-use std::future::{Future, IntoFuture};
+use std::collections::BTreeSet;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
-use vesuvius_gui::downloader::{DownloadState as DS, Downloader, SimpleDownloader};
-use vesuvius_gui::gui::ObjFileConfig;
+use vesuvius_gui::downloader::{DownloadState as DS, Downloader};
 use vesuvius_gui::model::Quality;
 use vesuvius_gui::model::{FullVolumeReference, VolumeReference};
 use vesuvius_gui::volume::{
     self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, TrilinearInterpolatedVolume, VoxelPaintVolume,
     VoxelVolume,
 };
+
+/// Vesuvius Renderer, an app to render segments from obj files
+#[derive(Parser, Debug)]
+#[command(about, long_about = None)]
+pub struct Args {
+    /// Provide segment file to render
+    #[clap(long)]
+    obj: String,
+
+    /// Width of the segment file when browsing obj files
+    #[clap(long)]
+    width: usize,
+    /// Height of the segment file when browsing obj files
+    #[clap(long)]
+    height: usize,
+
+    /// The target directory to save the rendered images
+    #[clap(long)]
+    target_dir: String,
+
+    /// Output layer id that corresponds to the segment surface (default 32)
+    #[clap(long)]
+    middle_layer: Option<u32>,
+
+    /// Minimum layer id to render (default 25)
+    #[clap(long)]
+    min_layer: Option<u32>,
+
+    /// Maximum layer id to render (default 41)
+    #[clap(long)]
+    max_layer: Option<u32>,
+
+    /// The id of a volume to render against, otherwise Scroll 1A is used
+    #[clap(short, long)]
+    volume: Option<String>,
+
+    /// Override the data directory. By default, a directory in the user's cache is used
+    #[clap(short, long)]
+    data_directory: Option<String>,
+
+    /// The tile size to split a segment into (for ergonomic reasons) (default 1024)
+    #[clap(long)]
+    tile_size: Option<usize>,
+
+    /// The number of concurrent downloads to use (default 64)
+    #[clap(long)]
+    concurrent_downloads: Option<usize>,
+
+    /// The number of retries to use for downloads (default 20)
+    #[clap(long)]
+    retries: Option<u8>,
+}
 
 #[derive(Clone)]
 struct DummyVolume2 {
@@ -122,14 +174,14 @@ impl AsyncDownloader {
 
     #[async_recursion]
     async fn download_attempt(&self, chunk: VolumeChunk, retries: u8) -> Result<()> {
-        if (retries == 0) {
+        if retries == 0 {
             return Err(anyhow!("Failed to download tile"));
         }
         //println!("Queueing Downloading chunk: {:?}", chunk);
 
         let permit = self.semaphore.acquire().await.unwrap();
         let url = self.url_for(chunk);
-        let mut request = ehttp::Request::get(url.clone());
+        let request = ehttp::Request::get(url.clone());
 
         //println!("Downloading chunk: {:?} by request to {:?}", chunk, &request);
         let response = ehttp::fetch_async(request).await;
@@ -404,7 +456,7 @@ impl Rendering {
         let mut image = image::GrayImage::new(width as u32, height as u32);
 
         // copy in all the tile images
-        for (UVTile { u, v, w }, tile_image) in tiles {
+        for (UVTile { u, v, w: _ }, tile_image) in tiles {
             let tile_data = tile_image.data;
             // blit into the right area of image
             for lu in 0..tile_size {
@@ -541,9 +593,6 @@ async fn main_run() {
     let rendering = Rendering::new(params);
     rendering.run(&multi).await.unwrap();
 }
-
-use image::Luma;
-use tokio::runtime::Handle;
 
 async fn monitor_runtime_stats(multi: &MultiProgress) {
     let bar = ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap());
