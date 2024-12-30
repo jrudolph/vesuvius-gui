@@ -54,8 +54,6 @@ impl OmeZarrAttrs {
 }
 
 pub struct OmeZarr {
-    url: String,
-    cache_dir: String,
     attrs: OmeZarrAttrs,
 }
 
@@ -91,11 +89,7 @@ impl<C: ColorScheme> OmeZarrContext<C> {
     pub fn from_url(url: &str, local_cache_dir: &str) -> Self {
         let attrs = Self::load_attrs(url, local_cache_dir);
 
-        let ome_zarr = OmeZarr {
-            url: url.to_string(),
-            cache_dir: local_cache_dir.to_string(),
-            attrs,
-        };
+        let ome_zarr = OmeZarr { attrs };
         let zarr_contexts = ome_zarr.attrs.multiscales[0]
             .datasets
             .iter()
@@ -119,6 +113,32 @@ impl<C: ColorScheme> OmeZarrContext<C> {
         let sha256 = format!("{:x}", Sha256::digest(canonical_url.as_bytes()));
         let local_cache_dir = std::env::temp_dir().join("vesuvius-gui").join(sha256);
         Self::from_url(url, local_cache_dir.to_str().unwrap())
+    }
+    pub fn from_path(path: &str) -> Self {
+        let attrs = {
+            let target_file = format!("{}/.zattrs", path);
+            let zarray = std::fs::read_to_string(&target_file).unwrap();
+            println!("zarray: {}", zarray);
+            serde_json::from_str::<OmeZarrAttrs>(&zarray).unwrap()
+        };
+
+        let ome_zarr = OmeZarr { attrs };
+        let zarr_contexts = ome_zarr.attrs.multiscales[0]
+            .datasets
+            .iter()
+            .map(|dataset| {
+                let path = format!("{}/{}", path, dataset.path);
+                ZarrArray::from_path(&path).into_ctx().into_ctx()
+            })
+            .take(4) // FIXME
+            .collect();
+
+        Self {
+            ome_zarr,
+            zarr_contexts,
+            cache_missing: false,
+            phantom: std::marker::PhantomData,
+        }
     }
 
     fn load_attrs(url: &str, local_cache_dir: &str) -> OmeZarrAttrs {
