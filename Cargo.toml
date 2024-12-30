@@ -23,7 +23,7 @@ egui_extras     = { version = "0.30", features = [ "all_loaders" ] }
 ehttp           = { version = "0.5", features = ["native-async"] }
 emath           = { version = "0.30"}
 futures = "0.3.31"
-image           = { version = "0.25", default-features=false, features = ["png","tiff"] }
+image           = { version = "0.25", default-features=false, features = ["png","tiff", "jpeg"] }
 indicatif       = { version = "0.17", features = ["rayon"]}
 itertools       = { version = "0.13" }
 libm            = { version = "0.2" }

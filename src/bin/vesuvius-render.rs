@@ -49,6 +49,10 @@ pub struct Args {
     #[clap(long)]
     max_layer: Option<u8>,
 
+    /// File extension / image format to use for layers (default png)
+    #[clap(long)]
+    target_format: Option<String>,
+
     /// The id of a volume to render against, otherwise Scroll 1A is used
     #[clap(short, long)]
     volume: Option<String>,
@@ -121,6 +125,7 @@ struct RenderParams {
     w_range: RangeInclusive<usize>,
     mid_layer: usize,
     target_dir: String,
+    target_format: String,
 }
 impl From<&Args> for RenderParams {
     fn from(args: &Args) -> Self {
@@ -132,6 +137,7 @@ impl From<&Args> for RenderParams {
             w_range: args.min_layer.unwrap_or(25) as usize..=args.max_layer.unwrap_or(41) as usize,
             mid_layer: args.middle_layer.unwrap_or(32) as usize,
             target_dir: args.target_dir.clone(),
+            target_format: args.target_format.clone().unwrap_or("png".to_string()),
         }
     }
 }
@@ -484,7 +490,12 @@ impl Rendering {
             }
         }
 
-        image.save(format!("{}/{:02}.png", self.params.target_dir, w)).unwrap();
+        image
+            .save(format!(
+                "{}/{:02}.{}",
+                self.params.target_dir, w, self.params.target_format
+            ))
+            .unwrap();
 
         Ok(())
     }
