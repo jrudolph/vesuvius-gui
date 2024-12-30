@@ -18,7 +18,7 @@ use vesuvius_gui::volume::{
     VoxelVolume,
 };
 
-/// Vesuvius Renderer, an app to render segments from obj files
+/// Vesuvius Renderer, a tool to render segments from obj files
 #[derive(Parser, Debug)]
 #[command(about, long_about = None)]
 pub struct Args {
@@ -28,10 +28,10 @@ pub struct Args {
 
     /// Width of the segment file when browsing obj files
     #[clap(long)]
-    width: usize,
+    width: u32,
     /// Height of the segment file when browsing obj files
     #[clap(long)]
-    height: usize,
+    height: u32,
 
     /// The target directory to save the rendered images
     #[clap(long)]
@@ -39,15 +39,15 @@ pub struct Args {
 
     /// Output layer id that corresponds to the segment surface (default 32)
     #[clap(long)]
-    middle_layer: Option<u32>,
+    middle_layer: Option<u8>,
 
     /// Minimum layer id to render (default 25)
     #[clap(long)]
-    min_layer: Option<u32>,
+    min_layer: Option<u8>,
 
     /// Maximum layer id to render (default 41)
     #[clap(long)]
-    max_layer: Option<u32>,
+    max_layer: Option<u8>,
 
     /// The id of a volume to render against, otherwise Scroll 1A is used
     #[clap(short, long)]
@@ -59,11 +59,11 @@ pub struct Args {
 
     /// The tile size to split a segment into (for ergonomic reasons) (default 1024)
     #[clap(long)]
-    tile_size: Option<usize>,
+    tile_size: Option<u32>,
 
     /// The number of concurrent downloads to use (default 64)
     #[clap(long)]
-    concurrent_downloads: Option<usize>,
+    concurrent_downloads: Option<u8>,
 
     /// The number of retries to use for downloads (default 20)
     #[clap(long)]
@@ -119,7 +119,21 @@ struct RenderParams {
     height: usize,
     tile_size: usize,
     w_range: RangeInclusive<usize>,
+    mid_layer: usize,
     target_dir: String,
+}
+impl From<&Args> for RenderParams {
+    fn from(args: &Args) -> Self {
+        Self {
+            obj_file: args.obj.clone(),
+            width: args.width as usize,
+            height: args.height as usize,
+            tile_size: args.tile_size.unwrap_or(1024) as usize,
+            w_range: args.min_layer.unwrap_or(25) as usize..=args.max_layer.unwrap_or(41) as usize,
+            mid_layer: args.middle_layer.unwrap_or(32) as usize,
+            target_dir: args.target_dir.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -161,6 +175,26 @@ struct DownloadSettings {
     cache_dir: String,
     retries: u8,
     concurrent_downloads: usize,
+}
+impl TryFrom<&Args> for DownloadSettings {
+    type Error = anyhow::Error;
+    fn try_from(args: &Args) -> std::result::Result<Self, Self::Error> {
+        let vol: &'static dyn VolumeReference = if let Some(vol_id) = args.volume.clone() {
+            vol_id.try_into().map_err(|e| anyhow!("Cannot find volume: {}", e))?
+        } else {
+            &FullVolumeReference::SCROLL1
+        };
+        let cache_dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
+        let download_dir = vol.sub_dir(cache_dir.to_str().unwrap());
+
+        Ok(Self {
+            tile_server_base: TILE_SERVER.to_string(),
+            volume_base_path: vol.url_path_base(),
+            cache_dir: download_dir,
+            retries: args.retries.unwrap_or(20),
+            concurrent_downloads: args.concurrent_downloads.unwrap_or(32) as usize,
+        })
+    }
 }
 
 struct AsyncDownloader {
@@ -232,32 +266,18 @@ struct Rendering {
 const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
 
 impl Rendering {
-    fn new(params: RenderParams) -> Self {
+    fn new(params: RenderParams, download_settings: DownloadSettings) -> Self {
         let obj = Arc::new(ObjVolume::load_obj(&params.obj_file));
         // FIXME: make configurable
         let volume = FullVolumeReference::SCROLL1;
-
-        let settings = DownloadSettings {
-            tile_server_base: TILE_SERVER.to_string(),
-            volume_base_path: volume.url_path_base(),
-            cache_dir: BaseDirs::new()
-                .unwrap()
-                .cache_dir()
-                .join("vesuvius-gui")
-                .to_str()
-                .unwrap()
-                .to_string(),
-            retries: 20,
-            concurrent_downloads: 64,
-        };
 
         Self {
             params,
             obj,
             download_state: Arc::new(Mutex::new(DownloadState::new())),
             downloader: Arc::new(AsyncDownloader {
-                semaphore: tokio::sync::Semaphore::new(settings.concurrent_downloads),
-                settings,
+                semaphore: tokio::sync::Semaphore::new(download_settings.concurrent_downloads),
+                settings: download_settings,
             }),
         }
     }
@@ -403,7 +423,7 @@ impl Rendering {
         res.into_iter().map(Into::into).collect()
     }
     async fn download_all_chunks(&self, mut chunks: BTreeSet<VolumeChunk>, bar: ProgressBar) -> Result<()> {
-        let dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
+        let dir = self.downloader.settings.cache_dir.clone();
         // FIXME: proper base path missing
 
         let filtered = {
@@ -418,14 +438,7 @@ impl Rendering {
         let requested_tiles = filtered
             .into_iter()
             .filter(|VolumeChunk { x, y, z }| {
-                let file_name = format!(
-                    "{}/64-4/d01/z{:03}/xyz-{:03}-{:03}-{:03}-b255-d01.bin",
-                    dir.to_str().unwrap(),
-                    z,
-                    x,
-                    y,
-                    z
-                );
+                let file_name = format!("{}/64-4/d01/z{:03}/xyz-{:03}-{:03}-{:03}-b255-d01.bin", dir, z, x, y, z);
                 !std::path::Path::new(&file_name).exists()
             })
             .collect::<Vec<_>>();
@@ -485,13 +498,7 @@ impl Rendering {
                 panic!("All files should be downloaded already but got {:?}", task);
             }
         }
-        let dir = BaseDirs::new()
-            .unwrap()
-            .cache_dir()
-            .join("vesuvius-gui")
-            .to_str()
-            .unwrap()
-            .to_string();
+        let dir = self.downloader.settings.cache_dir.clone();
 
         let vol = volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {}));
         let world = Arc::new(RefCell::new(vol));
@@ -530,18 +537,25 @@ impl Rendering {
     }
 }
 
-fn main() {
-    tokio::runtime::Builder::new_multi_thread()
+fn main() -> Result<()> {
+    let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .max_blocking_threads(num_cpus::get())
         .build()
         .unwrap()
         .block_on(main_run());
+
+    result
 }
 
-async fn main_run() {
+async fn main_run() -> Result<()> {
+    let args = Args::parse();
+
     let multi = MultiProgress::new();
     monitor_runtime_stats(&multi).await;
+
+    let params = (&args).into();
+    let settings = (&args).try_into()?;
     /* let params = RenderParams {
         obj_file: "/tmp/20231031143852.obj".to_string(),
         width: 13577,
@@ -551,7 +565,7 @@ async fn main_run() {
         target_dir: "/tmp".to_string(),
     }; */
 
-    let params = RenderParams {
+    /* let params = RenderParams {
         obj_file: "/tmp/mesh_window_350414_400414_flatboi.obj".to_string(),
         width: 40174,
         height: 16604,
@@ -579,7 +593,7 @@ async fn main_run() {
         tile_size: 2048,
         w_range: 0..=63,
         target_dir: "/tmp".to_string(),
-    };
+    }; */
 
     /*let params = RenderParams {
         obj_file: "/tmp/20230827161847.obj".to_string(),
@@ -590,8 +604,9 @@ async fn main_run() {
         target_dir: "/tmp".to_string(),
     }; */
 
-    let rendering = Rendering::new(params);
-    rendering.run(&multi).await.unwrap();
+    let rendering = Rendering::new(params, settings);
+    rendering.run(&multi).await?;
+    Ok(())
 }
 
 async fn monitor_runtime_stats(multi: &MultiProgress) {

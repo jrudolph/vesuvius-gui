@@ -42,6 +42,16 @@ impl dyn VolumeReference {
         &SurfaceVolumeReference::SEGMENT_20231005123335,
     ];
 }
+impl TryFrom<String> for &'static dyn VolumeReference {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let vol = <dyn VolumeReference>::VOLUMES
+            .iter()
+            .find(|x| x.id() == value)
+            .ok_or(format!("Volume {} not found", value))?;
+        Ok(*vol)
+    }
+}
 
 pub struct DynamicFullVolumeReference {
     pub scroll_id: String,
@@ -53,10 +63,18 @@ impl DynamicFullVolumeReference {
     }
 }
 impl VolumeReference for DynamicFullVolumeReference {
-    fn id(&self) -> String { self.volume.to_string() }
-    fn sub_dir(&self, data_dir: &str) -> String { format!("{}/scroll{}/{}/", data_dir, self.scroll_id, self.volume) }
-    fn label(&self) -> String { format!("Scroll {} / {}", self.scroll_id, self.volume) }
-    fn url_path_base(&self) -> String { format!("scroll/{}/volume/{}/", self.scroll_id, self.volume) }
+    fn id(&self) -> String {
+        self.volume.to_string()
+    }
+    fn sub_dir(&self, data_dir: &str) -> String {
+        format!("{}/scroll{}/{}/", data_dir, self.scroll_id, self.volume)
+    }
+    fn label(&self) -> String {
+        format!("Scroll {} / {}", self.scroll_id, self.volume)
+    }
+    fn url_path_base(&self) -> String {
+        format!("scroll/{}/volume/{}/", self.scroll_id, self.volume)
+    }
 }
 
 pub struct FullVolumeReference {
@@ -147,11 +165,19 @@ impl FullVolumeReference {
     };
 }
 impl VolumeReference for FullVolumeReference {
-    fn id(&self) -> String { self.volume.to_string() }
-    fn sub_dir(&self, data_dir: &str) -> String { format!("{}/scroll{}/{}/", data_dir, self.scroll_id, self.volume) }
-    fn label(&self) -> String { format!("Scroll {} / {}", self.scroll_id, self.volume) }
+    fn id(&self) -> String {
+        self.volume.to_string()
+    }
+    fn sub_dir(&self, data_dir: &str) -> String {
+        format!("{}/scroll{}/{}/", data_dir, self.scroll_id, self.volume)
+    }
+    fn label(&self) -> String {
+        format!("Scroll {} / {}", self.scroll_id, self.volume)
+    }
 
-    fn url_path_base(&self) -> String { format!("scroll/{}/volume/{}/", self.scroll_id, self.volume) }
+    fn url_path_base(&self) -> String {
+        format!("scroll/{}/volume/{}/", self.scroll_id, self.volume)
+    }
 }
 
 pub struct SurfaceVolumeReference {
@@ -169,11 +195,17 @@ impl SurfaceVolumeReference {
     };
 }
 impl VolumeReference for SurfaceVolumeReference {
-    fn id(&self) -> String { self.segment_id.to_string() }
+    fn id(&self) -> String {
+        self.segment_id.to_string()
+    }
     fn sub_dir(&self, data_dir: &str) -> String {
         format!("{}/scroll{}/segment/{}/", data_dir, self.scroll_id, self.segment_id)
     }
-    fn label(&self) -> String { format!("Scroll {} / Segment {}", self.scroll_id, self.segment_id) }
+    fn label(&self) -> String {
+        format!("Scroll {} / Segment {}", self.scroll_id, self.segment_id)
+    }
 
-    fn url_path_base(&self) -> String { format!("scroll/{}/segment/{}/", self.scroll_id, self.segment_id) }
+    fn url_path_base(&self) -> String {
+        format!("scroll/{}/segment/{}/", self.scroll_id, self.segment_id)
+    }
 }
