@@ -557,7 +557,8 @@ impl PaintVolume for ZarrContext<3> {
         _config: &crate::volume::DrawingConfig,
         buffer: &mut crate::volume::Image,
     ) {
-        assert!(_sfactor == 1);
+        //assert!(_sfactor == 1);
+        let _sfactor = 1;
         if !self.cache_missing {
             // clean missing entries from cache
             let mut access = self.cache.lock().unwrap();
@@ -584,7 +585,7 @@ impl PaintVolume for ZarrContext<3> {
 
                 let v = self.get([z as usize, y as usize, x as usize]).unwrap_or(0);
                 if v != 0 {
-                    println!("painting at {} {} {} {}", x, y, z, v);
+                    //println!("painting at {} {} {} {}", x, y, z, v);
                     let color = match v {
                         1 => Color32::RED,
                         2 => Color32::GREEN,
