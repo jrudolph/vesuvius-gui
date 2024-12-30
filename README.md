@@ -134,7 +134,7 @@ Options:
 
 Demo:
 
-<script src="https://asciinema.org/a/oIvlnFjROHlEOvUzU6mRo9XMP.js" id="asciicast-oIvlnFjROHlEOvUzU6mRo9XMP" async="true"></script>
+[![asciicast](https://asciinema.org/a/oIvlnFjROHlEOvUzU6mRo9XMP.svg)](https://asciinema.org/a/oIvlnFjROHlEOvUzU6mRo9XMP)
 
 ## Data License
 
