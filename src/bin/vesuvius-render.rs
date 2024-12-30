@@ -1,4 +1,3 @@
-#![allow(dead_code, unused)]
 use anyhow::{anyhow, Result};
 use async_recursion::async_recursion;
 use clap::Parser;
@@ -84,46 +83,30 @@ pub struct Args {
     worker_threads: Option<usize>,
 }
 
-#[derive(Clone)]
-struct DummyVolume2 {
-    requested_tiles: BTreeSet<(usize, usize, usize)>,
-    last_requested: (usize, usize, usize),
-}
-impl DummyVolume2 {
-    fn new() -> Self {
-        Self {
-            requested_tiles: BTreeSet::new(),
-            last_requested: (0, 0, 0),
-        }
-    }
-}
-impl PaintVolume for DummyVolume2 {
-    fn paint(
-        &mut self,
-        _xyz: [i32; 3],
-        _u_coord: usize,
-        _v_coord: usize,
-        _plane_coord: usize,
-        _width: usize,
-        _height: usize,
-        _sfactor: u8,
-        _paint_zoom: u8,
-        _config: &DrawingConfig,
-        _buffer: &mut Image,
-    ) {
-        panic!();
-    }
-}
-impl VoxelVolume for DummyVolume2 {
-    fn get(&mut self, xyz: [f64; 3], _downsampling: i32) -> u8 {
-        let xyz2 = ((xyz[0] as usize) >> 6, (xyz[1] as usize) >> 6, (xyz[2] as usize) >> 6);
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let threads = args.worker_threads.unwrap_or(num_cpus::get());
 
-        if self.last_requested != xyz2 {
-            self.last_requested = xyz2;
-            self.requested_tiles.insert(xyz2);
-        }
-        0
-    }
+    let result = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(threads)
+        .build()
+        .unwrap()
+        .block_on(main_run(args));
+
+    result
+}
+
+async fn main_run(args: Args) -> Result<()> {
+    let multi = MultiProgress::new();
+    monitor_runtime_stats(&multi).await;
+
+    let params = (&args).into();
+    let settings = (&args).try_into()?;
+
+    let rendering = Rendering::new(params, settings);
+    rendering.run(&multi).await?;
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -172,107 +155,6 @@ impl From<(usize, usize, usize)> for VolumeChunk {
         VolumeChunk { x, y, z }
     }
 }
-
-const MID_W: i32 = 32;
-
-struct DownloadState {
-    downloaded: BTreeSet<VolumeChunk>,
-}
-impl DownloadState {
-    fn new() -> Self {
-        DownloadState {
-            downloaded: BTreeSet::new(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DownloadSettings {
-    tile_server_base: String,
-    volume_base_path: String,
-    cache_dir: String,
-    retries: u8,
-    concurrent_downloads: usize,
-}
-impl TryFrom<&Args> for DownloadSettings {
-    type Error = anyhow::Error;
-    fn try_from(args: &Args) -> std::result::Result<Self, Self::Error> {
-        let vol: &'static dyn VolumeReference = if let Some(vol_id) = args.volume.clone() {
-            vol_id.try_into().map_err(|e| anyhow!("Cannot find volume: {}", e))?
-        } else {
-            &FullVolumeReference::SCROLL1
-        };
-        let cache_dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
-        let download_dir = vol.sub_dir(cache_dir.to_str().unwrap());
-
-        Ok(Self {
-            tile_server_base: TILE_SERVER.to_string(),
-            volume_base_path: vol.url_path_base(),
-            cache_dir: download_dir,
-            retries: args.retries.unwrap_or(20),
-            concurrent_downloads: args.concurrent_downloads.unwrap_or(32) as usize,
-        })
-    }
-}
-
-struct AsyncDownloader {
-    semaphore: tokio::sync::Semaphore,
-    settings: DownloadSettings,
-}
-impl AsyncDownloader {
-    async fn download_chunk(&self, chunk: VolumeChunk) -> Result<()> {
-        self.download_attempt(chunk, self.settings.retries).await
-    }
-
-    #[async_recursion]
-    async fn download_attempt(&self, chunk: VolumeChunk, retries: u8) -> Result<()> {
-        if retries == 0 {
-            return Err(anyhow!("Failed to download tile"));
-        }
-        //println!("Queueing Downloading chunk: {:?}", chunk);
-
-        let permit = self.semaphore.acquire().await.unwrap();
-        let url = self.url_for(chunk);
-        let request = ehttp::Request::get(url.clone());
-
-        //println!("Downloading chunk: {:?} by request to {:?}", chunk, &request);
-        let response = ehttp::fetch_async(request).await;
-        //println!("Finished downloading chunk: {:?}, response: {:?}", chunk, &response);
-        drop(permit);
-        if let Ok(res) = response {
-            if res.status == 200 {
-                let VolumeChunk { x, y, z } = chunk;
-                let bytes = res.bytes;
-                let file_name = format!(
-                    "{}/64-4/d{:02}/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin",
-                    self.settings.cache_dir, 1, z, x, y, z, 255, 1
-                );
-                std::fs::create_dir_all(format!("{}/64-4/d{:02}/z{:03}", self.settings.cache_dir, 1, z)).unwrap();
-                let tmp_file = format!("{}.tmp", file_name);
-                std::fs::write(&tmp_file, bytes).unwrap();
-                std::fs::rename(tmp_file, file_name).unwrap();
-            } else if res.status == 420 {
-                // retry in 10 seconds
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                return self.download_attempt(chunk, retries - 1).await;
-            } else {
-                todo!();
-            }
-        } else {
-            return Err(anyhow!("Failed to download tile"));
-        }
-
-        Ok(())
-    }
-
-    fn url_for(&self, VolumeChunk { x, y, z }: VolumeChunk) -> String {
-        format!(
-            "{}/tiles/{}download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}",
-            self.settings.tile_server_base, self.settings.volume_base_path, x, y, z, 255, 1
-        )
-    }
-}
-
 #[derive(Clone)]
 struct Rendering {
     params: RenderParams,
@@ -286,7 +168,6 @@ const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
 impl Rendering {
     fn new(params: RenderParams, download_settings: DownloadSettings) -> Self {
         let obj = Arc::new(ObjVolume::load_obj(&params.obj_file));
-        let volume = FullVolumeReference::SCROLL1;
 
         Self {
             params,
@@ -356,7 +237,8 @@ impl Rendering {
             .map(|(tile, chunks)| {
                 let download_bar = download_bar.clone();
                 async move {
-                    self.download_all_chunks(chunks, download_bar).await;
+                    // FIXME: handle download error more gracefully
+                    self.download_all_chunks(chunks, download_bar).await.unwrap();
                     tile
                 }
             })
@@ -404,7 +286,7 @@ impl Rendering {
         res
     }
     fn chunks_for(&self, UVTile { u, v, w }: &UVTile) -> BTreeSet<VolumeChunk> {
-        let dummy = Arc::new(RefCell::new(DummyVolume2::new()));
+        let dummy = Arc::new(RefCell::new(TileCollectingVolume::new()));
         //let world = Arc::new(RefCell::new(dummy.clone()));
         let trilinear_interpolation = true;
         let base: Arc<RefCell<dyn VoxelPaintVolume + 'static>> = if trilinear_interpolation {
@@ -423,7 +305,7 @@ impl Rendering {
         let xyz = [
             *u as i32 + tile_width as i32 / 2,
             *v as i32 + tile_height as i32 / 2,
-            *w as i32 - MID_W,
+            *w as i32 - self.params.mid_layer as i32,
         ];
         world.paint(
             xyz,
@@ -545,7 +427,7 @@ impl Rendering {
             [
                 *u as i32 + paint_width as i32 / 2,
                 *v as i32 + paint_height as i32 / 2,
-                *w as i32 - MID_W as i32,
+                *w as i32 - self.params.mid_layer as i32,
             ],
             0,
             1,
@@ -559,32 +441,6 @@ impl Rendering {
         );
         Ok(image)
     }
-}
-
-fn main() -> Result<()> {
-    let args = Args::parse();
-    let threads = args.worker_threads.unwrap_or(num_cpus::get());
-
-    let result = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .max_blocking_threads(threads)
-        .build()
-        .unwrap()
-        .block_on(main_run(args));
-
-    result
-}
-
-async fn main_run(args: Args) -> Result<()> {
-    let multi = MultiProgress::new();
-    monitor_runtime_stats(&multi).await;
-
-    let params = (&args).into();
-    let settings = (&args).try_into()?;
-
-    let rendering = Rendering::new(params, settings);
-    rendering.run(&multi).await?;
-    Ok(())
 }
 
 async fn monitor_runtime_stats(multi: &MultiProgress) {
@@ -607,4 +463,145 @@ async fn monitor_runtime_stats(multi: &MultiProgress) {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
     });
+}
+
+/// A VoxelVolume implementation that just collects needed tiles
+#[derive(Clone)]
+struct TileCollectingVolume {
+    requested_tiles: BTreeSet<(usize, usize, usize)>,
+    last_requested: (usize, usize, usize),
+}
+impl TileCollectingVolume {
+    fn new() -> Self {
+        Self {
+            requested_tiles: BTreeSet::new(),
+            last_requested: (0, 0, 0),
+        }
+    }
+}
+impl PaintVolume for TileCollectingVolume {
+    fn paint(
+        &mut self,
+        _xyz: [i32; 3],
+        _u_coord: usize,
+        _v_coord: usize,
+        _plane_coord: usize,
+        _width: usize,
+        _height: usize,
+        _sfactor: u8,
+        _paint_zoom: u8,
+        _config: &DrawingConfig,
+        _buffer: &mut Image,
+    ) {
+        panic!();
+    }
+}
+impl VoxelVolume for TileCollectingVolume {
+    fn get(&mut self, xyz: [f64; 3], _downsampling: i32) -> u8 {
+        let xyz2 = ((xyz[0] as usize) >> 6, (xyz[1] as usize) >> 6, (xyz[2] as usize) >> 6);
+
+        if self.last_requested != xyz2 {
+            self.last_requested = xyz2;
+            self.requested_tiles.insert(xyz2);
+        }
+        0
+    }
+}
+
+struct DownloadState {
+    downloaded: BTreeSet<VolumeChunk>,
+}
+impl DownloadState {
+    fn new() -> Self {
+        DownloadState {
+            downloaded: BTreeSet::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DownloadSettings {
+    tile_server_base: String,
+    volume_base_path: String,
+    cache_dir: String,
+    retries: u8,
+    concurrent_downloads: usize,
+}
+impl TryFrom<&Args> for DownloadSettings {
+    type Error = anyhow::Error;
+    fn try_from(args: &Args) -> std::result::Result<Self, Self::Error> {
+        let vol: &'static dyn VolumeReference = if let Some(vol_id) = args.volume.clone() {
+            vol_id.try_into().map_err(|e| anyhow!("Cannot find volume: {}", e))?
+        } else {
+            &FullVolumeReference::SCROLL1
+        };
+        let cache_dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
+        let download_dir = vol.sub_dir(cache_dir.to_str().unwrap());
+
+        Ok(Self {
+            tile_server_base: TILE_SERVER.to_string(),
+            volume_base_path: vol.url_path_base(),
+            cache_dir: download_dir,
+            retries: args.retries.unwrap_or(20),
+            concurrent_downloads: args.concurrent_downloads.unwrap_or(32) as usize,
+        })
+    }
+}
+
+struct AsyncDownloader {
+    semaphore: tokio::sync::Semaphore,
+    settings: DownloadSettings,
+}
+impl AsyncDownloader {
+    async fn download_chunk(&self, chunk: VolumeChunk) -> Result<()> {
+        self.download_attempt(chunk, self.settings.retries).await
+    }
+
+    #[async_recursion]
+    async fn download_attempt(&self, chunk: VolumeChunk, retries: u8) -> Result<()> {
+        if retries == 0 {
+            return Err(anyhow!("Failed to download tile"));
+        }
+        //println!("Queueing Downloading chunk: {:?}", chunk);
+
+        let permit = self.semaphore.acquire().await.unwrap();
+        let url = self.url_for(chunk);
+        let request = ehttp::Request::get(url.clone());
+
+        //println!("Downloading chunk: {:?} by request to {:?}", chunk, &request);
+        let response = ehttp::fetch_async(request).await;
+        //println!("Finished downloading chunk: {:?}, response: {:?}", chunk, &response);
+        drop(permit);
+        if let Ok(res) = response {
+            if res.status == 200 {
+                let VolumeChunk { x, y, z } = chunk;
+                let bytes = res.bytes;
+                let file_name = format!(
+                    "{}/64-4/d{:02}/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin",
+                    self.settings.cache_dir, 1, z, x, y, z, 255, 1
+                );
+                std::fs::create_dir_all(format!("{}/64-4/d{:02}/z{:03}", self.settings.cache_dir, 1, z)).unwrap();
+                let tmp_file = format!("{}.tmp", file_name);
+                std::fs::write(&tmp_file, bytes).unwrap();
+                std::fs::rename(tmp_file, file_name).unwrap();
+            } else if res.status == 420 {
+                // retry in 10 seconds
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                return self.download_attempt(chunk, retries - 1).await;
+            } else {
+                todo!();
+            }
+        } else {
+            return Err(anyhow!("Failed to download tile"));
+        }
+
+        Ok(())
+    }
+
+    fn url_for(&self, VolumeChunk { x, y, z }: VolumeChunk) -> String {
+        format!(
+            "{}/tiles/{}download/64-4?x={}&y={}&z={}&bitmask={}&downsampling={}",
+            self.settings.tile_server_base, self.settings.volume_base_path, x, y, z, 255, 1
+        )
+    }
 }
