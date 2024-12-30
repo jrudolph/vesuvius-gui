@@ -77,7 +77,6 @@ impl BloscHeader {
 pub struct BloscChunk<T> {
     pub header: BloscHeader,
     offsets: Vec<u32>,
-    num_blocks: usize,
     #[debug(skip)]
     data: memmap::Mmap,
     file_name: String,
@@ -156,7 +155,6 @@ impl BloscChunk<u8> {
         BloscChunk {
             header,
             offsets,
-            num_blocks,
             data: chunk,
             file_name: filename.to_string(),
             phantom_t: std::marker::PhantomData,
@@ -170,6 +168,7 @@ impl BloscChunk<u8> {
             last_entry: None,
         }
     }
+    #[allow(dead_code)]
     pub fn get(&self, index: usize) -> u8 {
         let block_idx = index * self.header.typesize as usize / self.header.blocksize as usize;
         let idx = (index * self.header.typesize as usize) % self.header.blocksize as usize;
