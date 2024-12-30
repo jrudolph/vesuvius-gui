@@ -72,6 +72,16 @@ pub struct Args {
     /// The number of retries to use for downloads (default 20)
     #[clap(long)]
     retries: Option<u8>,
+
+    /// Internal stream buffer size (default 1024)
+    /// This limits the amount of internal work to buffer before backpressuring
+    /// and continue working on output.
+    #[clap(long)]
+    stream_buffer_size: Option<usize>,
+
+    /// CPU-bound worker threads to use (default number of cores/threads)
+    #[clap(long)]
+    worker_threads: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -126,6 +136,7 @@ struct RenderParams {
     mid_layer: usize,
     target_dir: String,
     target_format: String,
+    stream_buffer_size: usize,
 }
 impl From<&Args> for RenderParams {
     fn from(args: &Args) -> Self {
@@ -138,6 +149,7 @@ impl From<&Args> for RenderParams {
             mid_layer: args.middle_layer.unwrap_or(32) as usize,
             target_dir: args.target_dir.clone(),
             target_format: args.target_format.clone().unwrap_or("png".to_string()),
+            stream_buffer_size: args.stream_buffer_size.unwrap_or(1024),
         }
     }
 }
@@ -274,7 +286,6 @@ const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
 impl Rendering {
     fn new(params: RenderParams, download_settings: DownloadSettings) -> Self {
         let obj = Arc::new(ObjVolume::load_obj(&params.obj_file));
-        // FIXME: make configurable
         let volume = FullVolumeReference::SCROLL1;
 
         Self {
@@ -288,6 +299,8 @@ impl Rendering {
         }
     }
     async fn run(&self, multi: &MultiProgress) -> Result<()> {
+        std::fs::create_dir_all(&self.params.target_dir)?;
+
         let count_style = ProgressStyle::with_template(
             "{spinner} {msg:25} {bar:80.cyan/blue} [{elapsed_precise}] ({eta:>4}) {pos}/{len}",
         )
@@ -325,7 +338,7 @@ impl Rendering {
         multi.add(layers_bar.clone());
         layers_bar.tick();
 
-        let buf_size = 1024;
+        let buf_size = self.params.stream_buffer_size;
 
         stream::iter(tiles)
             .map(move |tile| {
@@ -549,19 +562,20 @@ impl Rendering {
 }
 
 fn main() -> Result<()> {
+    let args = Args::parse();
+    let threads = args.worker_threads.unwrap_or(num_cpus::get());
+
     let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .max_blocking_threads(num_cpus::get())
+        .max_blocking_threads(threads)
         .build()
         .unwrap()
-        .block_on(main_run());
+        .block_on(main_run(args));
 
     result
 }
 
-async fn main_run() -> Result<()> {
-    let args = Args::parse();
-
+async fn main_run(args: Args) -> Result<()> {
     let multi = MultiProgress::new();
     monitor_runtime_stats(&multi).await;
 
@@ -621,28 +635,21 @@ async fn main_run() -> Result<()> {
 }
 
 async fn monitor_runtime_stats(multi: &MultiProgress) {
-    let bar = ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap());
+    let count_style = ProgressStyle::with_template(
+        "{spinner} {msg:25} {bar:80.cyan/blue} [{elapsed_precise}] ({eta:>4}) {pos}/{len}",
+    )
+    .unwrap();
+    let bar = ProgressBar::new(0)
+        .with_style(count_style)
+        .with_message("CPU threads active");
+
     multi.add(bar.clone());
     tokio::spawn(async move {
         loop {
             let metrics = tokio::runtime::Handle::current().metrics();
 
-            // Print all available metrics
-            /* println!("=== Runtime Metrics ===");
-            println!("Workers: {}", metrics.num_workers());
-            println!("Blocking threads: {}", metrics.num_blocking_threads());
-            println!("Active tasks: {}", metrics.num_alive_tasks());
-            println!("Idle blocking threads: {}", metrics.num_idle_blocking_threads()); */
-
-            let bar_line = format!(
-                "Workers: {} Active tasks: {} Running blocking threads: {} Blocking threads: {} Idle blocking threads: {}",
-                metrics.num_workers(),
-                metrics.num_alive_tasks(),
-                metrics.num_blocking_threads() - metrics.num_idle_blocking_threads(),
-                metrics.num_blocking_threads(),
-                metrics.num_idle_blocking_threads()
-            );
-            bar.set_message(bar_line);
+            bar.set_length(metrics.num_blocking_threads() as u64);
+            bar.set_position((metrics.num_blocking_threads() - metrics.num_idle_blocking_threads()) as u64);
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }

@@ -89,7 +89,7 @@ impl ObjVolume {
         let obj_set = obj::parse(obj_file).unwrap();
 
         let mut objects = obj_set.objects;
-        println!("Loaded obj file with {} objects", objects.len());
+        /* println!("Loaded obj file with {} objects", objects.len());
         for o in objects.iter() {
             println!(
                 "Object: {}, geometries: {} vertices: {}",
@@ -97,7 +97,7 @@ impl ObjVolume {
                 o.geometry.len(),
                 o.vertices.len()
             );
-        }
+        } */
 
         let object = objects.remove(0);
         ObjFile::new(object)
