@@ -42,6 +42,16 @@ impl dyn VolumeReference {
         &SurfaceVolumeReference::SEGMENT_20231005123335,
     ];
 }
+impl TryFrom<String> for &'static dyn VolumeReference {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let vol = <dyn VolumeReference>::VOLUMES
+            .iter()
+            .find(|x| x.id() == value)
+            .ok_or(format!("Volume {} not found", value))?;
+        Ok(*vol)
+    }
+}
 
 pub struct DynamicFullVolumeReference {
     pub scroll_id: String,

@@ -2,17 +2,25 @@ use super::{Image, PaintVolume, SurfaceVolume, VoxelPaintVolume, VoxelVolume};
 use std::{cell::RefCell, sync::Arc};
 use wavefront_obj::obj::{self, Object, Primitive, Vertex};
 
-struct ObjFile {
+pub struct ObjFile {
     object: Object,
+    has_inverted_uv_tris: bool,
 }
 impl ObjFile {
-    fn has_inverted_uv_tris(&self) -> bool {
-        for s in self.object.geometry[0].shapes.iter().skip(1) {
+    pub fn new(object: Object) -> Self {
+        let has_inverted_uv_tris = Self::has_inverted_uv_tris(object.clone());
+        Self {
+            object,
+            has_inverted_uv_tris,
+        }
+    }
+    fn has_inverted_uv_tris(obj: Object) -> bool {
+        for s in obj.geometry[0].shapes.iter().skip(1) {
             match s.primitive {
                 Primitive::Triangle(i1, i2, i3) => {
-                    let v1 = &self.object.tex_vertices[i1.1.unwrap()];
-                    let v2 = &self.object.tex_vertices[i2.1.unwrap()];
-                    let v3 = &self.object.tex_vertices[i3.1.unwrap()];
+                    let v1 = &obj.tex_vertices[i1.1.unwrap()];
+                    let v2 = &obj.tex_vertices[i2.1.unwrap()];
+                    let v3 = &obj.tex_vertices[i3.1.unwrap()];
 
                     let u1 = (v1.u * 100000.) as i32;
                     let v1 = (v1.v * 100000.) as i32;
@@ -39,45 +47,37 @@ impl ObjFile {
     }
 }
 
+#[derive(Clone)]
 pub struct ObjVolume {
     volume: Arc<RefCell<dyn VoxelPaintVolume>>,
-    obj: ObjFile,
+    obj: Arc<ObjFile>,
     width: usize,
     height: usize,
-    invert_tris: bool,
 }
 impl ObjVolume {
-    pub fn new(
+    pub fn load_from_obj(
         obj_file_path: &str,
         base_volume: Arc<RefCell<dyn VoxelPaintVolume>>,
         width: usize,
         height: usize,
     ) -> Self {
-        let mut objects = Self::load_obj(obj_file_path).objects;
-        println!("Loaded obj file with {} objects", objects.len());
-        for o in objects.iter() {
-            println!(
-                "Object: {}, geometries: {} vertices: {}",
-                o.name,
-                o.geometry.len(),
-                o.vertices.len()
-            );
-        }
-
-        let object = objects.remove(0);
-        let obj = ObjFile { object };
-        let invert_tris = obj.has_inverted_uv_tris();
-
+        Self::new(Arc::new(Self::load_obj(obj_file_path)), base_volume, width, height)
+    }
+    pub fn new(
+        obj: Arc<ObjFile>,
+        base_volume: Arc<RefCell<dyn VoxelPaintVolume>>,
+        width: usize,
+        height: usize,
+    ) -> Self {
         Self {
             volume: base_volume,
             obj,
             width,
             height,
-            invert_tris,
         }
     }
 
-    fn load_obj(file_path: &str) -> obj::ObjSet {
+    pub fn load_obj(file_path: &str) -> ObjFile {
         let obj_file = std::fs::read_to_string(file_path).unwrap();
         // filter out material definitions that wavefront_obj does not cope well with
         let obj_file = obj_file
@@ -86,7 +86,21 @@ impl ObjVolume {
             .filter(|line| !line.starts_with("usemtl"))
             .collect::<Vec<_>>()
             .join("\n");
-        obj::parse(obj_file).unwrap()
+        let obj_set = obj::parse(obj_file).unwrap();
+
+        let mut objects = obj_set.objects;
+        /* println!("Loaded obj file with {} objects", objects.len());
+        for o in objects.iter() {
+            println!(
+                "Object: {}, geometries: {} vertices: {}",
+                o.name,
+                o.geometry.len(),
+                o.vertices.len()
+            );
+        } */
+
+        let object = objects.remove(0);
+        ObjFile::new(object)
     }
 
     pub fn width(&self) -> usize {
@@ -166,7 +180,7 @@ impl ObjVolume {
     }
 
     fn v(&self, v: f64) -> f64 {
-        if self.invert_tris {
+        if self.obj.has_inverted_uv_tris {
             v
         } else {
             1.0 - v

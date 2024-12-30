@@ -1,3 +1,4 @@
+#![allow(unused)]
 use super::{ZarrArray, ZarrContext};
 use crate::volume::PaintVolume;
 use crate::volume::VoxelPaintVolume;

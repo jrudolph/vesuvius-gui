@@ -21,7 +21,7 @@ pub(crate) enum TileState {
 
 pub struct VolumeGrid64x4Mapped {
     data_dir: String,
-    downloader: Downloader,
+    downloader: Box<dyn Downloader>,
     data: HashMap<(usize, usize, usize, usize), Rc<TileState>>,
     last_tile_key: (usize, usize, usize, usize),
     last_tile: Weak<TileState>,
@@ -108,7 +108,7 @@ impl VolumeGrid64x4Mapped {
         }
         self.data.get(&key).unwrap().clone()
     }
-    pub fn from_data_dir(data_dir: &str, downloader: Downloader) -> VolumeGrid64x4Mapped {
+    pub fn from_data_dir(data_dir: &str, downloader: Box<dyn Downloader>) -> VolumeGrid64x4Mapped {
         if !std::path::Path::new(data_dir).exists() {
             panic!("Data directory {} does not exist", data_dir);
         }
@@ -206,8 +206,6 @@ impl PaintVolume for VolumeGrid64x4Mapped {
 
         let mask = config.bit_mask();
         let filters_active = config.filters_active();
-
-        self.downloader.position(xyz[0], xyz[1], xyz[2], width, height);
 
         let center_u = canvas_width as i32 / 2;
         let center_v = canvas_height as i32 / 2;
