@@ -190,7 +190,7 @@ impl Rendering {
 
         let tiles = self.uv_tiles();
         let tiles_per_layer = tiles.len() as u64 / self.params.w_range.clone().count() as u64;
-        println!("Tiles per layer: {}", tiles_per_layer);
+        //println!("Tiles per layer: {}", tiles_per_layer);
 
         let map_bar = ProgressBar::new(tiles.len() as u64)
             .with_style(count_style.clone())
