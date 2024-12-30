@@ -9,6 +9,9 @@ use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
+use crate::zarr::FourColors;
+use crate::zarr::GrayScale;
+use crate::zarr::OmeZarrContext;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
 use egui::Color32;
@@ -249,12 +252,18 @@ impl TemplateApp {
         }
 
         if let Some(segment_file) = config.overlay_dir {
-            if segment_file.ends_with(".zarr") {
+            if segment_file.contains(".zarr") {
                 app.overlay = Some({
-                    let zarr: ZarrArray<3, u8> = ZarrArray::from_path(&segment_file);
-                    Box::new(zarr.into_ctx().into_ctx())
-                    //Box::new(ConnectedFullMapVolume::new())
-                    //Box::new(FullMapVolume::new())
+                    if segment_file.starts_with("http") {
+                        println!("Loading zarr from url: {}", segment_file);
+                        //ZarrArray::from_url_to_default_cache_dir(&segment_file)
+                        Box::new(OmeZarrContext::<FourColors>::from_url_to_default_cache_dir(
+                            &segment_file,
+                        ))
+                    } else {
+                        Box::new(ZarrArray::from_path(&segment_file).into_ctx().into_ctx())
+                    }
+                    //Box::new(zarr.into_ctx().into_ctx())
                 });
             }
         }
@@ -335,6 +344,19 @@ impl TemplateApp {
 
         let volume_dir = volume.sub_dir(&self.data_dir);
 
+        if volume.id() == FullVolumeReference::SCROLL1.id() {
+            self.world = Arc::new(RefCell::new(
+            OmeZarrContext::<GrayScale>::from_url(
+                "https://dl.ash2txt.org/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/",
+                &format!("{}/ome-zarr", volume_dir),
+            )));
+            return;
+
+            /* let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, None, sender);
+            let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
+            self.world = Arc::new(RefCell::new(v)); */
+        }
+
         self.world = {
             let downloader = Box::new(SimpleDownloader::new(
                 &volume_dir,
@@ -375,7 +397,9 @@ impl TemplateApp {
         }
     }
 
-    fn selected_volume(&self) -> &'static dyn VolumeReference { <dyn VolumeReference>::VOLUMES[self.volume_id] }
+    fn selected_volume(&self) -> &'static dyn VolumeReference {
+        <dyn VolumeReference>::VOLUMES[self.volume_id]
+    }
 
     pub fn clear_textures(&mut self) {
         self.texture_xy = None;
@@ -527,7 +551,7 @@ impl TemplateApp {
                     d_coord,
                     width,
                     height,
-                    1,
+                    1 << min_level as u8,
                     paint_zoom,
                     &self.drawing_config,
                     &mut image,
@@ -580,7 +604,9 @@ impl TemplateApp {
             }
         }
     }
-    fn should_sync_coords(&self) -> bool { self.segment_mode.as_ref().map_or(false, |s| s.sync_coordinates) }
+    fn should_sync_coords(&self) -> bool {
+        self.segment_mode.as_ref().map_or(false, |s| s.sync_coordinates)
+    }
 
     fn controls(&mut self, _frame: &eframe::Frame, ui: &mut Ui) {
         fn slider<T: emath::Numeric>(
@@ -1044,6 +1070,10 @@ impl TemplateApp {
 
 impl eframe::App for TemplateApp {
     /// Called by the frame work to save state before shutdown.
-    fn save(&mut self, storage: &mut dyn eframe::Storage) { eframe::set_value(storage, eframe::APP_KEY, self); }
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) { self.update_main(ctx, frame); }
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, eframe::APP_KEY, self);
+    }
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.update_main(ctx, frame);
+    }
 }

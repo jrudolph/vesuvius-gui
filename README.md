@@ -134,7 +134,7 @@ Options:
 
 Demo:
 
-[![asciicast](https://asciinema.org/a/oIvlnFjROHlEOvUzU6mRo9XMP.svg)](https://asciinema.org/a/oIvlnFjROHlEOvUzU6mRo9XMP)
+[![asciicast](https://asciinema.org/a/Y9eujTlsTrmbIK6OP2yZMqNPi.svg)](https://asciinema.org/a/Y9eujTlsTrmbIK6OP2yZMqNPi)
 
 ## Data License
 
