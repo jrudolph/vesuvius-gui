@@ -581,53 +581,6 @@ async fn main_run(args: Args) -> Result<()> {
 
     let params = (&args).into();
     let settings = (&args).try_into()?;
-    /* let params = RenderParams {
-        obj_file: "/tmp/20231031143852.obj".to_string(),
-        width: 13577,
-        height: 10620,
-        tile_size: 4096,
-        w_range: 25..=41,
-        target_dir: "/tmp".to_string(),
-    }; */
-
-    /* let params = RenderParams {
-        obj_file: "/tmp/mesh_window_350414_400414_flatboi.obj".to_string(),
-        width: 40174,
-        height: 16604,
-        tile_size: 4096,
-        w_range: 30..=36,
-        target_dir: "/tmp".to_string(),
-    };
-    // /tmp/mesh_window_900414_950414_flatboi.obj
-    // 15312	16097
-    let params = RenderParams {
-        obj_file: "/tmp/mesh_window_900414_950414_flatboi.obj".to_string(),
-        width: 15312,
-        height: 16097,
-        tile_size: 1024,
-        w_range: 25..=41,
-        target_dir: "/tmp".to_string(),
-    };
-
-    // /tmp/20231221180251.obj
-    //12975	9893
-    let params = RenderParams {
-        obj_file: "/tmp/20231221180251.obj".to_string(),
-        width: 12975,
-        height: 9893,
-        tile_size: 2048,
-        w_range: 0..=63,
-        target_dir: "/tmp".to_string(),
-    }; */
-
-    /*let params = RenderParams {
-        obj_file: "/tmp/20230827161847.obj".to_string(),
-        width: 5048,
-        height: 9163,
-        tile_size: 1024,
-        w_range: 0..=63,
-        target_dir: "/tmp".to_string(),
-    }; */
 
     let rendering = Rendering::new(params, settings);
     rendering.run(&multi).await?;
