@@ -32,6 +32,7 @@ pub struct OmeDataset {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum OmeCoordinateTransformation {
+    #[allow(non_camel_case_types)]
     scale(OmeScale),
 }
 
@@ -51,11 +52,6 @@ impl OmeZarrAttrs {
         Ok(OmeZarrAttrs { multiscales })
     }
 }
-
-/* pub trait OmeZarrAccess {
-    fn load_attrs(&self) -> OmeZarrAttrs;
-    fn load_array(&self, path: &str) -> Vec<u8>;
-} */
 
 pub struct OmeZarr {
     url: String,
@@ -142,8 +138,6 @@ impl<C: ColorScheme> OmeZarrContext<C> {
     }
 
     fn get(&mut self, xyz: [usize; 3], scale: u8) -> u8 {
-        // from max scale to target scale, try to find the value
-        //for s in (scale..=scale.min(self.zarr_contexts.len() as u8 - 1)/* self.zarr_contexts.len() as u8 */).rev() {
         let max = self.zarr_contexts.len() as u8 - 1;
         for s in scale.min(max)..=max {
             let scaled_xyz = xyz.iter().map(|&x| x >> s).collect::<Vec<usize>>();
@@ -209,7 +203,6 @@ impl<C: ColorScheme> PaintVolume for OmeZarrContext<C> {
     }
 }
 
-//impl<C: ColorScheme> VoxelPaintVolume for OmeZarrContext<C> {}
 impl<C: ColorScheme> VoxelVolume for OmeZarrContext<C> {
     fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
         let scale = downsampling.trailing_zeros() as u8;

@@ -12,7 +12,6 @@ use derive_more::Debug;
 use egui::Color32;
 use ehttp::Request;
 use serde::{Deserialize, Serialize};
-use sha2::digest::block_buffer::Block;
 use sha2::Digest;
 use sha2::Sha256;
 use std::sync::atomic::Ordering;
@@ -104,22 +103,7 @@ impl ZarrFileAccess for ZarrDirectory {
         let zarray = std::fs::read_to_string(format!("{}/.zarray", self.path)).unwrap();
         serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
     }
-    /* fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>> {
-        let chunk_path = format!(
-            "{}/{}",
-            self.path,
-            chunk_no
-                .iter()
-                .map(|i| i.to_string())
-                .collect::<Vec<_>>()
-                .join(array_def.dimension_separator.as_deref().unwrap_or("."))
-        );
-        if !std::path::Path::new(&chunk_path).exists() {
-            None
-        } else {
-            Some(BloscChunk::load(&chunk_path))
-        }
-    } */
+
     fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
         let chunk_path = format!(
             "{}/{}",
@@ -213,30 +197,7 @@ impl ZarrFileAccess for RemoteZarrDirectory {
         let zarray = std::fs::read_to_string(&target_file).unwrap();
         serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
     }
-    /* fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>> {
-        let target_file = format!(
-            "{}/{}",
-            self.local_cache_dir,
-            chunk_no.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/")
-        );
 
-        if std::path::Path::new(&target_file).exists() {
-            Some(BloscChunk::load(&target_file))
-        } else {
-            let target_url = format!(
-                "{}/{}",
-                self.url,
-                chunk_no
-                    .iter()
-                    .map(|i| i.to_string())
-                    .collect::<Vec<_>>()
-                    .join(array_def.dimension_separator.as_deref().unwrap_or("."))
-            );
-            self.downloader.download(&target_url, &target_file);
-
-            None
-        }
-    } */
     fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
         let target_file = format!(
             "{}/{}",
@@ -286,42 +247,7 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
         let zarray = std::fs::read_to_string(&target_file).unwrap();
         serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
     }
-    /* fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>> {
-        let target_file = format!(
-            "{}/{}",
-            self.local_cache_dir,
-            chunk_no.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/")
-        );
 
-        if std::path::Path::new(&target_file).exists() {
-            Some(BloscChunk::load(&target_file))
-        } else {
-            let target_url = format!(
-                "{}/{}",
-                self.url,
-                chunk_no
-                    .iter()
-                    .map(|i| i.to_string())
-                    .collect::<Vec<_>>()
-                    .join(array_def.dimension_separator.as_deref().unwrap_or("."))
-            );
-            println!("Downloading chunk from {}", target_url);
-            let response = ehttp::fetch_blocking(&Request::get(&target_url)).unwrap();
-            if response.status != 200 {
-                println!(
-                    "Failed to download chunk from {}, status {}",
-                    target_url, response.status
-                );
-                return None;
-            }
-            let data = response.bytes.to_vec();
-            std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
-            let tmp = format!("{}.tmp", target_file);
-            std::fs::write(&tmp, &data).unwrap();
-            std::fs::rename(&tmp, &target_file).unwrap();
-            Some(BloscChunk::load(&target_file))
-        }
-    } */
     fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
         let target_file = format!(
             "{}/{}",
@@ -364,9 +290,6 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
 }
 
 impl<const N: usize> ZarrArray<N, u8> {
-    /* fn load_chunk(&self, chunk_no: [usize; N]) -> Option<BloscChunk<u8>> {
-        self.access.load_chunk(&self.def, &chunk_no)
-    } */
     fn load_chunk_context(&self, chunk_no: [usize; N]) -> Option<ChunkContext> {
         self.access
             .chunk_file_for(&self.def, &chunk_no)
@@ -495,7 +418,7 @@ impl<const N: usize> ZarrContextCache<N> {
             cache: HashMap::new(),
             access_counter: 0,
             non_empty_entries: 0,
-            max_entries: 200000000 / def.chunks.iter().product::<usize>(),
+            max_entries: 200000000 / def.chunks.iter().product::<usize>(), // FIXME: make configurable
         }
     }
     fn entry(&self, ctx: Option<ChunkContext>) -> Option<ZarrContextCacheEntry> {
