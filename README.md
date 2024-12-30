@@ -79,6 +79,63 @@ Options:
           Print help
 ```
 
+## vesuvius-render
+
+`vesuvius-render` is a tool to render `.obj` files of segments to layer files similar to [VC](https://github.com/educelab/volume-cartographer) and [scroll-renderer](https://github.com/ScrollPrize/villa/tree/main/scroll-renderer) with a self-contained
+< 5 MB binary.
+
+Features:
+
+- CPU-based multi-threaded rendering
+- Input data: vesuvius-tiles based data blocks (for now) automatically downloaded during the process
+- Output formats: tiff, png, jpeg
+
+Synopsis:
+
+```
+Vesuvius Renderer, a tool to render segments from obj files
+
+Usage: vesuvius-render [OPTIONS] --obj <OBJ> --width <WIDTH> --height <HEIGHT> --target-dir <TARGET_DIR>
+
+Options:
+      --obj <OBJ>
+          Provide segment file to render
+      --width <WIDTH>
+          Width of the segment file when browsing obj files
+      --height <HEIGHT>
+          Height of the segment file when browsing obj files
+      --target-dir <TARGET_DIR>
+          The target directory to save the rendered images
+      --middle-layer <MIDDLE_LAYER>
+          Output layer id that corresponds to the segment surface (default 32)
+      --min-layer <MIN_LAYER>
+          Minimum layer id to render (default 25)
+      --max-layer <MAX_LAYER>
+          Maximum layer id to render (default 41)
+      --target-format <TARGET_FORMAT>
+          File extension / image format to use for layers (default png)
+  -v, --volume <VOLUME>
+          The id of a volume to render against, otherwise Scroll 1A is used
+  -d, --data-directory <DATA_DIRECTORY>
+          Override the data directory. By default, a directory in the user's cache is used
+      --tile-size <TILE_SIZE>
+          The tile size to split a segment into (for ergonomic reasons) (default 1024)
+      --concurrent-downloads <CONCURRENT_DOWNLOADS>
+          The number of concurrent downloads to use (default 64)
+      --retries <RETRIES>
+          The number of retries to use for downloads (default 20)
+      --stream-buffer-size <STREAM_BUFFER_SIZE>
+          Internal stream buffer size (default 1024) This limits the amount of internal work to buffer before backpressuring and continue working on output
+      --worker-threads <WORKER_THREADS>
+          CPU-bound worker threads to use (default number of cores/threads)
+  -h, --help
+          Print help
+```
+
+Demo:
+
+<script src="https://asciinema.org/a/oIvlnFjROHlEOvUzU6mRo9XMP.js" id="asciicast-oIvlnFjROHlEOvUzU6mRo9XMP" async="true"></script>
+
 ## Data License
 
 Accessing the data on https://vesuvius.virtual-void.net/ or through this app requires you to fill out the official
