@@ -235,18 +235,18 @@ impl PaintVolume for ObjVolume {
         for s in obj.geometry[0].shapes.iter() {
             match s.primitive {
                 Primitive::Triangle(i1, i2, i3) => {
-                    let v1 = &obj.tex_vertices[i1.1.unwrap()];
-                    let v2 = &obj.tex_vertices[i2.1.unwrap()];
-                    let v3 = &obj.tex_vertices[i3.1.unwrap()];
+                    let vert1 = &obj.tex_vertices[i1.1.unwrap()];
+                    let vert2 = &obj.tex_vertices[i2.1.unwrap()];
+                    let vert3 = &obj.tex_vertices[i3.1.unwrap()];
 
-                    let u1 = (v1.u * self.width() as f64) as i32;
-                    let v1 = (self.v(v1.v) * self.height() as f64) as i32;
+                    let u1 = (vert1.u * self.width() as f64) as i32;
+                    let v1 = (self.v(vert1.v) * self.height() as f64) as i32;
 
-                    let u2 = (v2.u * self.width() as f64) as i32;
-                    let v2 = (self.v(v2.v) * self.height() as f64) as i32;
+                    let u2 = (vert2.u * self.width() as f64) as i32;
+                    let v2 = (self.v(vert2.v) * self.height() as f64) as i32;
 
-                    let u3 = (v3.u * self.width() as f64) as i32;
-                    let v3 = (self.v(v3.v) * self.height() as f64) as i32;
+                    let u3 = (vert3.u * self.width() as f64) as i32;
+                    let v3 = (self.v(vert3.v) * self.height() as f64) as i32;
 
                     let min_u_t = u1.min(u2).min(u3);
                     let max_u_t = u1.max(u2).max(u3);
@@ -286,7 +286,14 @@ impl PaintVolume for ObjVolume {
                             }
                         } */
 
-                        //println!("u1: {}, v1: {}, u2: {}, v2: {}, u3: {}, v3: {}", u1, v1, u2, v2, u3, v3);
+                        /* println!(
+                            "i1.1: {}, i2.1: {}, i3.1: {}",
+                            i1.1.unwrap(),
+                            i2.1.unwrap(),
+                            i3.1.unwrap()
+                        );
+                        println!("vert1: {:?} vert2: {:?} vert3: {:?}", vert1, vert2, vert3);
+                        println!("u1: {}, v1: {}, u2: {}, v2: {}, u3: {}, v3: {}", u1, v1, u2, v2, u3, v3); */
 
                         let u1i = u1 - min_u;
                         let v1i = v1 - min_v;
