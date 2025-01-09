@@ -229,6 +229,18 @@ impl PaintVolume for ObjVolume {
         let min_v = xyz[1] - height as i32 / 2 * paint_zoom as i32;
         let max_v = xyz[1] + height as i32 / 2 * paint_zoom as i32;
 
+        let min_u_vt = min_u as f64 / self.width() as f64;
+        let max_u_vt = max_u as f64 / self.width() as f64;
+
+        let min_v_vt = self.v(min_v as f64 / self.height() as f64);
+        let max_v_vt = self.v(max_v as f64 / self.height() as f64);
+
+        let (min_v_vt, max_v_vt) = if self.obj.has_inverted_uv_tris {
+            (min_v_vt, max_v_vt)
+        } else {
+            (max_v_vt, min_v_vt)
+        };
+
         /* println!(
             "xyz: {:?}, width: {}, height: {}, sfactor: {}, paint_zoom: {}",
             xyz, width, height, sfactor, paint_zoom
@@ -243,23 +255,19 @@ impl PaintVolume for ObjVolume {
                     let vert2 = &obj.tex_vertices[i2.1.unwrap()];
                     let vert3 = &obj.tex_vertices[i3.1.unwrap()];
 
-                    let u1 = (vert1.u * self.width() as f64) as i32;
-                    let v1 = (self.v(vert1.v) * self.height() as f64) as i32;
+                    let min_tri_u_t = vert1.u.min(vert2.u).min(vert3.u);
+                    let max_tri_u_t = vert1.u.max(vert2.u).max(vert3.u);
 
-                    let u2 = (vert2.u * self.width() as f64) as i32;
-                    let v2 = (self.v(vert2.v) * self.height() as f64) as i32;
+                    let min_tri_v_t = vert1.v.min(vert2.v).min(vert3.v);
+                    let max_tri_v_t = vert1.v.max(vert2.v).max(vert3.v);
 
-                    let u3 = (vert3.u * self.width() as f64) as i32;
-                    let v3 = (self.v(vert3.v) * self.height() as f64) as i32;
-
-                    let min_u_t = u1.min(u2).min(u3);
-                    let max_u_t = u1.max(u2).max(u3);
-
-                    let min_v_t = v1.min(v2).min(v3);
-                    let max_v_t = v1.max(v2).max(v3);
-
-                    // clip to paint area
-                    if !(min_u_t > max_u || max_u_t < min_u || min_v_t > max_v || max_v_t < min_v) {
+                    // clip to paint area in texture coordinates
+                    //if !(min_u_t > max_u || max_u_t < min_u || min_v_t > max_v || max_v_t < min_v) {
+                    if !(min_tri_u_t > max_u_vt
+                        || max_tri_u_t < min_u_vt
+                        || min_tri_v_t > max_v_vt
+                        || max_tri_v_t < min_v_vt)
+                    {
                         /*
                         Implement the simple tri rasterization algorithm from https://fgiesen.wordpress.com/2013/02/08/triangle-rasterization-in-practice/
 
@@ -289,6 +297,15 @@ impl PaintVolume for ObjVolume {
                                     renderPixel(p, w0, w1, w2);
                             }
                         } */
+
+                        let u1 = (vert1.u * self.width() as f64) as i32;
+                        let v1 = (self.v(vert1.v) * self.height() as f64) as i32;
+
+                        let u2 = (vert2.u * self.width() as f64) as i32;
+                        let v2 = (self.v(vert2.v) * self.height() as f64) as i32;
+
+                        let u3 = (vert3.u * self.width() as f64) as i32;
+                        let v3 = (self.v(vert3.v) * self.height() as f64) as i32;
 
                         /* println!(
                             "i1.1: {}, i2.1: {}, i3.1: {}",
