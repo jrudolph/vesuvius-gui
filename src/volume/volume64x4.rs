@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use super::{DrawingConfig, Image, VoxelVolume};
+use libm::modf;
+use memmap::Mmap;
 
 #[derive(Debug)]
 pub(crate) enum TileState {
@@ -180,6 +182,111 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
         } else {
             0
         }
+    }
+
+    fn get_interpolated(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        let (dx, x0) = modf(xyz[0]);
+        let x1 = x0 + 1.0;
+        let (dy, y0) = modf(xyz[1]);
+        let y1 = y0 + 1.0;
+        let (dz, z0) = modf(xyz[2]);
+        let z1 = z0 + 1.0;
+
+        let fast_path = x0 as usize & 63 != 63 && y0 as usize & 63 != 63 && z0 as usize & 63 != 63;
+
+        let (p000, p100, p010, p110, p001, p101, p011, p111) = if fast_path {
+            let x = x0 as usize;
+            let y = y0 as usize;
+            let z = z0 as usize;
+
+            let tile_x = x / 64;
+            let tile_y = y / 64;
+            let tile_z = z / 64;
+
+            let key = (tile_x, tile_y, tile_z, downsampling as usize);
+            if key != self.last_tile_key {
+                self.last_tile_key = key;
+                self.last_tile = Rc::downgrade(&self.try_loading_tile(
+                    tile_x,
+                    tile_y,
+                    tile_z,
+                    Quality {
+                        downsampling_factor: downsampling as u8,
+                        bit_mask: 0xff,
+                    },
+                ));
+            }
+
+            if let Some(r) = self.last_tile.upgrade() {
+                if let TileState::Loaded(tile) = r.deref() {
+                    let tx = x & 63;
+                    let ty = y & 63;
+                    let tz = z & 63;
+
+                    // TODO: super fast path if & 3 != 3
+
+                    fn at(tile: &Mmap, tx: usize, ty: usize, tz: usize) -> f64 {
+                        let bx = tx / 4;
+                        let by = ty / 4;
+                        let bz = tz / 4;
+
+                        let block = bz * 256 + by * 16 + bx;
+
+                        let off_x = tx & 3;
+                        let off_y = ty & 3;
+                        let off_z = tz & 3;
+
+                        let index = off_x + off_y * 4 + off_z * 16 + block * 64;
+                        tile[index] as f64
+                    }
+
+                    (
+                        at(tile, tx, ty, tz),
+                        at(tile, tx + 1, ty, tz),
+                        at(tile, tx, ty + 1, tz),
+                        at(tile, tx + 1, ty + 1, tz),
+                        at(tile, tx, ty, tz + 1),
+                        at(tile, tx + 1, ty, tz + 1),
+                        at(tile, tx, ty + 1, tz + 1),
+                        at(tile, tx + 1, ty + 1, tz + 1),
+                    )
+                } else if let TileState::Downloading(_state) = r.deref() {
+                    /* match *_state.lock().unwrap() {
+                        DownloadState::Downloading => 255,
+                        DownloadState::Queuing => 160,
+                        DownloadState::Delayed => 100,
+                        _ => 0,
+                    } */
+                    (0., 0., 0., 0., 0., 0., 0., 0.)
+                } else {
+                    (0., 0., 0., 0., 0., 0., 0., 0.)
+                }
+            } else {
+                (0., 0., 0., 0., 0., 0., 0., 0.)
+            }
+        } else {
+            let p000 = self.get([x0, y0, z0], downsampling) as f64;
+            let p100 = self.get([x1, y0, z0], downsampling) as f64;
+            let p010 = self.get([x0, y1, z0], downsampling) as f64;
+            let p110 = self.get([x1, y1, z0], downsampling) as f64;
+            let p001 = self.get([x0, y0, z1], downsampling) as f64;
+            let p101 = self.get([x1, y0, z1], downsampling) as f64;
+            let p011 = self.get([x0, y1, z1], downsampling) as f64;
+            let p111 = self.get([x1, y1, z1], downsampling) as f64;
+            (p000, p100, p010, p110, p001, p101, p011, p111)
+        };
+
+        let c00 = p000 * (1.0 - dx) + p100 * dx;
+        let c10 = p010 * (1.0 - dx) + p110 * dx;
+        let c01 = p001 * (1.0 - dx) + p101 * dx;
+        let c11 = p011 * (1.0 - dx) + p111 * dx;
+
+        let c0 = c00 * (1.0 - dy) + c10 * dy;
+        let c1 = c01 * (1.0 - dy) + c11 * dy;
+
+        let c = c0 * (1.0 - dz) + c1 * dz;
+
+        c as u8
     }
 }
 

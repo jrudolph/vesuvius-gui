@@ -633,7 +633,14 @@ impl PaintVolume for ObjVolume {
                                         let y = y + w_factor * ny;
                                         let z = z + w_factor * nz;
 
-                                        let value = volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32);
+                                        let value = if config.trilinear_interpolation {
+                                            volume.get_interpolated(
+                                                [x / ffactor, y / ffactor, z / ffactor],
+                                                sfactor as i32,
+                                            )
+                                        } else {
+                                            volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32)
+                                        };
 
                                         buffer.set_gray(
                                             u as usize / paint_zoom as usize,

@@ -13,6 +13,7 @@ pub use generic::AutoPaintVolume;
 pub use grid500::VolumeGrid500Mapped;
 pub use interpolated::TrilinearInterpolatedVolume;
 pub use layers::LayersMappedVolume;
+use libm::modf;
 pub use objvolume::{ObjFile, ObjVolume};
 pub use ppmvolume::PPMVolume;
 pub use volume64x4::VolumeGrid64x4Mapped;
@@ -27,6 +28,7 @@ pub struct DrawingConfig {
     pub mask_shift: u8,
     pub draw_xyz_outlines: bool,
     pub draw_outline_vertices: bool,
+    pub trilinear_interpolation: bool,
 }
 impl DrawingConfig {
     pub fn filters_active(&self) -> bool {
@@ -57,12 +59,38 @@ impl Default for DrawingConfig {
             mask_shift: 0,
             draw_xyz_outlines: false,
             draw_outline_vertices: false,
+            trilinear_interpolation: false,
         }
     }
 }
 
 pub trait VoxelVolume {
     fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8;
+
+    fn get_interpolated(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        let (dx, x0) = modf(xyz[0]);
+        let x1 = x0 + 1.0;
+        let (dy, y0) = modf(xyz[1]);
+        let y1 = y0 + 1.0;
+        let (dz, z0) = modf(xyz[2]);
+        let z1 = z0 + 1.0;
+
+        let c00 =
+            self.get([x0, y0, z0], downsampling) as f64 * (1.0 - dx) + self.get([x1, y0, z0], downsampling) as f64 * dx;
+        let c10 =
+            self.get([x0, y1, z0], downsampling) as f64 * (1.0 - dx) + self.get([x1, y1, z0], downsampling) as f64 * dx;
+        let c01 =
+            self.get([x0, y0, z1], downsampling) as f64 * (1.0 - dx) + self.get([x1, y0, z1], downsampling) as f64 * dx;
+        let c11 =
+            self.get([x0, y1, z1], downsampling) as f64 * (1.0 - dx) + self.get([x1, y1, z1], downsampling) as f64 * dx;
+
+        let c0 = c00 * (1.0 - dy) + c10 * dy;
+        let c1 = c01 * (1.0 - dy) + c11 * dy;
+
+        let c = c0 * (1.0 - dz) + c1 * dz;
+
+        c as u8
+    }
 }
 
 pub struct Image {

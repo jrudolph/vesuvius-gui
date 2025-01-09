@@ -101,7 +101,6 @@ pub struct TemplateApp {
     last_login_failed: bool,
     volume_id: usize,
     coord: [i32; 3],
-    trilinear_interpolation: bool,
     zoom: f32,
     frame_width: usize,
     frame_height: usize,
@@ -155,7 +154,6 @@ impl Default for TemplateApp {
             last_login_failed: false,
             volume_id: 0,
             coord: [2800, 2500, 10852],
-            trilinear_interpolation: false,
             zoom: 1f32,
             frame_width: 1000,
             frame_height: 1000,
@@ -271,11 +269,7 @@ impl TemplateApp {
         if segment_file.ends_with(".ppm") {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old: Arc<RefCell<dyn VoxelPaintVolume>> = self.world.clone();
-            let base = if self.trilinear_interpolation {
-                Arc::new(RefCell::new(TrilinearInterpolatedVolume { base: old }))
-            } else {
-                old
-            };
+            let base = old;
             let ppm = PPMVolume::new(segment_file, base);
             let width = ppm.width() as i32;
             let height = ppm.height() as i32;
@@ -299,11 +293,7 @@ impl TemplateApp {
         } else if segment_file.ends_with(".obj") {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old: Arc<RefCell<dyn VoxelPaintVolume>> = self.world.clone();
-            let base = if self.trilinear_interpolation {
-                Arc::new(RefCell::new(TrilinearInterpolatedVolume { base: old }))
-            } else {
-                old
-            };
+            let base = old;
             let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height);
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
@@ -704,9 +694,12 @@ impl TemplateApp {
                 }
 
                 if self.is_segment_mode() {
-                    let c = cb(ui, "Trilinear interpolation ('I')", &mut self.trilinear_interpolation);
+                    let c = cb(
+                        ui,
+                        "Trilinear interpolation ('I')",
+                        &mut self.drawing_config.trilinear_interpolation,
+                    );
                     if c.changed() {
-                        self.reload_segment();
                         has_changed = true;
                     }
 
@@ -824,8 +817,7 @@ impl TemplateApp {
                 self.clear_textures();
             }
             if i.key_pressed(egui::Key::I) {
-                self.trilinear_interpolation = !self.trilinear_interpolation;
-                self.reload_segment();
+                self.drawing_config.trilinear_interpolation = !self.drawing_config.trilinear_interpolation;
                 self.clear_textures();
             }
             if i.key_pressed(egui::Key::O) {
