@@ -3,7 +3,7 @@ use libm::sqrt;
 use std::{cell::RefCell, sync::Arc};
 use wavefront_obj::obj::{self, Object, Primitive, Vertex};
 
-struct FaceIndex {
+struct UVIndex {
     rows: usize,
     cols: usize,
     min_u: f64,
@@ -12,7 +12,7 @@ struct FaceIndex {
     max_v: f64,
     grid: Vec<Vec<usize>>, // rows * cols cell with indices to the faces
 }
-impl FaceIndex {
+impl UVIndex {
     fn new(object: &Object, rows: usize, cols: usize) -> Self {
         let mut grid = vec![vec![]; rows * cols];
 
@@ -112,14 +112,14 @@ impl FaceIndex {
 pub struct ObjFile {
     object: Object,
     has_inverted_uv_tris: bool,
-    uv_index: FaceIndex,
+    uv_index: UVIndex,
 }
 impl ObjFile {
     pub fn new(object: Object) -> Self {
         let has_inverted_uv_tris = Self::has_inverted_uv_tris(object.clone());
         let target_cell_num = 100.;
         let n = sqrt(object.geometry[0].shapes.len() as f64 / target_cell_num) as usize;
-        let uv_index = FaceIndex::new(&object, n, n);
+        let uv_index = UVIndex::new(&object, n, n);
         Self {
             object,
             has_inverted_uv_tris,
