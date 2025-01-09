@@ -1,7 +1,121 @@
 use super::{Image, PaintVolume, SurfaceVolume, VoxelPaintVolume, VoxelVolume};
-use libm::sqrt;
+use libm::{pow, sqrt};
 use std::{cell::RefCell, sync::Arc};
 use wavefront_obj::obj::{self, Object, Primitive, Vertex};
+
+// TODO: create a single AABB index for both XYZ and UV index
+struct XYZIndex {
+    n: usize, // same in every direction
+    min: [f64; 3],
+    max: [f64; 3],
+    grid: Vec<Vec<usize>>, // n * n * n cell with indices to the faces
+}
+impl XYZIndex {
+    fn new(object: &Object, n: usize) -> Self {
+        let mut grid = vec![vec![]; n * n * n];
+
+        fn minmax(vertices: &[Vertex], coord: impl Fn(&Vertex) -> f64) -> (f64, f64) {
+            (
+                vertices.iter().map(|v| coord(v)).fold(f64::INFINITY, f64::min),
+                vertices.iter().map(|v| coord(v)).fold(f64::NEG_INFINITY, f64::max),
+            )
+        }
+
+        let (min_x, max_x) = minmax(&object.vertices, |v| v.x);
+        let (min_y, max_y) = minmax(&object.vertices, |v| v.y);
+        let (min_z, max_z) = minmax(&object.vertices, |v| v.z);
+
+        let dx = (max_x - min_x) / n as f64;
+        let dy = (max_y - min_y) / n as f64;
+        let dz = (max_z - min_z) / n as f64;
+
+        for (i, s) in object.geometry[0].shapes.iter().enumerate() {
+            match s.primitive {
+                Primitive::Triangle(i1, i2, i3) => {
+                    let v1 = &i1.1.unwrap();
+                    let v2 = &i2.1.unwrap();
+                    let v3 = &i3.1.unwrap();
+
+                    let vert1 = object.vertices[*v1];
+                    let vert2 = object.vertices[*v2];
+                    let vert3 = object.vertices[*v3];
+
+                    let min_x_t = vert1.x.min(vert2.x).min(vert3.x);
+                    let max_x_t = vert1.x.max(vert2.x).max(vert3.x);
+
+                    let min_y_t = vert1.y.min(vert2.y).min(vert3.y);
+                    let max_y_t = vert1.y.max(vert2.y).max(vert3.y);
+
+                    let min_z_t = vert1.z.min(vert2.z).min(vert3.z);
+                    let max_z_t = vert1.z.max(vert2.z).max(vert3.z);
+
+                    let min_x_cell = (((min_x_t - min_x) / dx) as usize).max(0).min(n - 1);
+                    let max_x_cell = (((max_x_t - min_x) / dx) as usize).max(0).min(n - 1);
+
+                    let min_y_cell = (((min_y_t - min_y) / dy) as usize).max(0).min(n - 1);
+                    let max_y_cell = (((max_y_t - min_y) / dy) as usize).max(0).min(n - 1);
+
+                    let min_z_cell = (((min_z_t - min_z) / dz) as usize).max(0).min(n - 1);
+                    let max_z_cell = (((max_z_t - min_z) / dz) as usize).max(0).min(n - 1);
+
+                    for x in min_x_cell..=max_x_cell {
+                        for y in min_y_cell..=max_y_cell {
+                            for z in min_z_cell..=max_z_cell {
+                                let idx = x * n * n + y * n + z;
+                                grid[idx].push(i);
+                            }
+                        }
+                    }
+                }
+                _ => todo!(),
+            }
+        }
+
+        /* let num_cells = rows * cols;
+        let max_occ = grid.iter().map(|g| g.len()).max().unwrap();
+        println!("FaceIndex: {} cells, max occ: {}", num_cells, max_occ); */
+
+        let min = [min_x, min_y, min_z];
+        let max = [max_x, max_y, max_z];
+
+        Self { n, min, max, grid }
+    }
+
+    fn in_bounds(&self, min: [f64; 3], max: [f64; 3]) -> Vec<usize> {
+        let min_x_cell = (((min[0] - self.min[0]) / (self.max[0] - self.min[0]) * self.n as f64) as usize)
+            .max(0)
+            .min(self.n - 1);
+        let max_x_cell = (((max[0] - self.min[0]) / (self.max[0] - self.min[0]) * self.n as f64) as usize)
+            .max(0)
+            .min(self.n - 1);
+
+        let min_y_cell = (((min[1] - self.min[1]) / (self.max[1] - self.min[1]) * self.n as f64) as usize)
+            .max(0)
+            .min(self.n - 1);
+
+        let max_y_cell = (((max[1] - self.min[1]) / (self.max[1] - self.min[1]) * self.n as f64) as usize)
+            .max(0)
+            .min(self.n - 1);
+
+        let min_z_cell = (((min[2] - self.min[2]) / (self.max[2] - self.min[2]) * self.n as f64) as usize)
+            .max(0)
+            .min(self.n - 1);
+        let max_z_cell = (((max[2] - self.min[2]) / (self.max[2] - self.min[2]) * self.n as f64) as usize)
+            .max(0)
+            .min(self.n - 1);
+
+        let mut indices = vec![];
+        for x in min_x_cell..=max_x_cell {
+            for y in min_y_cell..=max_y_cell {
+                for z in min_z_cell..=max_z_cell {
+                    let idx = x * self.n * self.n + y * self.n + z;
+                    indices.extend(self.grid[idx].iter());
+                }
+            }
+        }
+        indices
+    }
+}
 
 struct UVIndex {
     rows: usize,
@@ -113,17 +227,24 @@ pub struct ObjFile {
     object: Object,
     has_inverted_uv_tris: bool,
     uv_index: UVIndex,
+    xyz_index: XYZIndex,
 }
 impl ObjFile {
     pub fn new(object: Object) -> Self {
         let has_inverted_uv_tris = Self::has_inverted_uv_tris(object.clone());
         let target_cell_num = 100.;
-        let n = sqrt(object.geometry[0].shapes.len() as f64 / target_cell_num) as usize;
+        let num_tris = object.geometry[0].shapes.len() as f64;
+        let n = sqrt(num_tris / target_cell_num) as usize;
         let uv_index = UVIndex::new(&object, n, n);
+
+        let n = pow(num_tris / target_cell_num, 1. / 3.) as usize;
+        let xyz_index = XYZIndex::new(&object, n);
+
         Self {
             object,
             has_inverted_uv_tris,
             uv_index,
+            xyz_index,
         }
     }
     fn has_inverted_uv_tris(obj: Object) -> bool {
@@ -596,7 +717,8 @@ impl SurfaceVolume for ObjVolume {
         maxs[plane_coord] = w as f64;
 
         let obj = &self.obj.object;
-        for s in obj.geometry[0].shapes.iter() {
+        for i in self.obj.xyz_index.in_bounds(mins, maxs) {
+            let s = &obj.geometry[0].shapes[i];
             match s.primitive {
                 Primitive::Triangle(i1, i2, i3) => {
                     let v1 = &obj.vertices[i1.0];
