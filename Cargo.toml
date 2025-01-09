@@ -44,7 +44,4 @@ wavefront_obj   = { version = "10.0" }
 env_logger = { version = "0.11", default-features = false, features = [] }
 memmap     = { version = "0.7" }
 
-[profile.release.target.'cfg(windows)'.build-override]
 debug = true
-split-debuginfo = "packed"
-debug-assertions = false
