@@ -26,6 +26,7 @@ pub struct DrawingConfig {
     pub quant: u8,
     pub mask_shift: u8,
     pub draw_xyz_outlines: bool,
+    pub draw_outline_vertices: bool,
 }
 impl DrawingConfig {
     pub fn filters_active(&self) -> bool {
@@ -55,6 +56,7 @@ impl Default for DrawingConfig {
             quant: 0xff,
             mask_shift: 0,
             draw_xyz_outlines: false,
+            draw_outline_vertices: false,
         }
     }
 }
@@ -77,9 +79,15 @@ impl Image {
         }
     }
 
-    pub fn set(&mut self, x: usize, y: usize, value: Color32) { self.data[y * self.width + x] = value; }
-    pub fn set_rgb(&mut self, x: usize, y: usize, r: u8, g: u8, b: u8) { self.set(x, y, Color32::from_rgb(r, g, b)); }
-    pub fn set_gray(&mut self, x: usize, y: usize, value: u8) { self.set(x, y, Color32::from_gray(value)); }
+    pub fn set(&mut self, x: usize, y: usize, value: Color32) {
+        self.data[y * self.width + x] = value;
+    }
+    pub fn set_rgb(&mut self, x: usize, y: usize, r: u8, g: u8, b: u8) {
+        self.set(x, y, Color32::from_rgb(r, g, b));
+    }
+    pub fn set_gray(&mut self, x: usize, y: usize, value: u8) {
+        self.set(x, y, Color32::from_gray(value));
+    }
 }
 impl From<Image> for ColorImage {
     fn from(value: Image) -> Self {

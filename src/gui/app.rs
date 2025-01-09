@@ -374,7 +374,9 @@ impl TemplateApp {
         }
     }
 
-    fn selected_volume(&self) -> &'static dyn VolumeReference { <dyn VolumeReference>::VOLUMES[self.volume_id] }
+    fn selected_volume(&self) -> &'static dyn VolumeReference {
+        <dyn VolumeReference>::VOLUMES[self.volume_id]
+    }
 
     pub fn clear_textures(&mut self) {
         self.texture_xy = None;
@@ -582,7 +584,9 @@ impl TemplateApp {
             }
         }
     }
-    fn should_sync_coords(&self) -> bool { self.segment_mode.as_ref().map_or(false, |s| s.sync_coordinates) }
+    fn should_sync_coords(&self) -> bool {
+        self.segment_mode.as_ref().map_or(false, |s| s.sync_coordinates)
+    }
 
     fn controls(&mut self, _frame: &eframe::Frame, ui: &mut Ui) {
         fn slider<T: emath::Numeric>(
@@ -708,17 +712,20 @@ impl TemplateApp {
 
                     let segment_mode = self.segment_mode.as_mut().unwrap();
                     has_changed = has_changed
+                        || cb(ui, "Segment outlines ('O')", &mut segment_mode.show_segment_outlines).changed();
+
+                    has_changed = has_changed
                         || cb(
                             ui,
-                            "Show segment outlines ('O')",
-                            &mut segment_mode.show_segment_outlines,
+                            "Segment outline points ('P')",
+                            &mut self.drawing_config.draw_outline_vertices,
                         )
                         .changed();
 
                     has_changed =
                         has_changed || cb(ui, "Sync coordinates ('S')", &mut segment_mode.sync_coordinates).changed();
 
-                    if cb(ui, "Draw XYZ outline ('X')", &mut self.drawing_config.draw_xyz_outlines).changed() {
+                    if cb(ui, "XYZ outline ('X')", &mut self.drawing_config.draw_xyz_outlines).changed() {
                         segment_mode.texture_uv = None;
                     }
                 }
@@ -810,36 +817,40 @@ impl TemplateApp {
 
         self.catalog_panel(ctx);
 
-        egui::Window::new("Controls").show(ctx, |ui| {
-            ui.input(|i| {
-                if i.key_pressed(egui::Key::F) {
-                    self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
-                    self.reload_segment();
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::F) {
+                self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
+                self.reload_segment();
+                self.clear_textures();
+            }
+            if i.key_pressed(egui::Key::I) {
+                self.trilinear_interpolation = !self.trilinear_interpolation;
+                self.reload_segment();
+                self.clear_textures();
+            }
+            if i.key_pressed(egui::Key::O) {
+                if let Some(segment_mode) = self.segment_mode.as_mut() {
+                    segment_mode.show_segment_outlines = !segment_mode.show_segment_outlines;
                     self.clear_textures();
                 }
-                if i.key_pressed(egui::Key::I) {
-                    self.trilinear_interpolation = !self.trilinear_interpolation;
-                    self.reload_segment();
+            }
+            if i.key_pressed(egui::Key::P) {
+                self.drawing_config.draw_outline_vertices = !self.drawing_config.draw_outline_vertices;
+                self.clear_textures();
+            }
+            if i.key_pressed(egui::Key::S) {
+                if let Some(segment_mode) = self.segment_mode.as_mut() {
+                    segment_mode.sync_coordinates = !segment_mode.sync_coordinates;
                     self.clear_textures();
                 }
-                if i.key_pressed(egui::Key::O) {
-                    if let Some(segment_mode) = self.segment_mode.as_mut() {
-                        segment_mode.show_segment_outlines = !segment_mode.show_segment_outlines;
-                        self.clear_textures();
-                    }
-                }
-                if i.key_pressed(egui::Key::S) {
-                    if let Some(segment_mode) = self.segment_mode.as_mut() {
-                        segment_mode.sync_coordinates = !segment_mode.sync_coordinates;
-                        self.clear_textures();
-                    }
-                }
-                if i.key_pressed(egui::Key::X) {
-                    self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
-                    self.clear_textures();
-                }
-            });
+            }
+            if i.key_pressed(egui::Key::X) {
+                self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
+                self.clear_textures();
+            }
+        });
 
+        egui::Window::new("Controls").show(ctx, |ui| {
             self.controls(_frame, ui);
 
             ui.separator();
@@ -1046,6 +1057,10 @@ impl TemplateApp {
 
 impl eframe::App for TemplateApp {
     /// Called by the frame work to save state before shutdown.
-    fn save(&mut self, storage: &mut dyn eframe::Storage) { eframe::set_value(storage, eframe::APP_KEY, self); }
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) { self.update_main(ctx, frame); }
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, eframe::APP_KEY, self);
+    }
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.update_main(ctx, frame);
+    }
 }

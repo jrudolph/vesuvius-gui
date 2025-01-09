@@ -692,11 +692,12 @@ impl SurfaceVolume for ObjVolume {
         _sfactor: u8,
         paint_zoom: u8,
         highlight_uv_section: Option<[i32; 3]>,
-        _config: &super::DrawingConfig,
+        config: &super::DrawingConfig,
         image: &mut Image,
     ) {
         let u = xyz[u_coord];
         let v = xyz[v_coord];
+        let w = xyz[plane_coord];
 
         let min_u = u - width as i32 / 2 * paint_zoom as i32;
         let max_u = u + width as i32 / 2 * paint_zoom as i32;
@@ -718,7 +719,7 @@ impl SurfaceVolume for ObjVolume {
             ([0f64, 0f64], [0f64, 0f64])
         };
 
-        let w = xyz[plane_coord];
+        let draw_outline_vertices = config.draw_outline_vertices;
 
         let mut mins = [0.0, 0.0, 0.0];
         let mut maxs = [0.0, 0.0, 0.0];
@@ -825,13 +826,17 @@ impl SurfaceVolume for ObjVolume {
                             let x1 = ((p2[u_coord] - min_u as f64) / paint_zoom as f64) as i32;
                             let y1 = ((p2[v_coord] - min_v as f64) / paint_zoom as f64) as i32;
 
-                            let (r, g, b) = if should_highlight {
-                                (0xff, 0xaa, 0)
+                            let (r, g, b, rp, gp, bp) = if should_highlight {
+                                (0xff, 0xaa, 0, 0, 0xff, 0)
                             } else {
-                                (0xff, 0, 0xff)
+                                (0xff, 0, 0xff, 0, 0, 0xff)
                             };
 
                             line(x0, y0, x1, y1, image, width, height, r, g, b);
+                            if draw_outline_vertices {
+                                point(x0, y0, image, 4, rp, gp, bp);
+                                point(x1, y1, image, 4, rp, gp, bp);
+                            }
                         }
                     }
                 }
@@ -877,6 +882,17 @@ fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut Image, width: usize, he
         if e2 <= dx {
             error += dx;
             y += sy;
+        }
+    }
+}
+
+fn point(x0: i32, y0: i32, buffer: &mut Image, width: usize, r: u8, g: u8, b: u8) {
+    let halfw = width as i32 / 2;
+    for x in x0 - halfw..x0 + halfw {
+        for y in y0 - halfw..y0 + halfw {
+            if x >= 0 && x < buffer.width as i32 && y >= 0 && y < buffer.height as i32 {
+                buffer.set_rgb(x as usize, y as usize, r, g, b);
+            }
         }
     }
 }
