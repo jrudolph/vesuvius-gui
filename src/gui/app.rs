@@ -129,7 +129,6 @@ pub struct TemplateApp {
     mode: Mode,
     #[serde(skip)]
     extra_resolutions: u32,
-    #[serde(skip)]
     segment_mode: Option<SegmentMode>,
     #[serde(skip)]
     catalog: Catalog,
