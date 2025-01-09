@@ -46,4 +46,3 @@ memmap     = { version = "0.7" }
 
 [profile.release-with-debug]
 inherits = "release"
-debug = true

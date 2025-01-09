@@ -3,3 +3,6 @@ linker = "aarch64-linux-gnu-gcc"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]
+
+[profile.release-with-debug.package.vesuvius-gui]
+debug = 1
