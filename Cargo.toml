@@ -44,4 +44,6 @@ wavefront_obj   = { version = "10.0" }
 env_logger = { version = "0.11", default-features = false, features = [] }
 memmap     = { version = "0.7" }
 
+[profile.release-with-debug]
+inherits = "release"
 debug = true
