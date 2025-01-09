@@ -223,32 +223,47 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
                     let ty = y & 63;
                     let tz = z & 63;
 
-                    // TODO: super fast path if & 3 != 3
+                    let bx0 = tx / 4;
+                    let bx1 = (tx + 1) / 4;
+                    let by0 = ty / 4;
+                    let by1 = (ty + 1) / 4;
+                    let bz0 = tz / 4;
+                    let bz1 = (tz + 1) / 4;
 
-                    fn at(tile: &Mmap, tx: usize, ty: usize, tz: usize) -> f64 {
-                        let bx = tx / 4;
-                        let by = ty / 4;
-                        let bz = tz / 4;
+                    let block000 = bz0 * 256 + by0 * 16 + bx0;
+                    let block100 = bz0 * 256 + by0 * 16 + bx1;
+                    let block010 = bz0 * 256 + by1 * 16 + bx0;
+                    let block110 = bz0 * 256 + by1 * 16 + bx1;
+                    let block001 = bz1 * 256 + by0 * 16 + bx0;
+                    let block101 = bz1 * 256 + by0 * 16 + bx1;
+                    let block011 = bz1 * 256 + by1 * 16 + bx0;
+                    let block111 = bz1 * 256 + by1 * 16 + bx1;
 
-                        let block = bz * 256 + by * 16 + bx;
+                    let off_x0 = tx & 3;
+                    let off_x1 = (tx + 1) & 3;
+                    let off_y0 = ty & 3;
+                    let off_y1 = (ty + 1) & 3;
+                    let off_z0 = tz & 3;
+                    let off_z1 = (tz + 1) & 3;
 
-                        let off_x = tx & 3;
-                        let off_y = ty & 3;
-                        let off_z = tz & 3;
-
-                        let index = off_x + off_y * 4 + off_z * 16 + block * 64;
-                        tile[index] as f64
-                    }
+                    let index000 = off_x0 + off_y0 * 4 + off_z0 * 16 + block000 * 64;
+                    let index100 = off_x1 + off_y0 * 4 + off_z0 * 16 + block100 * 64;
+                    let index010 = off_x0 + off_y1 * 4 + off_z0 * 16 + block010 * 64;
+                    let index110 = off_x1 + off_y1 * 4 + off_z0 * 16 + block110 * 64;
+                    let index001 = off_x0 + off_y0 * 4 + off_z1 * 16 + block001 * 64;
+                    let index101 = off_x1 + off_y0 * 4 + off_z1 * 16 + block101 * 64;
+                    let index011 = off_x0 + off_y1 * 4 + off_z1 * 16 + block011 * 64;
+                    let index111 = off_x1 + off_y1 * 4 + off_z1 * 16 + block111 * 64;
 
                     (
-                        at(tile, tx, ty, tz),
-                        at(tile, tx + 1, ty, tz),
-                        at(tile, tx, ty + 1, tz),
-                        at(tile, tx + 1, ty + 1, tz),
-                        at(tile, tx, ty, tz + 1),
-                        at(tile, tx + 1, ty, tz + 1),
-                        at(tile, tx, ty + 1, tz + 1),
-                        at(tile, tx + 1, ty + 1, tz + 1),
+                        tile[index000] as f64,
+                        tile[index100] as f64,
+                        tile[index010] as f64,
+                        tile[index110] as f64,
+                        tile[index001] as f64,
+                        tile[index101] as f64,
+                        tile[index011] as f64,
+                        tile[index111] as f64,
                     )
                 } else if let TileState::Downloading(_state) = r.deref() {
                     /* match *_state.lock().unwrap() {
