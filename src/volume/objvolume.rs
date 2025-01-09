@@ -1,17 +1,129 @@
 use super::{Image, PaintVolume, SurfaceVolume, VoxelPaintVolume, VoxelVolume};
+use libm::sqrt;
 use std::{cell::RefCell, sync::Arc};
 use wavefront_obj::obj::{self, Object, Primitive, Vertex};
+
+struct FaceIndex {
+    rows: usize,
+    cols: usize,
+    min_u: f64,
+    max_u: f64,
+    min_v: f64,
+    max_v: f64,
+    grid: Vec<Vec<usize>>, // rows * cols cell with indices to the faces
+}
+impl FaceIndex {
+    fn new(object: &Object, rows: usize, cols: usize) -> Self {
+        let mut grid = vec![vec![]; rows * cols];
+
+        let min_u = object.tex_vertices.iter().map(|v| v.u).fold(f64::INFINITY, f64::min);
+        let max_u = object
+            .tex_vertices
+            .iter()
+            .map(|v| v.u)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        let min_v = object.tex_vertices.iter().map(|v| v.v).fold(f64::INFINITY, f64::min);
+        let max_v = object
+            .tex_vertices
+            .iter()
+            .map(|v| v.v)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        let du = (max_u - min_u) / cols as f64;
+        let dv = (max_v - min_v) / rows as f64;
+
+        for (i, s) in object.geometry[0].shapes.iter().enumerate() {
+            match s.primitive {
+                Primitive::Triangle(i1, i2, i3) => {
+                    let v1 = &i1.1.unwrap();
+                    let v2 = &i2.1.unwrap();
+                    let v3 = &i3.1.unwrap();
+
+                    let vert1 = object.tex_vertices[*v1];
+                    let vert2 = object.tex_vertices[*v2];
+                    let vert3 = object.tex_vertices[*v3];
+
+                    let min_u_t = vert1.u.min(vert2.u).min(vert3.u);
+                    let max_u_t = vert1.u.max(vert2.u).max(vert3.u);
+
+                    let min_v_t = vert1.v.min(vert2.v).min(vert3.v);
+                    let max_v_t = vert1.v.max(vert2.v).max(vert3.v);
+
+                    let min_col = (((min_u_t - min_u) / du) as usize).max(0).min(cols - 1);
+                    let max_col = (((max_u_t - min_u) / du) as usize).max(0).min(cols - 1);
+
+                    let min_row = (((min_v_t - min_v) / dv) as usize).max(0).min(rows - 1);
+                    let max_row = (((max_v_t - min_v) / dv) as usize).max(0).min(rows - 1);
+
+                    for row in min_row..=max_row {
+                        for col in min_col..=max_col {
+                            let idx = row * cols + col;
+                            grid[idx].push(i);
+                        }
+                    }
+                }
+                _ => todo!(),
+            }
+        }
+
+        /* let num_cells = rows * cols;
+        let max_occ = grid.iter().map(|g| g.len()).max().unwrap();
+        println!("FaceIndex: {} cells, max occ: {}", num_cells, max_occ); */
+
+        Self {
+            rows,
+            cols,
+            min_u,
+            max_u,
+            min_v,
+            max_v,
+            grid,
+        }
+    }
+
+    fn in_bounds(&self, min_u: f64, max_u: f64, min_v: f64, max_v: f64) -> Vec<usize> {
+        let min_col = (((min_u - self.min_u) / (self.max_u - self.min_u) * self.cols as f64) as usize)
+            .max(0)
+            .min(self.cols - 1);
+        let max_col = (((max_u - self.min_u) / (self.max_u - self.min_u) * self.cols as f64) as usize)
+            .max(0)
+            .min(self.cols - 1);
+
+        let min_row = (((min_v - self.min_v) / (self.max_v - self.min_v) * self.rows as f64) as usize)
+            .max(0)
+            .min(self.rows - 1);
+        let max_row = (((max_v - self.min_v) / (self.max_v - self.min_v) * self.rows as f64) as usize)
+            .max(0)
+            .min(self.rows - 1);
+
+        let mut indices = vec![];
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                let idx = row * self.cols + col;
+                indices.extend(self.grid[idx].iter());
+            }
+        }
+
+        indices
+    }
+}
 
 pub struct ObjFile {
     object: Object,
     has_inverted_uv_tris: bool,
+    uv_index: FaceIndex,
 }
 impl ObjFile {
     pub fn new(object: Object) -> Self {
         let has_inverted_uv_tris = Self::has_inverted_uv_tris(object.clone());
+        let target_cell_num = 100.;
+        let n = sqrt(object.geometry[0].shapes.len() as f64 / target_cell_num) as usize;
+        let uv_index = FaceIndex::new(&object, n, n);
         Self {
             object,
             has_inverted_uv_tris,
+            uv_index,
         }
     }
     fn has_inverted_uv_tris(obj: Object) -> bool {
@@ -114,8 +226,12 @@ impl ObjVolume {
         let v = coord[1];
         let w = coord[2] as f64;
 
+        let ut = u as f64 / self.width() as f64;
+        let vt = self.v(v as f64 / self.height() as f64);
+
         let obj = &self.obj.object;
-        for s in obj.geometry[0].shapes.iter() {
+        for i in self.obj.uv_index.in_bounds(ut, ut, vt, vt) {
+            let s = &obj.geometry[0].shapes[i];
             match s.primitive {
                 Primitive::Triangle(i1, i2, i3) => {
                     let v1 = &obj.tex_vertices[i1.1.unwrap()];
@@ -248,7 +364,9 @@ impl PaintVolume for ObjVolume {
         println!("min_u: {}, max_u: {}, min_v: {}, max_v: {}", min_u, max_u, min_v, max_v); */
 
         let obj = &self.obj.object;
-        for s in obj.geometry[0].shapes.iter() {
+        //for s in obj.geometry[0].shapes.iter() {
+        for i in self.obj.uv_index.in_bounds(min_u_vt, max_u_vt, min_v_vt, max_v_vt) {
+            let s = &obj.geometry[0].shapes[i];
             match s.primitive {
                 Primitive::Triangle(i1, i2, i3) => {
                     let vert1 = &obj.tex_vertices[i1.1.unwrap()];
