@@ -32,9 +32,9 @@ impl XYZIndex {
         for (i, s) in object.geometry[0].shapes.iter().enumerate() {
             match s.primitive {
                 Primitive::Triangle(i1, i2, i3) => {
-                    let v1 = &i1.1.unwrap();
-                    let v2 = &i2.1.unwrap();
-                    let v3 = &i3.1.unwrap();
+                    let v1 = &i1.0;
+                    let v2 = &i2.0;
+                    let v3 = &i3.0;
 
                     let vert1 = object.vertices[*v1];
                     let vert2 = object.vertices[*v2];
