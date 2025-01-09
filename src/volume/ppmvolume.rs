@@ -155,6 +155,7 @@ impl SurfaceVolume for PPMVolume {
         _height: usize,
         _sfactor: u8,
         _paint_zoom: u8,
+        _highlight_uv_section: Option<[i32; 3]>,
         _config: &super::DrawingConfig,
         _buffer: &mut Image,
     ) {

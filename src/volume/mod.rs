@@ -120,6 +120,7 @@ pub trait SurfaceVolume: PaintVolume + VoxelVolume {
         height: usize,
         sfactor: u8,
         paint_zoom: u8,
+        highlight_uv_section: Option<[i32; 3]>,
         config: &DrawingConfig,
         buffer: &mut Image,
     );

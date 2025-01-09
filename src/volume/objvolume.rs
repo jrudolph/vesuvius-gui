@@ -691,6 +691,7 @@ impl SurfaceVolume for ObjVolume {
         height: usize,
         _sfactor: u8,
         paint_zoom: u8,
+        highlight_uv_section: Option<[i32; 3]>,
         _config: &super::DrawingConfig,
         image: &mut Image,
     ) {
@@ -701,6 +702,21 @@ impl SurfaceVolume for ObjVolume {
         let max_u = u + width as i32 / 2 * paint_zoom as i32;
         let min_v = v - height as i32 / 2 * paint_zoom as i32;
         let max_v = v + height as i32 / 2 * paint_zoom as i32;
+
+        let (uv_section_min, uv_section_max) = if let Some(h) = highlight_uv_section {
+            (
+                [
+                    (h[0] as f64 - width as f64 / 2. * paint_zoom as f64) / self.width as f64,
+                    (h[1] as f64 - height as f64 / 2. * paint_zoom as f64) / self.height as f64,
+                ],
+                [
+                    (h[0] as f64 + width as f64 / 2. * paint_zoom as f64) / self.width as f64,
+                    (h[1] as f64 + height as f64 / 2. * paint_zoom as f64) / self.height as f64,
+                ],
+            )
+        } else {
+            ([0f64, 0f64], [0f64, 0f64])
+        };
 
         let w = xyz[plane_coord];
 
@@ -778,6 +794,27 @@ impl SurfaceVolume for ObjVolume {
                         add_intersection_points(v3, v1);
 
                         if points.len() == 2 {
+                            let should_highlight = {
+                                if highlight_uv_section.is_some() {
+                                    let v1t = &obj.tex_vertices[i1.1.unwrap()];
+                                    let v2t = &obj.tex_vertices[i2.1.unwrap()];
+                                    let v3t = &obj.tex_vertices[i3.1.unwrap()];
+
+                                    let min_u_t = v1t.u.min(v2t.u).min(v3t.u);
+                                    let max_u_t = v1t.u.max(v2t.u).max(v3t.u);
+
+                                    let min_v_t = self.v(v1t.v).min(self.v(v2t.v)).min(self.v(v3t.v));
+                                    let max_v_t = self.v(v1t.v).max(self.v(v2t.v)).max(self.v(v3t.v));
+
+                                    min_u_t <= uv_section_max[0] as f64
+                                        && max_u_t >= uv_section_min[0] as f64
+                                        && min_v_t <= uv_section_max[1] as f64
+                                        && max_v_t >= uv_section_min[1] as f64
+                                } else {
+                                    false
+                                }
+                            };
+
                             let p1 = points[0];
                             let p2 = points[1];
 
@@ -788,7 +825,13 @@ impl SurfaceVolume for ObjVolume {
                             let x1 = ((p2[u_coord] - min_u as f64) / paint_zoom as f64) as i32;
                             let y1 = ((p2[v_coord] - min_v as f64) / paint_zoom as f64) as i32;
 
-                            line(x0, y0, x1, y1, image, width, height, 0xff, 0, 0xff);
+                            let (r, g, b) = if should_highlight {
+                                (0xff, 0xaa, 0)
+                            } else {
+                                (0xff, 0, 0xff)
+                            };
+
+                            line(x0, y0, x1, y1, image, width, height, r, g, b);
                         }
                     }
                 }

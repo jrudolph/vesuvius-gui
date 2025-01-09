@@ -535,6 +535,8 @@ impl TemplateApp {
         }
 
         if self.is_segment_mode() && !segment_pane && self.segment_mode.as_ref().unwrap().show_segment_outlines {
+            let coords = self.segment_mode.as_ref().unwrap().coord;
+
             self.segment_mode
                 .as_ref()
                 .unwrap()
@@ -549,6 +551,7 @@ impl TemplateApp {
                     height,
                     1,
                     paint_zoom,
+                    Some(coords),
                     &self.drawing_config,
                     &mut image,
                 );
