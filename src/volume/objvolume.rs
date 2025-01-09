@@ -212,7 +212,11 @@ impl PaintVolume for ObjVolume {
 
         let draw_outlines = config.draw_xyz_outlines;
 
-        let real_xyz = self.convert_to_volume_coords(xyz);
+        let real_xyz = if draw_outlines {
+            self.convert_to_volume_coords(xyz)
+        } else {
+            [0, 0, 0]
+        };
 
         let mut volume = self.volume.borrow_mut();
 
