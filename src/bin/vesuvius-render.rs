@@ -408,12 +408,7 @@ impl Rendering {
 
         let vol = volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {}));
         let world = Arc::new(RefCell::new(vol));
-        let trilinear_interpolation = true;
-        let base: Arc<RefCell<dyn VoxelPaintVolume + 'static>> = if trilinear_interpolation {
-            Arc::new(RefCell::new(TrilinearInterpolatedVolume { base: world }))
-        } else {
-            world
-        };
+        let base: Arc<RefCell<dyn VoxelPaintVolume + 'static>> = world;
         let obj = Arc::new(RefCell::new(ObjVolume::new(
             self.obj.clone(),
             base,
@@ -421,6 +416,8 @@ impl Rendering {
             self.params.height,
         )));
         let mut world = obj.borrow_mut();
+        let mut config = DrawingConfig::default();
+        config.trilinear_interpolation = true;
 
         let mut image = Image::new(paint_width, paint_height);
         world.paint(
@@ -436,7 +433,7 @@ impl Rendering {
             paint_height,
             1,
             1,
-            &DrawingConfig::default(),
+            &config,
             &mut image,
         );
         Ok(image)
