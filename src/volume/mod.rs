@@ -68,6 +68,10 @@ pub trait VoxelVolume {
     fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8;
 
     fn get_interpolated(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        self.get_interpolated_slow(xyz, downsampling)
+    }
+
+    fn get_interpolated_slow(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
         let (dx, x0) = modf(xyz[0]);
         let x1 = x0 + 1.0;
         let (dy, y0) = modf(xyz[1]);

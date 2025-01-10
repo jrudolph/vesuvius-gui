@@ -287,13 +287,7 @@ impl Rendering {
     }
     fn chunks_for(&self, UVTile { u, v, w }: &UVTile) -> BTreeSet<VolumeChunk> {
         let dummy = Arc::new(RefCell::new(TileCollectingVolume::new()));
-        //let world = Arc::new(RefCell::new(dummy.clone()));
-        let trilinear_interpolation = true;
-        let base: Arc<RefCell<dyn VoxelPaintVolume + 'static>> = if trilinear_interpolation {
-            Arc::new(RefCell::new(TrilinearInterpolatedVolume { base: dummy.clone() }))
-        } else {
-            dummy.clone()
-        };
+        let base: Arc<RefCell<dyn VoxelPaintVolume + 'static>> = dummy.clone();
         let width = self.params.width;
         let height = self.params.height;
         let tile_width = self.params.tile_size;
@@ -307,18 +301,9 @@ impl Rendering {
             *v as i32 + tile_height as i32 / 2,
             *w as i32 - self.params.mid_layer as i32,
         ];
-        world.paint(
-            xyz,
-            0,
-            1,
-            2,
-            tile_width,
-            tile_height,
-            1,
-            1,
-            &DrawingConfig::default(),
-            &mut image,
-        );
+        let mut config = DrawingConfig::default();
+        config.trilinear_interpolation = true;
+        world.paint(xyz, 0, 1, 2, tile_width, tile_height, 1, 1, &config, &mut image);
         let res = dummy.borrow().requested_tiles.clone();
         //println!("Tile: {},{} [{:?}]-> {:?}", u, v, xyz, res.len());
         res.into_iter().map(Into::into).collect()
@@ -475,6 +460,12 @@ impl TileCollectingVolume {
             last_requested: (0, 0, 0),
         }
     }
+    fn add_tile(&mut self, tile: (usize, usize, usize)) {
+        if self.last_requested != tile {
+            self.last_requested = tile;
+            self.requested_tiles.insert(tile);
+        }
+    }
 }
 impl PaintVolume for TileCollectingVolume {
     fn paint(
@@ -495,11 +486,21 @@ impl PaintVolume for TileCollectingVolume {
 }
 impl VoxelVolume for TileCollectingVolume {
     fn get(&mut self, xyz: [f64; 3], _downsampling: i32) -> u8 {
-        let xyz2 = ((xyz[0] as usize) >> 6, (xyz[1] as usize) >> 6, (xyz[2] as usize) >> 6);
+        let tile: (usize, usize, usize) = ((xyz[0] as usize) >> 6, (xyz[1] as usize) >> 6, (xyz[2] as usize) >> 6);
 
-        if self.last_requested != xyz2 {
-            self.last_requested = xyz2;
-            self.requested_tiles.insert(xyz2);
+        self.add_tile(tile);
+        0
+    }
+    fn get_interpolated(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        let x = xyz[0] as usize;
+        let y = xyz[1] as usize;
+        let z = xyz[2] as usize;
+
+        if x & 63 == 63 || y & 63 == 63 || z & 63 == 63 {
+            // slow path, call default trilinear interpolation
+            self.get_interpolated_slow(xyz, downsampling);
+        } else {
+            self.add_tile(((xyz[0] as usize) >> 6, (xyz[1] as usize) >> 6, (xyz[2] as usize) >> 6));
         }
         0
     }

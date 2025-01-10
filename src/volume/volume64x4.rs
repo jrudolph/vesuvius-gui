@@ -255,6 +255,21 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
                     let index011 = off_x0 + off_y1 * 4 + off_z1 * 16 + block011 * 64;
                     let index111 = off_x1 + off_y1 * 4 + off_z1 * 16 + block111 * 64;
 
+                    /*
+                    // we could avoid multiple bounds checks here, but I cannot measure a difference
+                    unsafe {
+                        (
+                            *tile.get_unchecked(index000) as f64,
+                            *tile.get_unchecked(index100) as f64,
+                            *tile.get_unchecked(index010) as f64,
+                            *tile.get_unchecked(index110) as f64,
+                            *tile.get_unchecked(index001) as f64,
+                            *tile.get_unchecked(index101) as f64,
+                            *tile.get_unchecked(index011) as f64,
+                            *tile.get_unchecked(index111) as f64,
+                        )
+                    }
+                    */
                     (
                         tile[index000] as f64,
                         tile[index100] as f64,
