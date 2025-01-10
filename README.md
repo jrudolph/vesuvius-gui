@@ -112,6 +112,8 @@ Options:
           Minimum layer id to render (default 25)
       --max-layer <MAX_LAYER>
           Maximum layer id to render (default 41)
+      --crop <CROP>
+          Crop a specific region from the segment. The format is <left>+<top>-<width>x<height>
       --target-format <TARGET_FORMAT>
           File extension / image format to use for layers (default png)
   -v, --volume <VOLUME>

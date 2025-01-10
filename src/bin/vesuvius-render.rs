@@ -16,6 +16,44 @@ use vesuvius_gui::volume::{
     self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, VoxelPaintVolume, VoxelVolume,
 };
 
+#[derive(Clone, Debug)]
+pub struct Crop {
+    pub top: usize,
+    pub left: usize,
+    pub width: usize,
+    pub height: usize,
+}
+#[derive(Clone)]
+struct CropParser;
+impl clap::builder::TypedValueParser for CropParser {
+    type Value = Crop;
+
+    fn parse_ref(
+        &self,
+        _cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> std::result::Result<Self::Value, clap::Error> {
+        // parse a value like 0+0-0x0 with a regexp
+
+        let re = regex::Regex::new(r"(\d+)\+(\d+)-(\d+)x(\d+)").unwrap();
+        let captures = re.captures(value.to_str().unwrap()).ok_or(clap::Error::raw(
+            clap::error::ErrorKind::ValueValidation,
+            "--crop argument could not be parsed. Use '--crop <left>+<top>-<width>x<height>', e.g. '--crop 1000+1000-500x500'.",
+        ))?;
+        let left = captures.get(1).unwrap().as_str().parse().unwrap();
+        let top = captures.get(2).unwrap().as_str().parse().unwrap();
+        let width = captures.get(3).unwrap().as_str().parse().unwrap();
+        let height = captures.get(4).unwrap().as_str().parse().unwrap();
+        Ok(Crop {
+            top,
+            left,
+            width,
+            height,
+        })
+    }
+}
+
 /// Vesuvius Renderer, a tool to render segments from obj files
 #[derive(Parser, Debug)]
 #[command(about, long_about = None)]
@@ -46,6 +84,10 @@ pub struct Args {
     /// Maximum layer id to render (default 41)
     #[clap(long)]
     max_layer: Option<u8>,
+
+    /// Crop a specific region from the segment. The format is <left>+<top>-<width>x<height>.
+    #[clap(long, value_parser = CropParser)]
+    crop: Option<Crop>,
 
     /// File extension / image format to use for layers (default png)
     #[clap(long)]
@@ -115,10 +157,25 @@ struct RenderParams {
     height: usize,
     tile_size: usize,
     w_range: RangeInclusive<usize>,
+    crop: Option<Crop>,
     mid_layer: usize,
     target_dir: String,
     target_format: String,
     stream_buffer_size: usize,
+}
+impl RenderParams {
+    fn render_left(&self) -> usize {
+        self.crop.as_ref().map(|c| c.left).unwrap_or(0)
+    }
+    fn render_top(&self) -> usize {
+        self.crop.as_ref().map(|c| c.top).unwrap_or(0)
+    }
+    fn render_width(&self) -> usize {
+        self.crop.as_ref().map(|c| c.width).unwrap_or(self.width)
+    }
+    fn render_height(&self) -> usize {
+        self.crop.as_ref().map(|c| c.height).unwrap_or(self.height)
+    }
 }
 impl From<&Args> for RenderParams {
     fn from(args: &Args) -> Self {
@@ -128,6 +185,7 @@ impl From<&Args> for RenderParams {
             height: args.height as usize,
             tile_size: args.tile_size.unwrap_or(1024) as usize,
             w_range: args.min_layer.unwrap_or(25) as usize..=args.max_layer.unwrap_or(41) as usize,
+            crop: args.crop.clone(),
             mid_layer: args.middle_layer.unwrap_or(32) as usize,
             target_dir: args.target_dir.clone(),
             target_format: args.target_format.clone().unwrap_or("png".to_string()),
@@ -273,10 +331,15 @@ impl Rendering {
         Ok(())
     }
     fn uv_tiles(&self) -> Vec<UVTile> {
+        let top = self.params.crop.as_ref().map(|c| c.top).unwrap_or(0);
+        let left = self.params.crop.as_ref().map(|c| c.left).unwrap_or(0);
+        let width = self.params.render_width();
+        let height = self.params.render_height();
+
         let mut res = Vec::new();
         for w in self.params.w_range.clone() {
-            for u in (0..self.params.width).step_by(self.params.tile_size) {
-                for v in (0..self.params.height).step_by(self.params.tile_size) {
+            for u in (left..left + width).step_by(self.params.tile_size) {
+                for v in (top..top + height).step_by(self.params.tile_size) {
                     let tile = UVTile { u, v, w };
                     res.push(tile);
                 }
@@ -347,8 +410,11 @@ impl Rendering {
     }
 
     fn render_layer_from_tiles(&self, tiles: Vec<(UVTile, Image)>) -> Result<()> {
-        let width = self.params.width;
-        let height = self.params.height;
+        let width = self.params.render_width();
+        let height = self.params.render_height();
+        let left = self.params.render_left();
+        let top = self.params.render_top();
+
         let tile_size = self.params.tile_size;
         let w = tiles[0].0.w;
         let mut image = image::GrayImage::new(width as u32, height as u32);
@@ -359,8 +425,8 @@ impl Rendering {
             // blit into the right area of image
             for lu in 0..tile_size {
                 for lv in 0..tile_size {
-                    let gu = u + lu;
-                    let gv = v + lv;
+                    let gu = u + lu - left;
+                    let gv = v + lv - top;
                     if gu < width && gv < height {
                         // edge tiles may spill over boundaries of target image
                         image.put_pixel(gu as u32, gv as u32, Luma([tile_data[lv * tile_size + lu].r() as u8]));
