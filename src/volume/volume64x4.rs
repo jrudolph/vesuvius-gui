@@ -1,16 +1,13 @@
+use super::{DrawingConfig, Image, VoxelVolume};
 use crate::downloader::*;
 use crate::model::Quality;
 use crate::volume::PaintVolume;
-
+use libm::modf;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-
-use super::{DrawingConfig, Image, VoxelVolume};
-use libm::modf;
-use memmap::Mmap;
 
 #[derive(Debug)]
 pub(crate) enum TileState {

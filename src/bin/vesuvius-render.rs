@@ -13,8 +13,7 @@ use vesuvius_gui::downloader::{DownloadState as DS, Downloader};
 use vesuvius_gui::model::Quality;
 use vesuvius_gui::model::{FullVolumeReference, VolumeReference};
 use vesuvius_gui::volume::{
-    self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, TrilinearInterpolatedVolume, VoxelPaintVolume,
-    VoxelVolume,
+    self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, VoxelPaintVolume, VoxelVolume,
 };
 
 /// Vesuvius Renderer, a tool to render segments from obj files
