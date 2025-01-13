@@ -598,8 +598,19 @@ impl TryFrom<&Args> for DownloadSettings {
         } else {
             &FullVolumeReference::SCROLL1
         };
-        let cache_dir = BaseDirs::new().unwrap().cache_dir().join("vesuvius-gui");
-        let download_dir = vol.sub_dir(cache_dir.to_str().unwrap());
+
+        let cache_dir = if let Some(dir) = args.data_directory.clone() {
+            dir
+        } else {
+            BaseDirs::new()
+                .unwrap()
+                .cache_dir()
+                .join("vesuvius-gui")
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        let download_dir = vol.sub_dir(&cache_dir);
 
         Ok(Self {
             tile_server_base: TILE_SERVER.to_string(),
