@@ -338,8 +338,8 @@ impl Rendering {
 
         let mut res = Vec::new();
         for w in self.params.w_range.clone() {
-            for u in (left..left + width).step_by(self.params.tile_size) {
-                for v in (top..top + height).step_by(self.params.tile_size) {
+            for v in (top..top + height).step_by(self.params.tile_size) {
+                for u in (left..left + width).step_by(self.params.tile_size) {
                     let tile = UVTile { u, v, w };
                     res.push(tile);
                 }
