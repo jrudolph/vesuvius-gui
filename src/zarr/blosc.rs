@@ -188,8 +188,17 @@ impl BloscChunk<u8> {
         let block_compressed_data = &self.data[block_offset + 4..block_offset + block_compressed_length + 4];
 
         match self.header.compressor {
-            BloscCompressor::Lz4 => lz4_compression::decompress::decompress(&block_compressed_data)
-                .expect(format!("Failed to decompress block {} in file {}", block_idx, self.file_name).as_str()),
+            BloscCompressor::Lz4 => match lz4_compression::decompress::decompress(&block_compressed_data) {
+                Ok(decompressed) => decompressed,
+                Err(e) => {
+                    println!(
+                        "Failed to decompress block {} in file {}: {:?}",
+                        block_idx, self.file_name, e
+                    );
+                    vec![0; self.header.blocksize]
+                }
+            },
+
             BloscCompressor::Zstd => zstd_decompress(block_compressed_data),
             _ => panic!(
                 "Unsupported compressor: {:?} in file {:?}",
