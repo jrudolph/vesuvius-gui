@@ -115,6 +115,7 @@ pub struct TemplateApp {
     download_notifier: Option<Receiver<(usize, usize, usize, Quality)>>,
     drawing_config: DrawingConfig,
     sync_coordinates: bool,
+    show_overlay: bool,
     #[serde(skip)]
     ranges: [RangeInclusive<i32>; 3],
     /* #[serde(skip)]
@@ -164,6 +165,7 @@ impl Default for TemplateApp {
             download_notifier: None,
             drawing_config: Default::default(),
             sync_coordinates: true,
+            show_overlay: true,
             ranges: [0..=10000, 0..=10000, 0..=21000],
             //ppm_file: None,
             //obj_file: None,
@@ -530,9 +532,7 @@ impl TemplateApp {
             );
         }
 
-        if !segment_pane
-        /* && d_coord == 2 */
-        {
+        if !segment_pane && self.show_overlay {
             if let Some(zarr) = self.overlay.as_mut() {
                 zarr.paint(
                     coords,
@@ -716,6 +716,10 @@ impl TemplateApp {
                     res
                 }
 
+                if self.overlay.is_some() {
+                    has_changed = has_changed || cb(ui, "Show overlay ('L')", &mut self.show_overlay).changed();
+                }
+
                 if self.is_segment_mode() {
                     let c = cb(
                         ui,
@@ -841,6 +845,10 @@ impl TemplateApp {
             if i.key_pressed(egui::Key::F) {
                 self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
                 self.reload_segment();
+                self.clear_textures();
+            }
+            if self.overlay.is_some() && i.key_pressed(egui::Key::L) {
+                self.show_overlay = !self.show_overlay;
                 self.clear_textures();
             }
             if self.is_segment_mode() {
