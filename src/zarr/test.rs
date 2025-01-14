@@ -44,7 +44,7 @@ fn write_points(array: &mut ZarrContext<3>) -> SparsePointCloud {
             for x in 0..shape[2] {
                 let idx = [z, y, x];
                 let v = array.get(idx);
-                if v != 0 {
+                if let Some(v) = v {
                     count += 1;
                     if v == 1 {
                         write(&mut writer1, x, y, z);
@@ -290,152 +290,156 @@ fn connected_components(array: &ZarrContextBase<3> /* , full: &FullMapVolume */)
                 //let v = full.mmap[idx];
                 let v = array.get([z as usize, y as usize, x as usize]);
                 let mut count = 0;
-                if v != 0 && read_map[idx] == 0 {
-                    /* if v == 1 {
-                        // keep even odd for horizontal / vertical
-                        let res = id1;
-                        id1 += 4;
-                        res
-                    } else {
-                        let res = id2;
-                        id2 += 4;
-                        res
-                    }; */
-                    //assert!(new_id > 2);
+                if let Some(v) = v {
+                    if read_map[idx] == 0 {
+                        /* if v == 1 {
+                            // keep even odd for horizontal / vertical
+                            let res = id1;
+                            id1 += 4;
+                            res
+                        } else {
+                            let res = id2;
+                            id2 += 4;
+                            res
+                        }; */
+                        //assert!(new_id > 2);
 
-                    //println!("Found a value of {} at {:?}", v, [x, y, z]);
+                        //println!("Found a value of {} at {:?}", v, [x, y, z]);
 
-                    // flood current zone with fill_id
-                    work_list.clear();
-                    work_list.push([x, y, z]);
-                    visited.clear();
-                    selected.clear();
-                    selected_coords.clear();
+                        // flood current zone with fill_id
+                        work_list.clear();
+                        work_list.push([x, y, z]);
+                        visited.clear();
+                        selected.clear();
+                        selected_coords.clear();
 
-                    while let Some([x, y, z]) = work_list.pop() {
-                        let next_idx = index_of(x, y, z);
-                        //let v2 = full.mmap[next_idx];
-                        let v2 = array.get([z as usize, y as usize, x as usize]);
-                        //println!("Checking at {:?}, found {}", [x, y, z], v2);
-                        if v2 == v && !visited.contains(&next_idx) {
-                            // do erosion check
-                            /* const MAX_DIST: i32 = 5;
+                        while let Some([x, y, z]) = work_list.pop() {
+                            let next_idx = index_of(x, y, z);
+                            //let v2 = full.mmap[next_idx];
+                            let v2 = array.get([z as usize, y as usize, x as usize]);
+                            //println!("Checking at {:?}, found {}", [x, y, z], v2);
+                            if let Some(v2) = v2 {
+                                if v2 == v && !visited.contains(&next_idx) {
+                                    // do erosion check
+                                    /* const MAX_DIST: i32 = 5;
 
-                            fn is_inner(full: &FullMapVolume, x: u16, y: u16, z: u16, v: u8) -> bool {
-                                for dx in -MAX_DIST..=MAX_DIST {
-                                    for dy in -MAX_DIST..=MAX_DIST {
-                                        for dz in -MAX_DIST..=MAX_DIST {
-                                            let x = x as i32 + dx;
-                                            let y = y as i32 + dy;
-                                            let z = z as i32 + dz;
+                                    fn is_inner(full: &FullMapVolume, x: u16, y: u16, z: u16, v: u8) -> bool {
+                                        for dx in -MAX_DIST..=MAX_DIST {
+                                            for dy in -MAX_DIST..=MAX_DIST {
+                                                for dz in -MAX_DIST..=MAX_DIST {
+                                                    let x = x as i32 + dx;
+                                                    let y = y as i32 + dy;
+                                                    let z = z as i32 + dz;
 
-                                            if x >= 0
-                                                && y >= 0
-                                                && z >= 0
-                                                && !full.mmap[index_of(x as u16, y as u16, z as u16)] == v
-                                            {
-                                                return false;
+                                                    if x >= 0
+                                                        && y >= 0
+                                                        && z >= 0
+                                                        && !full.mmap[index_of(x as u16, y as u16, z as u16)] == v
+                                                    {
+                                                        return false;
+                                                    }
+                                                }
                                             }
                                         }
+                                        true
                                     }
-                                }
-                                true
-                            }
-                            if is_inner(full, x, y, z, v) { */
-                            selected.push(next_idx);
-                            selected_coords.push([x, y, z]);
-                            count += 1;
+                                    if is_inner(full, x, y, z, v) { */
+                                    selected.push(next_idx);
+                                    selected_coords.push([x, y, z]);
+                                    count += 1;
 
-                            /* if count % 1000000 == 0 {
-                                println!(
-                                    "new_id {} with value {} had {} elements (at x: {:4} y: {:4} z: {:4}",
-                                    new_id, v, count, x, y, z
-                                );
-                            } */
+                                    /* if count % 1000000 == 0 {
+                                        println!(
+                                            "new_id {} with value {} had {} elements (at x: {:4} y: {:4} z: {:4}",
+                                            new_id, v, count, x, y, z
+                                        );
+                                    } */
 
-                            // add neighbors to work_list
-                            // for now just consider neighbors that share a full face of the voxel cube
-                            work_list.push([x as u16 - 1, y as u16, z as u16]);
-                            work_list.push([x as u16 + 1, y as u16, z as u16]);
+                                    // add neighbors to work_list
+                                    // for now just consider neighbors that share a full face of the voxel cube
+                                    work_list.push([x as u16 - 1, y as u16, z as u16]);
+                                    work_list.push([x as u16 + 1, y as u16, z as u16]);
 
-                            work_list.push([x as u16, y as u16 - 1, z as u16]);
-                            work_list.push([x as u16, y as u16 + 1, z as u16]);
+                                    work_list.push([x as u16, y as u16 - 1, z as u16]);
+                                    work_list.push([x as u16, y as u16 + 1, z as u16]);
 
-                            work_list.push([x as u16, y as u16, z as u16 - 1]);
-                            work_list.push([x as u16, y as u16, z as u16 + 1]);
+                                    work_list.push([x as u16, y as u16, z as u16 - 1]);
+                                    work_list.push([x as u16, y as u16, z as u16 + 1]);
 
-                            /* for dx in -1..=MAX_DIST {
-                                for dy in -1..=MAX_DIST {
-                                    for dz in -1..=MAX_DIST {
-                                        let x = x as i32 + dx;
-                                        let y = y as i32 + dy;
-                                        let z = z as i32 + dz;
-                                        if x >= 0 && y >= 0 && z >= 20 {
-                                            work_list.push([x as u16, y as u16, z as u16]);
+                                    /* for dx in -1..=MAX_DIST {
+                                        for dy in -1..=MAX_DIST {
+                                            for dz in -1..=MAX_DIST {
+                                                let x = x as i32 + dx;
+                                                let y = y as i32 + dy;
+                                                let z = z as i32 + dz;
+                                                if x >= 0 && y >= 0 && z >= 20 {
+                                                    work_list.push([x as u16, y as u16, z as u16]);
+                                                }
+                                            }
                                         }
-                                    }
+                                    } */
+                                    //println!("Worklist now has {} elements", work_list.len());
+                                    //}
                                 }
-                            } */
-                            //println!("Worklist now has {} elements", work_list.len());
-                            //}
+                            }
+
+                            visited.insert(next_idx);
                         }
 
-                        visited.insert(next_idx);
-                    }
-
-                    let this_global = {
-                        let (map, id, global_id) = &mut *locked.lock().unwrap();
-                        if map[selected[0]] == 0 {
-                            let new_id = if selected.len() > 200000 {
-                                *id += 1;
-                                if *id & 0xff < 2 {
+                        let this_global = {
+                            let (map, id, global_id) = &mut *locked.lock().unwrap();
+                            if map[selected[0]] == 0 {
+                                let new_id = if selected.len() > 200000 {
                                     *id += 1;
+                                    if *id & 0xff < 2 {
+                                        *id += 1;
+                                    }
+                                    *id
+                                } else {
+                                    1
+                                };
+
+                                for idx in selected.iter() {
+                                    //map[idx * 2] = (new_id & 0xff) as u8;
+                                    //map[idx * 2 + 1] = ((new_id & 0xff00) >> 8) as u8;
+                                    map[*idx] = new_id;
                                 }
-                                *id
+
+                                let this_global = if selected.len() > 200000 {
+                                    *global_id += 1;
+                                    *global_id
+                                } else {
+                                    1
+                                };
+
+                                if new_id > 1 {
+                                    println!(
+                                        "new_id {} / {} starting at {:4}/{:4}/{:4} had {} elements",
+                                        new_id, this_global, x, y, z, count
+                                    );
+                                }
+
+                                this_global
                             } else {
-                                1
-                            };
-
-                            for idx in selected.iter() {
-                                //map[idx * 2] = (new_id & 0xff) as u8;
-                                //map[idx * 2 + 1] = ((new_id & 0xff00) >> 8) as u8;
-                                map[*idx] = new_id;
-                            }
-
-                            let this_global = if selected.len() > 200000 {
-                                *global_id += 1;
-                                *global_id
-                            } else {
-                                1
-                            };
-
-                            if new_id > 1 {
                                 println!(
-                                    "new_id {} / {} starting at {:4}/{:4}/{:4} had {} elements",
-                                    new_id, this_global, x, y, z, count
+                                    "Skipping at {}/{}/{} because already set to {}",
+                                    x, y, z, map[selected[0]]
                                 );
+                                1
                             }
+                        };
 
-                            this_global
-                        } else {
-                            println!(
-                                "Skipping at {}/{}/{} because already set to {}",
-                                x, y, z, map[selected[0]]
-                            );
-                            1
-                        }
-                    };
+                        if this_global != 1 {
+                            let file_name = format!("data/connected/{}.raw", this_global);
+                            let file = OpenOptions::new().write(true).create(true).open(file_name).unwrap();
 
-                    if this_global != 1 {
-                        let file_name = format!("data/connected/{}.raw", this_global);
-                        let file = OpenOptions::new().write(true).create(true).open(file_name).unwrap();
+                            let mut writer = std::io::BufWriter::new(file);
 
-                        let mut writer = std::io::BufWriter::new(file);
-
-                        for [x, y, z] in selected_coords.iter() {
-                            writer.write((*x).to_le_bytes().as_ref()).unwrap();
-                            writer.write((*y).to_le_bytes().as_ref()).unwrap();
-                            writer.write((*z).to_le_bytes().as_ref()).unwrap();
+                            for [x, y, z] in selected_coords.iter() {
+                                writer.write((*x).to_le_bytes().as_ref()).unwrap();
+                                writer.write((*y).to_le_bytes().as_ref()).unwrap();
+                                writer.write((*z).to_le_bytes().as_ref()).unwrap();
+                            }
                         }
                     }
                 }
@@ -472,7 +476,7 @@ fn write_points2(array: &mut ZarrContext<3>) -> SparsePointCloud {
             for x in 0..shape[2] {
                 let idx = [z, y, x];
                 let v = array.get(idx);
-                if v != 0 {
+                if let Some(v) = v {
                     let idx = index_of(x as u16, y as u16, z as u16); //(z * shape[1] + y) * shape[2] + x;
                     map[idx] = v;
                     count += 1;
@@ -520,10 +524,10 @@ pub fn test_zarr() {
     let at = [1, 21, 118];
     let mut sum = 0;
     for _ in 0..100000000 {
-        sum += zarr.get(at0);
-        sum += zarr.get(at1);
-        sum += zarr.get(at2);
-        sum += zarr.get(at3);
+        sum += zarr.get(at0).unwrap_or(0);
+        sum += zarr.get(at1).unwrap_or(0);
+        sum += zarr.get(at2).unwrap_or(0);
+        sum += zarr.get(at3).unwrap_or(0);
     }
     let elapsed = start.elapsed();
     println!(
