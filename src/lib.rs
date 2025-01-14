@@ -11,7 +11,7 @@ pub mod zarr;
 
 pub fn zstd_decompress(input: &[u8]) -> Vec<u8> {
     let mut uncompressed = Vec::new();
-    ruzstd::StreamingDecoder::new(Cursor::new(input))
+    ruzstd::decoding::StreamingDecoder::new(Cursor::new(input))
         .unwrap()
         .read_to_end(&mut uncompressed)
         .unwrap();

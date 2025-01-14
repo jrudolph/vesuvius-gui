@@ -10,7 +10,7 @@ async-recursion = { version = "1" }
 base64          = { version = "0.22" }
 clap            = { version = "4", features = [ "derive" ] }
 derive_more     = { version = "1", features = [ "debug" ] }
-directories     = { version = "5" }
+directories     = { version = "6" }
 eframe          = { version = "0.30", default-features = false, features = [
     #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     #"default_fonts", # Embed the default egui fonts.
@@ -25,20 +25,20 @@ emath           = { version = "0.30"}
 futures         = { version = "0.3" }
 image           = { version = "0.25", default-features=false, features = ["png","tiff", "jpeg"] }
 indicatif       = { version = "0.17", features = ["rayon"]}
-itertools       = { version = "0.13" }
+itertools       = { version = "0.14" }
 libm            = { version = "0.2" }
 log             = { version = "0.4" }
 lz4-compression = { version = "0.7" }
 num_cpus        = { version = "1" }
 rayon           = { version = "1" }
 regex           = { version = "1", default-features=false, features = ["unicode-perl"] }
-ruzstd          = { version = "0.7" }
+ruzstd          = { version = "0.8" }
 serde           = { version = "1", features = ["derive"] }
 serde_json      = { version = "1" }
 sha2            = { version = "0.10" }
 tiff            = { version = "0.9" }
 tokio           = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync" ]}
-wavefront_obj   = { version = "10.0" }
+wavefront_obj   = { version = "11.0" }
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
