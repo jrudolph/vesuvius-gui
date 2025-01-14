@@ -115,6 +115,19 @@ impl Image {
     pub fn set(&mut self, x: usize, y: usize, value: Color32) {
         self.data[y * self.width + x] = value;
     }
+    pub fn blend(&mut self, x: usize, y: usize, value: Color32) {
+        let pos = &mut self.data[y * self.width + x];
+        let old = *pos;
+        let alpha = value.a() as f32 / 255.0;
+        let new = Color32::from_rgba_unmultiplied(
+            (old.r() as f32 * (1.0 - alpha) + value.r() as f32 * alpha) as u8,
+            (old.g() as f32 * (1.0 - alpha) + value.g() as f32 * alpha) as u8,
+            (old.b() as f32 * (1.0 - alpha) + value.b() as f32 * alpha) as u8,
+            (old.a() as f32 * (1.0 - alpha) + value.a() as f32 * alpha) as u8,
+        );
+        //let new = value;
+        *pos = new;
+    }
     pub fn set_rgb(&mut self, x: usize, y: usize, r: u8, g: u8, b: u8) {
         self.set(x, y, Color32::from_rgb(r, g, b));
     }

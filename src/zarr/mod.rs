@@ -586,13 +586,14 @@ impl PaintVolume for ZarrContext<3> {
                 let v = self.get([z as usize, y as usize, x as usize]).unwrap_or(0);
                 if v != 0 {
                     //println!("painting at {} {} {} {}", x, y, z, v);
-                    let color = match v {
+                    let mut color = match v {
                         1 => Color32::RED,
                         2 => Color32::GREEN,
                         3 => Color32::YELLOW,
                         _ => Color32::BLUE,
                     };
-                    buffer.set(im_u, im_v, color);
+                    color[3] = 100;
+                    buffer.blend(im_u, im_v, color);
                 }
             }
         }
