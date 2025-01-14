@@ -54,8 +54,6 @@ pub struct SegmentMode {
     texture_uv: Option<egui::TextureHandle>,
     #[serde(skip)]
     convert_to_world_coords: Box<dyn Fn([i32; 3]) -> [i32; 3]>,
-    show_segment_outlines: bool,
-    sync_coordinates: bool,
 }
 
 impl Default for SegmentMode {
@@ -71,8 +69,6 @@ impl Default for SegmentMode {
             surface_volume: Arc::new(RefCell::new(EmptyVolume {})),
             texture_uv: None,
             convert_to_world_coords: Box::new(|x| x),
-            show_segment_outlines: true,
-            sync_coordinates: true,
         }
     }
 }
@@ -118,6 +114,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     download_notifier: Option<Receiver<(usize, usize, usize, Quality)>>,
     drawing_config: DrawingConfig,
+    sync_coordinates: bool,
     #[serde(skip)]
     ranges: [RangeInclusive<i32>; 3],
     /* #[serde(skip)]
@@ -128,6 +125,7 @@ pub struct TemplateApp {
     mode: Mode,
     #[serde(skip)]
     extra_resolutions: u32,
+    #[serde(skip)]
     segment_mode: Option<SegmentMode>,
     #[serde(skip)]
     catalog: Catalog,
@@ -165,6 +163,7 @@ impl Default for TemplateApp {
             last_size: Vec2::ZERO,
             download_notifier: None,
             drawing_config: Default::default(),
+            sync_coordinates: true,
             ranges: [0..=10000, 0..=10000, 0..=21000],
             //ppm_file: None,
             //obj_file: None,
@@ -550,7 +549,7 @@ impl TemplateApp {
             }
         }
 
-        if self.is_segment_mode() && !segment_pane && self.segment_mode.as_ref().unwrap().show_segment_outlines {
+        if self.is_segment_mode() && !segment_pane && self.drawing_config.show_segment_outlines {
             let coords = self.segment_mode.as_ref().unwrap().coord;
 
             self.segment_mode
@@ -590,7 +589,7 @@ impl TemplateApp {
 
     fn sync_coords(&mut self) {
         if let Some(segment_mode) = self.segment_mode.as_ref() {
-            if segment_mode.sync_coordinates {
+            if self.sync_coordinates {
                 let res = (*segment_mode.convert_to_world_coords)(segment_mode.coord);
                 if res[0] >= 0 && res[1] >= 0 && res[2] >= 0 {
                     self.coord = res;
@@ -599,7 +598,7 @@ impl TemplateApp {
         }
     }
     fn should_sync_coords(&self) -> bool {
-        self.segment_mode.as_ref().map_or(false, |s| s.sync_coordinates)
+        self.segment_mode.is_some() && self.sync_coordinates
     }
 
     fn controls(&mut self, _frame: &eframe::Frame, ui: &mut Ui) {
@@ -729,7 +728,12 @@ impl TemplateApp {
 
                     let segment_mode = self.segment_mode.as_mut().unwrap();
                     has_changed = has_changed
-                        || cb(ui, "Segment outlines ('O')", &mut segment_mode.show_segment_outlines).changed();
+                        || cb(
+                            ui,
+                            "Segment outlines ('O')",
+                            &mut self.drawing_config.show_segment_outlines,
+                        )
+                        .changed();
 
                     has_changed = has_changed
                         || cb(
@@ -739,8 +743,7 @@ impl TemplateApp {
                         )
                         .changed();
 
-                    has_changed =
-                        has_changed || cb(ui, "Sync coordinates ('S')", &mut segment_mode.sync_coordinates).changed();
+                    has_changed = has_changed || cb(ui, "Sync coordinates ('S')", &mut self.sync_coordinates).changed();
 
                     if cb(ui, "XYZ outline ('X')", &mut self.drawing_config.draw_xyz_outlines).changed() {
                         segment_mode.texture_uv = None;
@@ -840,29 +843,27 @@ impl TemplateApp {
                 self.reload_segment();
                 self.clear_textures();
             }
-            if i.key_pressed(egui::Key::I) {
-                self.drawing_config.trilinear_interpolation = !self.drawing_config.trilinear_interpolation;
-                self.clear_textures();
-            }
-            if i.key_pressed(egui::Key::O) {
-                if let Some(segment_mode) = self.segment_mode.as_mut() {
-                    segment_mode.show_segment_outlines = !segment_mode.show_segment_outlines;
+            if self.is_segment_mode() {
+                if i.key_pressed(egui::Key::I) {
+                    self.drawing_config.trilinear_interpolation = !self.drawing_config.trilinear_interpolation;
                     self.clear_textures();
                 }
-            }
-            if i.key_pressed(egui::Key::P) {
-                self.drawing_config.draw_outline_vertices = !self.drawing_config.draw_outline_vertices;
-                self.clear_textures();
-            }
-            if i.key_pressed(egui::Key::S) {
-                if let Some(segment_mode) = self.segment_mode.as_mut() {
-                    segment_mode.sync_coordinates = !segment_mode.sync_coordinates;
+                if i.key_pressed(egui::Key::O) {
+                    self.drawing_config.show_segment_outlines = !self.drawing_config.show_segment_outlines;
                     self.clear_textures();
                 }
-            }
-            if i.key_pressed(egui::Key::X) {
-                self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
-                self.clear_textures();
+                if i.key_pressed(egui::Key::P) {
+                    self.drawing_config.draw_outline_vertices = !self.drawing_config.draw_outline_vertices;
+                    self.clear_textures();
+                }
+                if i.key_pressed(egui::Key::S) {
+                    self.sync_coordinates = !self.sync_coordinates;
+                    self.clear_textures();
+                }
+                if i.key_pressed(egui::Key::X) {
+                    self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
+                    self.clear_textures();
+                }
             }
         });
 

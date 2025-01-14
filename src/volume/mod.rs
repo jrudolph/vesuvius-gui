@@ -24,9 +24,10 @@ pub struct DrawingConfig {
     pub threshold_max: u8,
     pub quant: u8,
     pub mask_shift: u8,
-    pub draw_xyz_outlines: bool,
-    pub draw_outline_vertices: bool,
     pub trilinear_interpolation: bool,
+    pub draw_xyz_outlines: bool,
+    pub show_segment_outlines: bool,
+    pub draw_outline_vertices: bool,
 }
 impl DrawingConfig {
     pub fn filters_active(&self) -> bool {
@@ -55,9 +56,10 @@ impl Default for DrawingConfig {
             threshold_max: 0,
             quant: 0xff,
             mask_shift: 0,
-            draw_xyz_outlines: false,
-            draw_outline_vertices: false,
             trilinear_interpolation: false,
+            draw_xyz_outlines: false,
+            show_segment_outlines: true,
+            draw_outline_vertices: false,
         }
     }
 }
