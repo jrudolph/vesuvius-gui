@@ -9,9 +9,6 @@ use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
-use crate::zarr::FourColors;
-use crate::zarr::GrayScale;
-use crate::zarr::OmeZarrContext;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
 use egui::Color32;
@@ -253,14 +250,18 @@ impl TemplateApp {
                 app.overlay = Some({
                     if segment_file.starts_with("http") {
                         println!("Loading zarr from url: {}", segment_file);
-                        //ZarrArray::from_url_to_default_cache_dir(&segment_file)
-                        Box::new(OmeZarrContext::<FourColors>::from_url_to_default_cache_dir(
+                        Box::new(
+                            ZarrArray::from_url_to_default_cache_dir(&segment_file)
+                                .into_ctx()
+                                .into_ctx(),
+                        )
+                        // TODO: autodetect or allow to choose whether to use ome-zarr or zarr
+                        /* Box::new(OmeZarrContext::<FourColors>::from_url_to_default_cache_dir(
                             &segment_file,
-                        ))
+                        )) */
                     } else {
                         Box::new(ZarrArray::from_path(&segment_file).into_ctx().into_ctx())
                     }
-                    //Box::new(zarr.into_ctx().into_ctx())
                 });
             }
         }
@@ -333,7 +334,8 @@ impl TemplateApp {
 
         let volume_dir = volume.sub_dir(&self.data_dir);
 
-        if volume.id() == FullVolumeReference::SCROLL1.id() {
+        // TODO: allow selecting zarr volumes as well (we need an abstraction to create any world)
+        /* if volume.id() == FullVolumeReference::SCROLL1.id() {
             self.world = Arc::new(RefCell::new(
             OmeZarrContext::<GrayScale>::from_url(
                 "https://dl.ash2txt.org/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/",
@@ -344,7 +346,7 @@ impl TemplateApp {
             /* let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, None, sender);
             let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
             self.world = Arc::new(RefCell::new(v)); */
-        }
+        } */
 
         self.world = {
             let downloader = Box::new(SimpleDownloader::new(
