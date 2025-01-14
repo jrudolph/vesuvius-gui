@@ -418,7 +418,7 @@ impl<const N: usize> ZarrContextCache<N> {
             cache: HashMap::new(),
             access_counter: 0,
             non_empty_entries: 0,
-            max_entries: 200000000 / def.chunks.iter().product::<usize>(), // FIXME: make configurable
+            max_entries: 2_000_000_000 / def.chunks.iter().product::<usize>(), // FIXME: make configurable
         }
     }
     fn entry(&self, ctx: Option<ChunkContext>) -> Option<ZarrContextCacheEntry> {
@@ -586,14 +586,13 @@ impl PaintVolume for ZarrContext<3> {
                 let v = self.get([z as usize, y as usize, x as usize]).unwrap_or(0);
                 if v != 0 {
                     //println!("painting at {} {} {} {}", x, y, z, v);
-                    let mut color = match v {
+                    let color = match v {
                         1 => Color32::RED,
                         2 => Color32::GREEN,
                         3 => Color32::YELLOW,
                         _ => Color32::BLUE,
                     };
-                    color[3] = 100;
-                    buffer.blend(im_u, im_v, color);
+                    buffer.blend(im_u, im_v, color, 0.4);
                 }
             }
         }
