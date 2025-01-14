@@ -1,6 +1,6 @@
+#![allow(dead_code)]
 use super::{ZarrArray, ZarrContext};
 use crate::volume::PaintVolume;
-use crate::volume::VoxelPaintVolume;
 use crate::volume::VoxelVolume;
 use egui::Color32;
 use ehttp::Request;
