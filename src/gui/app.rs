@@ -65,7 +65,7 @@ impl Default for SegmentMode {
             width: 1000,
             height: 1000,
             ranges: [0..=1000, 0..=1000, -40..=40],
-            world: Volume::new(EmptyVolume {}),
+            world: EmptyVolume {}.into_volume(),
             surface_volume: Rc::new(RefCell::new(EmptyVolume {})),
             texture_uv: None,
             convert_to_world_coords: Box::new(|x| x),
@@ -160,7 +160,7 @@ impl Default for TemplateApp {
             texture_xy: None,
             texture_xz: None,
             texture_yz: None,
-            world: Volume::new(EmptyVolume {}),
+            world: EmptyVolume {}.into_volume(),
             last_size: Vec2::ZERO,
             download_notifier: None,
             drawing_config: Default::default(),
@@ -359,7 +359,7 @@ impl TemplateApp {
                 false,
             ));
             let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
-            Volume::new(v)
+            v.into_volume()
         };
     }
 
@@ -369,13 +369,13 @@ impl TemplateApp {
 
     fn load_from_cells(&mut self) {
         let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
-        self.world = Volume::new(v);
+        self.world = v.into_volume();
         self.extra_resolutions = 0;
     }
 
     fn load_from_layers(&mut self) {
         let v = LayersMappedVolume::from_data_dir(&self.data_dir);
-        self.world = Volume::new(v);
+        self.world = v.into_volume();
         self.extra_resolutions = 0;
     }
 

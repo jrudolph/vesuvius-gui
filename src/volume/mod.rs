@@ -147,7 +147,14 @@ pub trait PaintVolume {
     );
 }
 
-pub trait VoxelPaintVolume: PaintVolume + VoxelVolume {}
+pub trait VoxelPaintVolume: PaintVolume + VoxelVolume {
+    fn into_volume(self) -> Volume
+    where
+        Self: Sized + 'static,
+    {
+        Volume::new(self)
+    }
+}
 impl<T: PaintVolume + VoxelVolume> VoxelPaintVolume for T {}
 
 pub trait SurfaceVolume: PaintVolume + VoxelVolume {

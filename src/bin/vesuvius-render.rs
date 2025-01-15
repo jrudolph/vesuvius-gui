@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex};
 use vesuvius_gui::downloader::{DownloadState as DS, Downloader};
 use vesuvius_gui::model::Quality;
 use vesuvius_gui::model::{FullVolumeReference, VolumeReference};
-use vesuvius_gui::volume::{self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, Volume, VoxelVolume};
+use vesuvius_gui::volume::{
+    self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, Volume, VoxelPaintVolume, VoxelVolume,
+};
 
 #[derive(Clone, Debug)]
 pub struct Crop {
@@ -352,12 +354,7 @@ impl Rendering {
         let height = self.params.height;
         let tile_width = self.params.tile_size;
         let tile_height = self.params.tile_size;
-        let mut world = Volume::new(ObjVolume::new(
-            self.obj.clone(),
-            Volume::from_ref(dummy.clone()),
-            width,
-            height,
-        ));
+        let mut world = ObjVolume::new(self.obj.clone(), Volume::from_ref(dummy.clone()), width, height).into_volume();
 
         let mut image = Image::new(tile_width, tile_height);
         let xyz = [
@@ -459,13 +456,13 @@ impl Rendering {
         let dir = self.downloader.settings.cache_dir.clone();
 
         let vol = volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {}));
-        let base: Volume = Volume::new(vol);
-        let mut world = Volume::new(ObjVolume::new(
+        let mut world = ObjVolume::new(
             self.obj.clone(),
-            base,
+            vol.into_volume(),
             self.params.width,
             self.params.height,
-        ));
+        )
+        .into_volume();
         let mut config = DrawingConfig::default();
         config.trilinear_interpolation = true;
 
