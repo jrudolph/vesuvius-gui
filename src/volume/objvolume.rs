@@ -1,6 +1,6 @@
-use super::{Image, PaintVolume, SurfaceVolume, VoxelPaintVolume, VoxelVolume};
+use super::{Image, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
 use libm::{pow, sqrt};
-use std::{cell::RefCell, sync::Arc};
+use std::sync::Arc;
 use wavefront_obj::obj::{self, Object, Primitive, Vertex};
 
 // TODO: create a single AABB index for both XYZ and UV index
@@ -282,26 +282,16 @@ impl ObjFile {
 
 #[derive(Clone)]
 pub struct ObjVolume {
-    volume: Arc<RefCell<dyn VoxelPaintVolume>>,
+    volume: Volume,
     obj: Arc<ObjFile>,
     width: usize,
     height: usize,
 }
 impl ObjVolume {
-    pub fn load_from_obj(
-        obj_file_path: &str,
-        base_volume: Arc<RefCell<dyn VoxelPaintVolume>>,
-        width: usize,
-        height: usize,
-    ) -> Self {
+    pub fn load_from_obj(obj_file_path: &str, base_volume: Volume, width: usize, height: usize) -> Self {
         Self::new(Arc::new(Self::load_obj(obj_file_path)), base_volume, width, height)
     }
-    pub fn new(
-        obj: Arc<ObjFile>,
-        base_volume: Arc<RefCell<dyn VoxelPaintVolume>>,
-        width: usize,
-        height: usize,
-    ) -> Self {
+    pub fn new(obj: Arc<ObjFile>, base_volume: Volume, width: usize, height: usize) -> Self {
         Self {
             volume: base_volume,
             obj,
@@ -455,7 +445,7 @@ impl PaintVolume for ObjVolume {
             [0, 0, 0]
         };
 
-        let mut volume = self.volume.borrow_mut();
+        let mut volume = self.volume.clone();
 
         let ffactor = sfactor as f64;
 

@@ -22,8 +22,8 @@ use egui::{ColorImage, Image, PointerButton, Response, Ui, Widget};
 use egui_extras::Column;
 use egui_extras::TableBuilder;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 
 const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
@@ -45,11 +45,11 @@ pub struct SegmentMode {
     #[serde(skip)]
     ranges: [RangeInclusive<i32>; 3],
     #[serde(skip)]
-    world: Arc<RefCell<dyn VoxelPaintVolume>>,
+    world: Volume,
     // This is the same reference as `world`. We need to add it just because upcasting between SurfaceVolume and VoxelPaintVolume is so hard.
     // TODO: remove when there's a better way to upcast
     #[serde(skip)]
-    surface_volume: Arc<RefCell<dyn SurfaceVolume>>,
+    surface_volume: Rc<RefCell<dyn SurfaceVolume>>,
     #[serde(skip)]
     texture_uv: Option<egui::TextureHandle>,
     #[serde(skip)]
@@ -65,8 +65,8 @@ impl Default for SegmentMode {
             width: 1000,
             height: 1000,
             ranges: [0..=1000, 0..=1000, -40..=40],
-            world: Arc::new(RefCell::new(EmptyVolume {})),
-            surface_volume: Arc::new(RefCell::new(EmptyVolume {})),
+            world: Volume::new(EmptyVolume {}),
+            surface_volume: Rc::new(RefCell::new(EmptyVolume {})),
             texture_uv: None,
             convert_to_world_coords: Box::new(|x| x),
         }
@@ -108,7 +108,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     texture_yz: Option<egui::TextureHandle>,
     #[serde(skip)]
-    world: Arc<RefCell<dyn VoxelPaintVolume>>,
+    world: Volume,
     #[serde(skip)]
     last_size: Vec2,
     #[serde(skip)]
@@ -160,7 +160,7 @@ impl Default for TemplateApp {
             texture_xy: None,
             texture_xz: None,
             texture_yz: None,
-            world: Arc::new(RefCell::new(EmptyVolume {})),
+            world: Volume::new(EmptyVolume {}),
             last_size: Vec2::ZERO,
             download_notifier: None,
             drawing_config: Default::default(),
@@ -279,12 +279,12 @@ impl TemplateApp {
     fn setup_segment(&mut self, segment_file: &str, width: usize, height: usize) {
         if segment_file.ends_with(".ppm") {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
-            let old: Arc<RefCell<dyn VoxelPaintVolume>> = self.world.clone();
+            let old = self.world.clone();
             let base = old;
             let ppm = PPMVolume::new(segment_file, base);
             let width = ppm.width() as i32;
             let height = ppm.height() as i32;
-            let ppm = Arc::new(RefCell::new(ppm));
+            let ppm = Rc::new(RefCell::new(ppm));
             let ppm2 = ppm.clone();
             println!("Loaded PPM volume with size {}x{}", width, height);
 
@@ -296,20 +296,20 @@ impl TemplateApp {
             segment.width = width as usize;
             segment.height = height as usize;
             segment.ranges = [0..=width, 0..=height, -40..=40];
-            segment.world = ppm.clone();
+            segment.world = Volume::from_ref(ppm.clone());
             segment.surface_volume = ppm;
             segment.convert_to_world_coords = Box::new(move |coord| ppm2.borrow().convert_to_world_coords(coord));
 
             self.segment_mode = Some(segment)
         } else if segment_file.ends_with(".obj") {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
-            let old: Arc<RefCell<dyn VoxelPaintVolume>> = self.world.clone();
+            let old = self.world.clone();
             let base = old;
             let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height);
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
 
-            let volume = Arc::new(RefCell::new(obj_volume));
+            let volume = Rc::new(RefCell::new(obj_volume));
             let obj2 = volume.clone();
             println!("Loaded Obj volume with size {}x{}", width, height);
 
@@ -321,7 +321,7 @@ impl TemplateApp {
             segment.width = width as usize;
             segment.height = height as usize;
             segment.ranges = [0..=width, 0..=height, -40..=40];
-            segment.world = volume.clone();
+            segment.world = Volume::from_ref(volume.clone());
             segment.surface_volume = volume;
             segment.convert_to_world_coords = Box::new(move |coords| obj2.borrow().convert_to_volume_coords(coords));
 
@@ -359,7 +359,7 @@ impl TemplateApp {
                 false,
             ));
             let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
-            Arc::new(RefCell::new(v))
+            Volume::new(v)
         };
     }
 
@@ -369,13 +369,13 @@ impl TemplateApp {
 
     fn load_from_cells(&mut self) {
         let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
-        self.world = Arc::new(RefCell::new(v));
+        self.world = Volume::new(v);
         self.extra_resolutions = 0;
     }
 
     fn load_from_layers(&mut self) {
         let v = LayersMappedVolume::from_data_dir(&self.data_dir);
-        self.world = Arc::new(RefCell::new(v));
+        self.world = Volume::new(v);
         self.extra_resolutions = 0;
     }
 
@@ -497,7 +497,7 @@ impl TemplateApp {
         //let q = 1;
         //let mut printed = false;
 
-        let (coords, world) = if !segment_pane {
+        let (coords, mut world) = if !segment_pane {
             (self.coord, self.world.clone())
         } else {
             (
@@ -518,7 +518,7 @@ impl TemplateApp {
         for level in (min_level..=max_level).rev() {
             let sfactor = 1 << level as u8;
             //println!("level: {} factor: {}", level, sfactor);
-            world.borrow_mut().paint(
+            world.paint(
                 coords,
                 u_coord,
                 v_coord,

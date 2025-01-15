@@ -14,6 +14,7 @@ pub use layers::LayersMappedVolume;
 use libm::modf;
 pub use objvolume::{ObjFile, ObjVolume};
 pub use ppmvolume::PPMVolume;
+use std::{cell::RefCell, rc::Rc};
 pub use volume64x4::VolumeGrid64x4Mapped;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -164,4 +165,55 @@ pub trait SurfaceVolume: PaintVolume + VoxelVolume {
         config: &DrawingConfig,
         buffer: &mut Image,
     );
+}
+
+#[derive(Clone)]
+pub struct Volume {
+    pub volume: Rc<RefCell<dyn VoxelPaintVolume>>,
+}
+impl Volume {
+    pub fn new(volume: impl VoxelPaintVolume + 'static) -> Self {
+        Self {
+            volume: Rc::new(RefCell::new(volume)),
+        }
+    }
+    pub fn from_ref(volume: Rc<RefCell<dyn VoxelPaintVolume>>) -> Self {
+        Self { volume }
+    }
+}
+impl PaintVolume for Volume {
+    fn paint(
+        &mut self,
+        xyz: [i32; 3],
+        u_coord: usize,
+        v_coord: usize,
+        plane_coord: usize,
+        width: usize,
+        height: usize,
+        sfactor: u8,
+        paint_zoom: u8,
+        config: &DrawingConfig,
+        buffer: &mut Image,
+    ) {
+        self.volume.borrow_mut().paint(
+            xyz,
+            u_coord,
+            v_coord,
+            plane_coord,
+            width,
+            height,
+            sfactor,
+            paint_zoom,
+            config,
+            buffer,
+        );
+    }
+}
+impl VoxelVolume for Volume {
+    fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        self.volume.borrow_mut().get(xyz, downsampling)
+    }
+    fn get_interpolated(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        self.volume.borrow_mut().get_interpolated(xyz, downsampling)
+    }
 }

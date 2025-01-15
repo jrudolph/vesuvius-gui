@@ -3,10 +3,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, Seek, SeekFrom};
 
-use super::{AutoPaintVolume, Image, SurfaceVolume, VoxelPaintVolume, VoxelVolume};
+use super::{AutoPaintVolume, Image, SurfaceVolume, Volume, VoxelVolume};
 use libm::modf;
-use std::cell::RefCell;
-use std::sync::Arc;
 
 pub struct PPMFile {
     pub width: usize,
@@ -55,13 +53,13 @@ impl PPMFile {
 }
 
 pub struct PPMVolume {
-    volume: Arc<RefCell<dyn VoxelPaintVolume>>,
+    volume: Volume,
     ppm: PPMFile,
     /// should the volume use bilinear interpolation
     interpolate: bool,
 }
 impl PPMVolume {
-    pub fn new(ppm_file: &str, base_volume: Arc<RefCell<dyn VoxelPaintVolume>>) -> Self {
+    pub fn new(ppm_file: &str, base_volume: Volume) -> Self {
         let ppm = PPMFile::new(ppm_file).unwrap();
 
         Self {
@@ -139,7 +137,7 @@ impl VoxelVolume for PPMVolume {
         let x = x0 + uvw[2] as f64 * nx;
         let y = y0 + uvw[2] as f64 * ny;
         let z = z0 + uvw[2] as f64 * nz;
-        self.volume.borrow_mut().get(
+        self.volume.get(
             [
                 x / downsampling as f64,
                 y / downsampling as f64,

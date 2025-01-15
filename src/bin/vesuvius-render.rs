@@ -8,13 +8,12 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ops::RangeInclusive;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use vesuvius_gui::downloader::{DownloadState as DS, Downloader};
 use vesuvius_gui::model::Quality;
 use vesuvius_gui::model::{FullVolumeReference, VolumeReference};
-use vesuvius_gui::volume::{
-    self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, VoxelPaintVolume, VoxelVolume,
-};
+use vesuvius_gui::volume::{self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, Volume, VoxelVolume};
 
 #[derive(Clone, Debug)]
 pub struct Crop {
@@ -348,14 +347,17 @@ impl Rendering {
         res
     }
     fn chunks_for(&self, UVTile { u, v, w }: &UVTile) -> BTreeSet<VolumeChunk> {
-        let dummy = Arc::new(RefCell::new(TileCollectingVolume::new()));
-        let base: Arc<RefCell<dyn VoxelPaintVolume + 'static>> = dummy.clone();
+        let dummy = Rc::new(RefCell::new(TileCollectingVolume::new()));
         let width = self.params.width;
         let height = self.params.height;
         let tile_width = self.params.tile_size;
         let tile_height = self.params.tile_size;
-        let world = Arc::new(RefCell::new(ObjVolume::new(self.obj.clone(), base, width, height)));
-        let mut world = world.borrow_mut();
+        let mut world = Volume::new(ObjVolume::new(
+            self.obj.clone(),
+            Volume::from_ref(dummy.clone()),
+            width,
+            height,
+        ));
 
         let mut image = Image::new(tile_width, tile_height);
         let xyz = [
@@ -457,15 +459,13 @@ impl Rendering {
         let dir = self.downloader.settings.cache_dir.clone();
 
         let vol = volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {}));
-        let world = Arc::new(RefCell::new(vol));
-        let base: Arc<RefCell<dyn VoxelPaintVolume + 'static>> = world;
-        let obj = Arc::new(RefCell::new(ObjVolume::new(
+        let base: Volume = Volume::new(vol);
+        let mut world = Volume::new(ObjVolume::new(
             self.obj.clone(),
             base,
             self.params.width,
             self.params.height,
-        )));
-        let mut world = obj.borrow_mut();
+        ));
         let mut config = DrawingConfig::default();
         config.trilinear_interpolation = true;
 
