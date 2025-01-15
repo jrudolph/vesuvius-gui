@@ -844,7 +844,6 @@ impl TemplateApp {
         ctx.input(|i| {
             if i.key_pressed(egui::Key::F) {
                 self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
-                self.reload_segment();
                 self.clear_textures();
             }
             if self.overlay.is_some() && i.key_pressed(egui::Key::L) {
@@ -870,6 +869,16 @@ impl TemplateApp {
                 }
                 if i.key_pressed(egui::Key::X) {
                     self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
+                    self.clear_textures();
+                }
+                if i.key_pressed(egui::Key::J) {
+                    let segment_mode = self.segment_mode.as_mut().unwrap();
+                    segment_mode.coord[2] = (segment_mode.coord[2] - 1).max(*segment_mode.ranges[2].start());
+                    self.clear_textures();
+                }
+                if i.key_pressed(egui::Key::K) {
+                    let segment_mode = self.segment_mode.as_mut().unwrap();
+                    segment_mode.coord[2] = (segment_mode.coord[2] + 1).min(*segment_mode.ranges[2].end());
                     self.clear_textures();
                 }
             }
