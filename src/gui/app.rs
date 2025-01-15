@@ -9,7 +9,6 @@ use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
-use crate::zarr::OmeZarrContext;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
 use egui::Color32;
@@ -252,10 +251,9 @@ impl TemplateApp {
                             &segment_file,
                         )) */
                     } else {
-                        /* Arc::new(RefCell::new(
-                            (ZarrArray::from_path(&segment_file).into_ctx().into_ctx()),
-                        )) */
-                        OmeZarrContext::<crate::zarr::FourColors>::from_path(&segment_file).into_volume()
+                        ZarrArray::from_path(&segment_file).into_ctx().into_ctx().into_volume()
+                        // use crate::zarr::OmeZarrContext;
+                        // OmeZarrContext::<crate::zarr::FourColors>::from_path(&segment_file).into_volume()
                     }
                 });
             }
