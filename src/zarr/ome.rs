@@ -235,4 +235,16 @@ impl<C: ColorScheme> VoxelVolume for OmeZarrContext<C> {
             scale,
         )
     }
+    fn get_color(&mut self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        let scale = downsampling.trailing_zeros() as u8;
+        let v = self.get(
+            [
+                (xyz[2] * downsampling as f64) as usize,
+                (xyz[1] * downsampling as f64) as usize,
+                (xyz[0] * downsampling as f64) as usize,
+            ],
+            scale,
+        );
+        C::get_color(v)
+    }
 }

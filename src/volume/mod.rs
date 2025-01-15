@@ -3,6 +3,7 @@ mod generic;
 mod grid500;
 mod layers;
 mod objvolume;
+mod overlay;
 mod ppmvolume;
 mod volume64x4;
 
@@ -13,6 +14,7 @@ pub use grid500::VolumeGrid500Mapped;
 pub use layers::LayersMappedVolume;
 use libm::modf;
 pub use objvolume::{ObjFile, ObjVolume};
+pub use overlay::OverlayVolume;
 pub use ppmvolume::PPMVolume;
 use std::{cell::RefCell, rc::Rc};
 pub use volume64x4::VolumeGrid64x4Mapped;
@@ -67,6 +69,15 @@ impl Default for DrawingConfig {
 
 pub trait VoxelVolume {
     fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8;
+
+    fn get_color(&mut self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        let value = self.get(xyz, downsampling);
+        Color32::from_gray(value)
+    }
+    fn get_color_interpolated(&mut self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        let value = self.get_interpolated(xyz, downsampling);
+        Color32::from_gray(value)
+    }
 
     fn get_interpolated(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
         self.get_interpolated_slow(xyz, downsampling)
@@ -234,5 +245,11 @@ impl VoxelVolume for Volume {
     }
     fn get_interpolated(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
         self.volume.borrow_mut().get_interpolated(xyz, downsampling)
+    }
+    fn get_color(&mut self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        self.volume.borrow_mut().get_color(xyz, downsampling)
+    }
+    fn get_color_interpolated(&mut self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        self.volume.borrow_mut().get_color_interpolated(xyz, downsampling)
     }
 }
