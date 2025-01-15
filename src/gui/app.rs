@@ -9,6 +9,7 @@ use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
+use crate::zarr::OmeZarrContext;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
 use egui::Color32;
@@ -140,7 +141,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     notification_receiver: Receiver<UINotification>,
     #[serde(skip)]
-    overlay: Option<Box<dyn PaintVolume>>,
+    overlay: Option<Volume>,
     catalog_panel_open: bool,
 }
 
@@ -238,6 +239,29 @@ impl TemplateApp {
             app.select_volume(app.volume_id);
         }
 
+        if let Some(segment_file) = config.overlay_dir {
+            if segment_file.contains(".zarr") {
+                app.overlay = Some({
+                    if segment_file.starts_with("http") {
+                        println!("Loading zarr from url: {}", segment_file);
+                        ZarrArray::from_url_to_default_cache_dir(&segment_file)
+                            .into_ctx()
+                            .into_ctx()
+                            .into_volume()
+                        // TODO: autodetect or allow to choose whether to use ome-zarr or zarr
+                        /* Box::new(OmeZarrContext::<FourColors>::from_url_to_default_cache_dir(
+                            &segment_file,
+                        )) */
+                    } else {
+                        /* Arc::new(RefCell::new(
+                            (ZarrArray::from_path(&segment_file).into_ctx().into_ctx()),
+                        )) */
+                        OmeZarrContext::<crate::zarr::FourColors>::from_path(&segment_file).into_volume()
+                    }
+                });
+            }
+        }
+
         if let Some(ObjFileConfig {
             obj_file,
             width,
@@ -245,27 +269,6 @@ impl TemplateApp {
         }) = config.obj_file
         {
             app.setup_segment(&obj_file, width, height);
-        }
-
-        if let Some(segment_file) = config.overlay_dir {
-            if segment_file.contains(".zarr") {
-                app.overlay = Some({
-                    if segment_file.starts_with("http") {
-                        println!("Loading zarr from url: {}", segment_file);
-                        Box::new(
-                            ZarrArray::from_url_to_default_cache_dir(&segment_file)
-                                .into_ctx()
-                                .into_ctx(),
-                        )
-                        // TODO: autodetect or allow to choose whether to use ome-zarr or zarr
-                        /* Box::new(OmeZarrContext::<FourColors>::from_url_to_default_cache_dir(
-                            &segment_file,
-                        )) */
-                    } else {
-                        Box::new(ZarrArray::from_path(&segment_file).into_ctx().into_ctx())
-                    }
-                });
-            }
         }
 
         app
@@ -299,7 +302,12 @@ impl TemplateApp {
         } else if segment_file.ends_with(".obj") {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old = self.world.clone();
-            let base = old;
+            let base = if let Some(overlay) = self.overlay.as_ref() {
+                OverlayVolume::new(old, overlay.clone(), 0.2).into_volume()
+            } else {
+                old
+            };
+
             let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height);
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
@@ -528,8 +536,8 @@ impl TemplateApp {
         }
 
         if !segment_pane && self.show_overlay {
-            if let Some(zarr) = self.overlay.as_mut() {
-                zarr.paint(
+            if let Some(overlay) = self.overlay.as_mut() {
+                overlay.paint(
                     coords,
                     u_coord,
                     v_coord,

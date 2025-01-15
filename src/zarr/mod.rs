@@ -6,7 +6,7 @@ mod test;
 pub use ome::OmeZarrContext;
 pub use ome::{ColorScheme, FourColors, GrayScale};
 
-use crate::volume::PaintVolume;
+use crate::volume::{PaintVolume, VoxelVolume};
 use blosc::{BloscChunk, BloscContext};
 use derive_more::Debug;
 use egui::Color32;
@@ -422,7 +422,7 @@ impl<const N: usize> ZarrContextCache<N> {
             cache: HashMap::new(),
             access_counter: 0,
             non_empty_entries: 0,
-            max_entries: 2_000_000_000 / def.chunks.iter().product::<usize>(), // FIXME: make configurable
+            max_entries: 6_000_000_000 / def.chunks.iter().product::<usize>(), // FIXME: make configurable
         }
     }
     fn entry(&self, ctx: Option<ChunkContext>) -> Option<ZarrContextCacheEntry> {
@@ -607,5 +607,35 @@ impl PaintVolume for ZarrContext<3> {
                 }
             }
         }
+    }
+}
+impl VoxelVolume for ZarrContext<3> {
+    fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        let f = downsampling as f64;
+        let v = self
+            .get([(xyz[2] / f) as usize, (xyz[1] / f) as usize, (xyz[0] / f) as usize])
+            .unwrap_or(0);
+        if v != 0 {
+            255
+        } else {
+            0
+        }
+    }
+    fn get_color(&self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        let f = downsampling as f64;
+        let v = self
+            .get([(xyz[2] * f) as usize, (xyz[1] * f) as usize, (xyz[0] * f) as usize])
+            .unwrap_or(0);
+        let color = match v {
+            0 => Color32::BLACK,
+            1 => Color32::RED,
+            2 => Color32::GREEN,
+            3 => Color32::YELLOW,
+            _ => Color32::BLUE,
+        };
+        color
+    }
+    fn get_color_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        self.get_color(xyz, downsampling)
     }
 }
