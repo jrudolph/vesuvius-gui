@@ -1,6 +1,6 @@
 use super::{ZarrContext, ZarrContextBase};
 use crate::{
-    volume::PaintVolume,
+    volume::{PaintVolume, VoxelVolume},
     zarr::{blosc::BloscChunk, ZarrArray},
 };
 use egui::Color32;
@@ -250,6 +250,260 @@ impl PaintVolume for ConnectedFullMapVolume {
     }
 }
 
+fn color_from_palette(idx: usize) -> Color32 {
+    fn from_hsb(h: f64, s: f64, b: f64) -> Color32 {
+        let h = h % 360.0;
+        let s = s.clamp(0.0, 1.0);
+        let b = b.clamp(0.0, 1.0);
+
+        let c = b * s;
+        let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+        let m = b - c;
+
+        let (r1, g1, b1) = match (h / 60.0) as u32 {
+            0 => (c, x, 0.0),
+            1 => (x, c, 0.0),
+            2 => (0.0, c, x),
+            3 => (0.0, x, c),
+            4 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+
+        let to_byte = |v: f64| ((v + m) * 255.0).round() as u8;
+        Color32::from_rgb(to_byte(r1), to_byte(g1), to_byte(b1))
+    }
+
+    let color_id = idx % 60;
+    let b = (color_id % 2) as f64 / 2.0 + 0.5;
+    let h = (color_id / 2) as f64 / 30.0 * 360.0;
+    from_hsb(h, 1.0, b)
+}
+
+// const CROP: [usize; 3] = [2400, 3000, 9300];
+// const CROP_SIZE: [usize; 3] = [400, 1000, 1000];
+
+const CROP: [usize; 3] = [2400, 3000, 9300];
+const CROP_SIZE: [usize; 3] = [2000, 2000, 2000];
+
+/* const CROP: [usize; 3] = [2585, 3013, 9300];
+const CROP_SIZE: [usize; 3] = [30, 45, 1]; */
+
+/* const CROP: [usize; 3] = [2723, 3284, 9632];
+const CROP_SIZE: [usize; 3] = [15, 60, 50]; */
+
+pub struct ConnectedFullMapVolume2 {
+    mmap: memmap::Mmap,
+    ids: &'static [u32],
+}
+impl ConnectedFullMapVolume2 {
+    #[allow(dead_code)]
+    pub fn new() -> ConnectedFullMapVolume2 {
+        let file = File::open("data/fiber-points-connected-new2.map").unwrap();
+        let map = unsafe { MmapOptions::new().map(&file) }.unwrap();
+        let ids: &[u32] = unsafe { std::slice::from_raw_parts_mut(map.as_ptr() as *mut u32, map.len() / 4) };
+
+        ConnectedFullMapVolume2 { mmap: map, ids }
+    }
+    fn index_of(x: usize, y: usize, z: usize) -> usize {
+        ((z + 1 - CROP[2]) * CROP_SIZE[1] + (y + 1 - CROP[1])) * CROP_SIZE[0] + (x + 1 - CROP[0])
+    }
+    fn get_class(&self, x: usize, y: usize, z: usize) -> u32 {
+        if x < CROP[0]
+            || y < CROP[1]
+            || z < CROP[2]
+            || x >= CROP[0] + CROP_SIZE[0]
+            || y >= CROP[1] + CROP_SIZE[1]
+            || z >= CROP[2] + CROP_SIZE[2]
+        {
+            //println!("Out of bounds: {} {} {}", x, y, z);
+
+            return 0;
+        }
+
+        self.ids[Self::index_of(x, y, z)]
+    }
+}
+#[allow(unused)]
+impl PaintVolume for ConnectedFullMapVolume2 {
+    fn paint(
+        &mut self,
+        xyz: [i32; 3],
+        u_coord: usize,
+        v_coord: usize,
+        plane_coord: usize,
+        width: usize,
+        height: usize,
+        sfactor: u8,
+        paint_zoom: u8,
+        config: &crate::volume::DrawingConfig,
+        buffer: &mut crate::volume::Image,
+    ) {
+        let fi32 = 1f64;
+        for im_u in 0..width {
+            for im_v in 0..height {
+                let im_rel_u = (im_u as i32 - width as i32 / 2) * paint_zoom as i32;
+                let im_rel_v = (im_v as i32 - height as i32 / 2) * paint_zoom as i32;
+
+                let mut uvw: [f64; 3] = [0.; 3];
+                uvw[u_coord] = (xyz[u_coord] + im_rel_u) as f64 / fi32;
+                uvw[v_coord] = (xyz[v_coord] + im_rel_v) as f64 / fi32;
+                uvw[plane_coord] = (xyz[plane_coord]) as f64 / fi32;
+
+                let [x, y, z] = uvw;
+
+                if x < 0.0 || y < 0.0 || z < 0.0 {
+                    continue;
+                }
+
+                let v = self.get_class(x as usize, y as usize, z as usize);
+                if v != 0 {
+                    //println!("painting at {} {} {} {}", x, y, z, v);
+                    let color = color_from_palette(v as usize);
+                    buffer.blend(im_u, im_v, color, 0.4);
+                }
+            }
+        }
+    }
+}
+#[allow(unused)]
+impl VoxelVolume for ConnectedFullMapVolume2 {
+    fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        255
+    }
+    fn get_color(&mut self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        let x = (xyz[0] * downsampling as f64) as usize;
+        let y = (xyz[1] * downsampling as f64) as usize;
+        let z = (xyz[2] * downsampling as f64) as usize;
+
+        let v = self.get_class(x, y, z);
+
+        color_from_palette(v as usize)
+        //let idx = index_of(xyz[0] as u16, xyz[1] as u16, xyz[2] as u16);
+    }
+}
+
+#[allow(unused)]
+fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
+    let mut array = array.into_ctx();
+
+    let pixels: usize = CROP_SIZE.iter().map(|v| v + 1).product();
+
+    let shape = array.array.def.shape.clone();
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open("data/fiber-points-connected-new2.map")
+        .unwrap();
+
+    file.set_len(pixels as u64 * 4).unwrap();
+    let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+    //let read_map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+
+    let ids: &mut [u32] =
+        unsafe { std::slice::from_raw_parts_mut(map.as_mut().as_mut_ptr() as *mut u32, map.len() / 4) };
+
+    let mut next_id: u32 = 1u32;
+    let mut classes: HashMap<u32, u32> = HashMap::new();
+
+    fn index_of(x: usize, y: usize, z: usize) -> usize {
+        ((z + 1 - CROP[2]) * CROP_SIZE[1] + (y + 1 - CROP[1])) * CROP_SIZE[0] + (x + 1 - CROP[0])
+    }
+
+    for z in CROP[2]..CROP[2] + CROP_SIZE[2] {
+        if z % 100 == 0 {
+            println!("z: {}", z);
+        }
+        for y in CROP[1]..CROP[1] + CROP_SIZE[1] {
+            for x in CROP[0]..CROP[0] + CROP_SIZE[0] {
+                let v = array.get([z as usize, y as usize, x as usize]).unwrap_or(0);
+                if v == target_class {
+                    //let idx = index_of(cx, cy, cz);
+                    //println!("idx: {} x: {} y: {} z: {}", idx, x, y, z);
+
+                    /* const NEIGHBOR_OFFSETS: [[usize; 3]; 3] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+                    for [dx, dy, dz] in NEIGHBOR_OFFSETS.iter() {
+                        let nx = x - dx;
+                        let ny = y - dy;
+                        let nz = z - dz;
+
+                        let nv = array.get([nz as usize, ny as usize, nx as usize]).unwrap_or(0);
+
+                    } */
+                    let nx = ids[index_of(x - 1, y, z)];
+                    let ny = ids[index_of(x, y - 1, z)];
+                    let nz = ids[index_of(x, y, z - 1)];
+
+                    let idx = index_of(x, y, z);
+
+                    if nx == 0 && ny == 0 && nz == 0 {
+                        ids[idx] = next_id;
+                        if next_id == u32::MAX {
+                            panic!("Too many ids");
+                        }
+                        next_id += 1;
+                    } else {
+                        let mut set = HashSet::new();
+                        set.insert(nx);
+                        set.insert(ny);
+                        set.insert(nz);
+                        set.remove(&0);
+
+                        if set.len() == 1 {
+                            ids[idx] = set.iter().next().unwrap().clone();
+                        } else {
+                            let min_id = *set.iter().min().unwrap();
+                            let min_id = *classes.get(&min_id).unwrap_or(&min_id);
+                            ids[idx] = min_id;
+                            set.iter().for_each(|&id| {
+                                if min_id != id {
+                                    classes.insert(id, min_id);
+                                }
+                            });
+                        }
+                    }
+                    //println!("{} {} {} -> {} {} {} = {}", x, y, z, nx, ny, nz, ids[idx]);
+                }
+            }
+        }
+    }
+    println!("Next id: {}", next_id);
+    println!("Aliases: {}", classes.len());
+
+    for i in 1..next_id {
+        let mut a = i;
+        while let Some(&new_i) = classes.get(&a) {
+            if new_i == a {
+                break;
+            }
+            a = new_i;
+        }
+        println!("{} -> {}", i, a);
+        classes.insert(i, a);
+    }
+    let vals = classes.values().collect::<HashSet<_>>();
+    println!("Classes: {}", vals.len());
+
+    ids.iter_mut().for_each(|v| {
+        if *v != 0 {
+            *v = *classes.get(v).unwrap();
+        }
+    });
+
+    /* aliases.iter().for_each(|(a, b)| {
+        println!("Alias: {} -> {}", a, b);
+    }); */
+}
+
+#[test]
+fn test_connected_components() {
+    let zarr: ZarrArray<3, u8> = ZarrArray::from_path("/home/johannes/tmp/pap/bruniss/mask-vt-hz-base-64.zarr");
+    let mut zarr = zarr.into_ctx();
+    connected_components2(&mut zarr, 1);
+}
+
 #[allow(dead_code)]
 fn connected_components(array: &ZarrContextBase<3> /* , full: &FullMapVolume */) {
     let shape = array.array.def.shape.clone();
@@ -356,7 +610,7 @@ fn connected_components(array: &ZarrContextBase<3> /* , full: &FullMapVolume */)
                                     } */
 
                                     // add neighbors to work_list
-                                    // for now just consider neighbors that share a full face of the voxel cube
+                                    // for now just consider neighbors that share a full face of the voxel cube ("6-connected")
                                     work_list.push([x as u16 - 1, y as u16, z as u16]);
                                     work_list.push([x as u16 + 1, y as u16, z as u16]);
 

@@ -1,7 +1,9 @@
 mod blosc;
 mod ome;
-#[cfg(test)]
+//#[cfg(test)]
 mod test;
+
+pub use test::ConnectedFullMapVolume2;
 
 pub use ome::OmeZarrContext;
 pub use ome::{ColorScheme, FourColors, GrayScale};

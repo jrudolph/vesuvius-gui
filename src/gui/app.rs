@@ -9,6 +9,7 @@ use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
+use crate::zarr::ConnectedFullMapVolume2;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
 use egui::Color32;
@@ -259,6 +260,7 @@ impl TemplateApp {
                 });
             }
         }
+        app.overlay = Some(ConnectedFullMapVolume2::new().into_volume());
 
         if let Some(ObjFileConfig {
             obj_file,
