@@ -4,14 +4,14 @@ use super::{DrawingConfig, Image, SurfaceVolume};
 
 pub struct EmptyVolume {}
 impl VoxelVolume for EmptyVolume {
-    fn get(&mut self, _xyz: [f64; 3], _downsampling: i32) -> u8 {
+    fn get(&self, _xyz: [f64; 3], _downsampling: i32) -> u8 {
         0
     }
 }
 
 impl PaintVolume for EmptyVolume {
     fn paint(
-        &mut self,
+        &self,
         _xyz: [i32; 3],
         _u_coord: usize,
         _v_coord: usize,

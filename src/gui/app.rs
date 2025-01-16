@@ -21,7 +21,6 @@ use egui::WidgetText;
 use egui::{ColorImage, Image, PointerButton, Response, Ui, Widget};
 use egui_extras::Column;
 use egui_extras::TableBuilder;
-use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 
@@ -49,7 +48,7 @@ pub struct SegmentMode {
     // This is the same reference as `world`. We need to add it just because upcasting between SurfaceVolume and VoxelPaintVolume is so hard.
     // TODO: remove when there's a better way to upcast
     #[serde(skip)]
-    surface_volume: Rc<RefCell<dyn SurfaceVolume>>,
+    surface_volume: Rc<dyn SurfaceVolume>,
     #[serde(skip)]
     texture_uv: Option<egui::TextureHandle>,
     #[serde(skip)]
@@ -66,7 +65,7 @@ impl Default for SegmentMode {
             height: 1000,
             ranges: [0..=1000, 0..=1000, -40..=40],
             world: EmptyVolume {}.into_volume(),
-            surface_volume: Rc::new(RefCell::new(EmptyVolume {})),
+            surface_volume: Rc::new(EmptyVolume {}),
             texture_uv: None,
             convert_to_world_coords: Box::new(|x| x),
         }
@@ -270,12 +269,6 @@ impl TemplateApp {
         app
     }
 
-    fn reload_segment(&mut self) {
-        if let Some(segment_mode) = self.segment_mode.as_ref() {
-            self.setup_segment(&segment_mode.filename.clone(), segment_mode.width, segment_mode.height);
-        }
-    }
-
     fn setup_segment(&mut self, segment_file: &str, width: usize, height: usize) {
         if segment_file.ends_with(".ppm") {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
@@ -284,7 +277,7 @@ impl TemplateApp {
             let ppm = PPMVolume::new(segment_file, base);
             let width = ppm.width() as i32;
             let height = ppm.height() as i32;
-            let ppm = Rc::new(RefCell::new(ppm));
+            let ppm = Rc::new(ppm);
             let ppm2 = ppm.clone();
             println!("Loaded PPM volume with size {}x{}", width, height);
 
@@ -298,7 +291,7 @@ impl TemplateApp {
             segment.ranges = [0..=width, 0..=height, -40..=40];
             segment.world = Volume::from_ref(ppm.clone());
             segment.surface_volume = ppm;
-            segment.convert_to_world_coords = Box::new(move |coord| ppm2.borrow().convert_to_world_coords(coord));
+            segment.convert_to_world_coords = Box::new(move |coord| ppm2.convert_to_world_coords(coord));
 
             self.segment_mode = Some(segment)
         } else if segment_file.ends_with(".obj") {
@@ -309,7 +302,7 @@ impl TemplateApp {
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
 
-            let volume = Rc::new(RefCell::new(obj_volume));
+            let volume = Rc::new(obj_volume);
             let obj2 = volume.clone();
             println!("Loaded Obj volume with size {}x{}", width, height);
 
@@ -323,7 +316,7 @@ impl TemplateApp {
             segment.ranges = [0..=width, 0..=height, -40..=40];
             segment.world = Volume::from_ref(volume.clone());
             segment.surface_volume = volume;
-            segment.convert_to_world_coords = Box::new(move |coords| obj2.borrow().convert_to_volume_coords(coords));
+            segment.convert_to_world_coords = Box::new(move |coords| obj2.convert_to_volume_coords(coords));
 
             self.segment_mode = Some(segment)
         }
@@ -497,7 +490,7 @@ impl TemplateApp {
         //let q = 1;
         //let mut printed = false;
 
-        let (coords, mut world) = if !segment_pane {
+        let (coords, world) = if !segment_pane {
             (self.coord, self.world.clone())
         } else {
             (
@@ -556,7 +549,6 @@ impl TemplateApp {
                 .as_ref()
                 .unwrap()
                 .surface_volume
-                .borrow()
                 .paint_plane_intersection(
                     self.coord,
                     u_coord,

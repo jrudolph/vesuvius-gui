@@ -14,6 +14,7 @@ use ehttp::Request;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
+use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 use std::{
     collections::{HashMap, HashSet},
@@ -355,10 +356,13 @@ impl<const N: usize> ZarrContextBase<N> {
     pub fn into_ctx(&self) -> ZarrContext<N> {
         ZarrContext {
             array: self.array.clone(),
-            cache: self.cache.clone(),
-            last_chunk_no: [usize::MAX; N],
-            last_context: None,
             cache_missing: self.cache_missing,
+            cache: self.cache.clone(),
+            state: ZarrContextState {
+                last_chunk_no: [usize::MAX; N],
+                last_context: None,
+            }
+            .into(),
         }
     }
 }
@@ -456,16 +460,20 @@ impl<const N: usize> ZarrContextCache<N> {
     }
 }
 
-pub struct ZarrContext<const N: usize> {
-    array: ZarrArray<N, u8>,
-    cache: Arc<Mutex<ZarrContextCache<N>>>,
+struct ZarrContextState<const N: usize> {
     last_chunk_no: [usize; N],
     last_context: Option<Option<ChunkContext>>,
+}
+
+pub struct ZarrContext<const N: usize> {
+    array: ZarrArray<N, u8>,
     cache_missing: bool,
+    cache: Arc<Mutex<ZarrContextCache<N>>>,
+    state: RefCell<ZarrContextState<N>>,
 }
 
 impl ZarrContext<3> {
-    fn get(&mut self, index: [usize; 3]) -> Option<u8> {
+    fn get(&self, index: [usize; 3]) -> Option<u8> {
         if index[0] > self.array.def.shape[0]
             || index[1] > self.array.def.shape[1]
             || index[2] > self.array.def.shape[2]
@@ -487,8 +495,10 @@ impl ZarrContext<3> {
             + chunk_offset[2];
 
         // fast path
-        if chunk_no == self.last_chunk_no {
-            if let Some(last) = self.last_context.as_mut().unwrap() {
+        let last_chunk_no = self.state.borrow().last_chunk_no;
+        if chunk_no == last_chunk_no {
+            let mut state = self.state.borrow_mut();
+            if let Some(last) = state.last_context.as_mut().unwrap() {
                 Some(last.get(idx))
             } else {
                 None
@@ -498,16 +508,17 @@ impl ZarrContext<3> {
             self.get_from_cache(chunk_no, idx)
         }
     }
-    fn get_from_cache(&mut self, chunk_no: [usize; 3], idx: usize) -> Option<u8> {
+    fn get_from_cache(&self, chunk_no: [usize; 3], idx: usize) -> Option<u8> {
         let mut access = self.cache.lock().unwrap();
+        let state = &mut *self.state.borrow_mut();
         access.access_counter += 1;
 
-        if let Some(last) = self.last_context.take() {
+        if let Some(last) = state.last_context.take() {
             let entry = access.entry(last);
             if entry.is_some() {
                 access.non_empty_entries += 1;
             }
-            access.cache.insert(self.last_chunk_no, entry);
+            access.cache.insert(state.last_chunk_no, entry);
         }
 
         access.cleanup();
@@ -524,19 +535,19 @@ impl ZarrContext<3> {
             } else {
                 None
             };
-            self.last_chunk_no = chunk_no;
-            self.last_context = Some(entry.map(|e| e.ctx));
+            state.last_chunk_no = chunk_no;
+            state.last_context = Some(entry.map(|e| e.ctx));
             res
         } else {
             if let Some(mut ctx) = self.array.load_chunk_context(chunk_no) {
                 //let mut ctx: BloscContext = chunk.into_ctx();
                 let res = ctx.get(idx);
-                self.last_chunk_no = chunk_no;
-                self.last_context = Some(Some(ctx));
+                state.last_chunk_no = chunk_no;
+                state.last_context = Some(Some(ctx));
                 Some(res)
             } else {
-                self.last_chunk_no = chunk_no;
-                self.last_context = Some(None);
+                state.last_chunk_no = chunk_no;
+                state.last_context = Some(None);
                 None
             }
         }
@@ -545,7 +556,7 @@ impl ZarrContext<3> {
 
 impl PaintVolume for ZarrContext<3> {
     fn paint(
-        &mut self,
+        &self,
         xyz: [i32; 3],
         u_coord: usize,
         v_coord: usize,

@@ -349,12 +349,12 @@ impl Rendering {
         res
     }
     fn chunks_for(&self, UVTile { u, v, w }: &UVTile) -> BTreeSet<VolumeChunk> {
-        let dummy = Rc::new(RefCell::new(TileCollectingVolume::new()));
+        let dummy = Rc::new(TileCollectingVolume::new());
         let width = self.params.width;
         let height = self.params.height;
         let tile_width = self.params.tile_size;
         let tile_height = self.params.tile_size;
-        let mut world = ObjVolume::new(self.obj.clone(), Volume::from_ref(dummy.clone()), width, height).into_volume();
+        let world = ObjVolume::new(self.obj.clone(), Volume::from_ref(dummy.clone()), width, height).into_volume();
 
         let mut image = Image::new(tile_width, tile_height);
         let xyz = [
@@ -365,7 +365,7 @@ impl Rendering {
         let mut config = DrawingConfig::default();
         config.trilinear_interpolation = true;
         world.paint(xyz, 0, 1, 2, tile_width, tile_height, 1, 1, &config, &mut image);
-        let res = dummy.borrow().requested_tiles.clone();
+        let res = dummy.state.replace(Default::default()).requested_tiles;
         //println!("Tile: {},{} [{:?}]-> {:?}", u, v, xyz, res.len());
         res.into_iter().map(Into::into).collect()
     }
@@ -449,14 +449,14 @@ impl Rendering {
 
         struct PanicDownloader {}
         impl Downloader for PanicDownloader {
-            fn queue(&mut self, task: (Arc<Mutex<DS>>, usize, usize, usize, Quality)) {
+            fn queue(&self, task: (Arc<Mutex<DS>>, usize, usize, usize, Quality)) {
                 panic!("All files should be downloaded already but got {:?}", task);
             }
         }
         let dir = self.downloader.settings.cache_dir.clone();
 
         let vol = volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {}));
-        let mut world = ObjVolume::new(
+        let world = ObjVolume::new(
             self.obj.clone(),
             vol.into_volume(),
             self.params.width,
@@ -509,29 +509,42 @@ async fn monitor_runtime_stats(multi: &MultiProgress) {
     });
 }
 
-/// A VoxelVolume implementation that just collects needed tiles
 #[derive(Clone)]
-struct TileCollectingVolume {
+struct TileCollectingVolumeState {
     requested_tiles: BTreeSet<(usize, usize, usize)>,
     last_requested: (usize, usize, usize),
 }
-impl TileCollectingVolume {
-    fn new() -> Self {
+impl Default for TileCollectingVolumeState {
+    fn default() -> Self {
         Self {
             requested_tiles: BTreeSet::new(),
             last_requested: (0, 0, 0),
         }
     }
-    fn add_tile(&mut self, tile: (usize, usize, usize)) {
-        if self.last_requested != tile {
-            self.last_requested = tile;
-            self.requested_tiles.insert(tile);
+}
+
+/// A VoxelVolume implementation that just collects needed tiles
+#[derive(Clone)]
+struct TileCollectingVolume {
+    state: RefCell<TileCollectingVolumeState>,
+}
+impl TileCollectingVolume {
+    fn new() -> Self {
+        Self {
+            state: TileCollectingVolumeState::default().into(),
+        }
+    }
+    fn add_tile(&self, tile: (usize, usize, usize)) {
+        let mut state = self.state.borrow_mut();
+        if state.last_requested != tile {
+            state.last_requested = tile;
+            state.requested_tiles.insert(tile);
         }
     }
 }
 impl PaintVolume for TileCollectingVolume {
     fn paint(
-        &mut self,
+        &self,
         _xyz: [i32; 3],
         _u_coord: usize,
         _v_coord: usize,
@@ -547,13 +560,13 @@ impl PaintVolume for TileCollectingVolume {
     }
 }
 impl VoxelVolume for TileCollectingVolume {
-    fn get(&mut self, xyz: [f64; 3], _downsampling: i32) -> u8 {
+    fn get(&self, xyz: [f64; 3], _downsampling: i32) -> u8 {
         let tile: (usize, usize, usize) = ((xyz[0] as usize) >> 6, (xyz[1] as usize) >> 6, (xyz[2] as usize) >> 6);
 
         self.add_tile(tile);
         0
     }
-    fn get_interpolated(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+    fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
         let x = xyz[0] as usize;
         let y = xyz[1] as usize;
         let z = xyz[2] as usize;

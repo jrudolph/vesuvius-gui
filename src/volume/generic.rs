@@ -5,7 +5,7 @@ pub trait AutoPaintVolume {}
 
 impl<T: VoxelVolume + AutoPaintVolume> PaintVolume for T {
     fn paint(
-        &mut self,
+        &self,
         xyz: [i32; 3],
         u_coord: usize,
         v_coord: usize,

@@ -59,8 +59,8 @@ pub struct OmeZarr {
 
 pub struct OmeZarrContext<C: ColorScheme> {
     ome_zarr: OmeZarr,
-    zarr_contexts: Vec<ZarrContext<3>>, // TODO: make generic
     cache_missing: bool,
+    zarr_contexts: Vec<ZarrContext<3>>, // TODO: make generic
     phantom: std::marker::PhantomData<C>,
 }
 
@@ -157,7 +157,7 @@ impl<C: ColorScheme> OmeZarrContext<C> {
         serde_json::from_str::<OmeZarrAttrs>(&zarray).unwrap()
     }
 
-    fn get(&mut self, xyz: [usize; 3], scale: u8) -> u8 {
+    fn get(&self, xyz: [usize; 3], scale: u8) -> u8 {
         let max = self.zarr_contexts.len() as u8 - 1;
         for s in scale.min(max)..=max {
             let scaled_xyz = xyz.iter().map(|&x| x >> s).collect::<Vec<usize>>();
@@ -176,7 +176,7 @@ impl<C: ColorScheme> OmeZarrContext<C> {
 
 impl<C: ColorScheme> PaintVolume for OmeZarrContext<C> {
     fn paint(
-        &mut self,
+        &self,
         xyz: [i32; 3],
         u_coord: usize,
         v_coord: usize,
@@ -189,7 +189,7 @@ impl<C: ColorScheme> PaintVolume for OmeZarrContext<C> {
         buffer: &mut crate::volume::Image,
     ) {
         if !self.cache_missing {
-            self.zarr_contexts.iter_mut().for_each(|ctx| {
+            self.zarr_contexts.iter().for_each(|ctx| {
                 // clean missing entries from cache
                 let mut access = ctx.cache.lock().unwrap();
                 access.purge_missing();
@@ -224,7 +224,7 @@ impl<C: ColorScheme> PaintVolume for OmeZarrContext<C> {
 }
 
 impl<C: ColorScheme> VoxelVolume for OmeZarrContext<C> {
-    fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+    fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
         let scale = downsampling.trailing_zeros() as u8;
         self.get(
             [

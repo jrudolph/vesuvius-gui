@@ -40,14 +40,14 @@ enum DownloadMessage {
 }
 
 pub trait Downloader {
-    fn queue(&mut self, task: DownloadTask);
+    fn queue(&self, task: DownloadTask);
 }
 
 pub struct SimpleDownloader {
     download_queue: Sender<DownloadMessage>,
 }
 impl Downloader for SimpleDownloader {
-    fn queue(&mut self, task: DownloadTask) {
+    fn queue(&self, task: DownloadTask) {
         self.download_queue.send(DownloadMessage::Download(task)).unwrap();
     }
 }

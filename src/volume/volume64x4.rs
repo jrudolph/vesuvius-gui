@@ -3,6 +3,7 @@ use crate::downloader::*;
 use crate::model::Quality;
 use crate::volume::PaintVolume;
 use libm::modf;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
@@ -18,37 +19,20 @@ pub(crate) enum TileState {
     TryLater(SystemTime),
 }
 
-pub struct VolumeGrid64x4Mapped {
-    data_dir: String,
-    downloader: Box<dyn Downloader>,
+struct State {
     data: HashMap<(usize, usize, usize, usize), Rc<TileState>>,
     last_tile_key: (usize, usize, usize, usize),
     last_tile: Weak<TileState>,
 }
-impl VolumeGrid64x4Mapped {
-    fn map_for(data_dir: &str, x: usize, y: usize, z: usize, quality: Quality) -> Option<TileState> {
-        use memmap::MmapOptions;
-        use std::fs::File;
-        let file_name = format!(
-            "{}/64-4/d{:02}/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin",
-            data_dir, quality.downsampling_factor, z, x, y, z, quality.bit_mask, quality.downsampling_factor
-        );
-        //println!("at {}", file_name);
-
-        let file = File::open(file_name.clone()).ok()?;
-
-        let map = unsafe { MmapOptions::new().map(&file) }.ok();
-        map.filter(|m| {
-            if m.len() == 64 * 64 * 64 {
-                true
-            } else {
-                println!("file {} has wrong size {}", file_name, m.len());
-                false
-            }
-        })
-        .map(|x| TileState::Loaded(x))
-    }
-    pub(crate) fn try_loading_tile(&mut self, x: usize, y: usize, z: usize, quality: Quality) -> Rc<TileState> {
+impl State {
+    pub(crate) fn try_loading_tile(
+        &mut self,
+        volume: &VolumeGrid64x4Mapped,
+        x: usize,
+        y: usize,
+        z: usize,
+        quality: Quality,
+    ) -> Rc<TileState> {
         let key = (x, y, z, quality.downsampling_factor as usize);
         if !self.data.contains_key(&key) {
             self.data.insert(key, TileState::Unknown.into());
@@ -58,11 +42,11 @@ impl VolumeGrid64x4Mapped {
         match tile_state {
             TileState::Unknown => {
                 // println!("trying to load tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
-                if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
+                if let Some(state) = VolumeGrid64x4Mapped::map_for(&volume.data_dir, x, y, z, quality) {
                     *tile_state = state;
                 } else {
                     let state = Arc::new(Mutex::new(DownloadState::Queuing));
-                    self.downloader.queue((state.clone(), x, y, z, quality));
+                    volume.downloader.queue((state.clone(), x, y, z, quality));
                     *tile_state = TileState::Downloading(state);
                 }
             }
@@ -73,13 +57,13 @@ impl VolumeGrid64x4Mapped {
                         x, y, z, quality.downsampling_factor
                     );
                     *tile_state = TileState::Unknown; // reset
-                    self.try_loading_tile(x, y, z, quality);
+                    self.try_loading_tile(volume, x, y, z, quality);
                 }
             }
             TileState::Downloading(state) => {
                 match *state.clone().lock().unwrap() {
                     DownloadState::Done => {
-                        if let Some(state) = Self::map_for(&self.data_dir, x, y, z, quality) {
+                        if let Some(state) = VolumeGrid64x4Mapped::map_for(&volume.data_dir, x, y, z, quality) {
                             *tile_state = state;
                         } else {
                             // set to missing permanently
@@ -107,6 +91,41 @@ impl VolumeGrid64x4Mapped {
         }
         self.data.get(&key).unwrap().clone()
     }
+}
+
+pub struct VolumeGrid64x4Mapped {
+    data_dir: String,
+    downloader: Box<dyn Downloader>,
+    state: RefCell<State>,
+}
+impl VolumeGrid64x4Mapped {
+    fn map_for(data_dir: &str, x: usize, y: usize, z: usize, quality: Quality) -> Option<TileState> {
+        use memmap::MmapOptions;
+        use std::fs::File;
+        let file_name = format!(
+            "{}/64-4/d{:02}/z{:03}/xyz-{:03}-{:03}-{:03}-b{:03}-d{:02}.bin",
+            data_dir, quality.downsampling_factor, z, x, y, z, quality.bit_mask, quality.downsampling_factor
+        );
+        //println!("at {}", file_name);
+
+        let file = File::open(file_name.clone()).ok()?;
+
+        let map = unsafe { MmapOptions::new().map(&file) }.ok();
+        map.filter(|m| {
+            if m.len() == 64 * 64 * 64 {
+                true
+            } else {
+                println!("file {} has wrong size {}", file_name, m.len());
+                false
+            }
+        })
+        .map(|x| TileState::Loaded(x))
+    }
+
+    pub(crate) fn try_loading_tile(&self, x: usize, y: usize, z: usize, quality: Quality) -> Rc<TileState> {
+        self.state.borrow_mut().try_loading_tile(&self, x, y, z, quality)
+    }
+
     pub fn from_data_dir(data_dir: &str, downloader: Box<dyn Downloader>) -> VolumeGrid64x4Mapped {
         if !std::path::Path::new(data_dir).exists() {
             panic!("Data directory {} does not exist", data_dir);
@@ -115,27 +134,21 @@ impl VolumeGrid64x4Mapped {
         VolumeGrid64x4Mapped {
             data_dir: data_dir.to_string(),
             downloader,
-            data: HashMap::new(),
-            last_tile_key: (0, 0, 0, 0),
-            last_tile: Weak::new(),
+            state: State {
+                data: HashMap::new(),
+                last_tile_key: (0, 0, 0, 0),
+                last_tile: Weak::new(),
+            }
+            .into(),
         }
     }
-}
-
-impl VoxelVolume for VolumeGrid64x4Mapped {
-    fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
-        let x = xyz[0] as usize;
-        let y = xyz[1] as usize;
-        let z = xyz[2] as usize;
-
+    fn tile_at(&self, x: usize, y: usize, z: usize, downsampling: usize) -> Option<Rc<TileState>> {
         let tile_x = x / 64;
         let tile_y = y / 64;
         let tile_z = z / 64;
-
         let key = (tile_x, tile_y, tile_z, downsampling as usize);
-        if key != self.last_tile_key {
-            self.last_tile_key = key;
-            self.last_tile = Rc::downgrade(&self.try_loading_tile(
+        if key != self.state.borrow().last_tile_key {
+            let tile = self.try_loading_tile(
                 tile_x,
                 tile_y,
                 tile_z,
@@ -143,10 +156,29 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
                     downsampling_factor: downsampling as u8,
                     bit_mask: 0xff,
                 },
-            ));
+            );
+            let mut state = self.state.borrow_mut();
+            state.last_tile_key = key;
+            state.last_tile = Rc::downgrade(&tile);
+            Some(tile)
+        } else {
+            self.state.borrow().last_tile.upgrade()
         }
+    }
+    fn drop_last_cached(&self) {
+        let mut state = self.state.borrow_mut();
+        state.last_tile_key = (0, 0, 0, 0);
+        state.last_tile = Weak::new();
+    }
+}
 
-        if let Some(r) = self.last_tile.upgrade() {
+impl VoxelVolume for VolumeGrid64x4Mapped {
+    fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        let x = xyz[0] as usize;
+        let y = xyz[1] as usize;
+        let z = xyz[2] as usize;
+
+        if let Some(r) = self.tile_at(x, y, z, downsampling as usize) {
             if let TileState::Loaded(tile) = r.deref() {
                 let tx = x & 63;
                 let ty = y & 63;
@@ -181,7 +213,7 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
         }
     }
 
-    fn get_interpolated(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+    fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
         let (dx, x0) = modf(xyz[0]);
         let x1 = x0 + 1.0;
         let (dy, y0) = modf(xyz[1]);
@@ -196,25 +228,7 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
             let y = y0 as usize;
             let z = z0 as usize;
 
-            let tile_x = x / 64;
-            let tile_y = y / 64;
-            let tile_z = z / 64;
-
-            let key = (tile_x, tile_y, tile_z, downsampling as usize);
-            if key != self.last_tile_key {
-                self.last_tile_key = key;
-                self.last_tile = Rc::downgrade(&self.try_loading_tile(
-                    tile_x,
-                    tile_y,
-                    tile_z,
-                    Quality {
-                        downsampling_factor: downsampling as u8,
-                        bit_mask: 0xff,
-                    },
-                ));
-            }
-
-            if let Some(r) = self.last_tile.upgrade() {
+            if let Some(r) = self.tile_at(x, y, z, downsampling as usize) {
                 if let TileState::Loaded(tile) = r.deref() {
                     let tx = x & 63;
                     let ty = y & 63;
@@ -319,7 +333,7 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
 
 impl PaintVolume for VolumeGrid64x4Mapped {
     fn paint(
-        &mut self,
+        &self,
         xyz: [i32; 3],
         u_coord: usize,
         v_coord: usize,
@@ -332,8 +346,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         buffer: &mut Image,
     ) {
         // drop last_tile, which we do not use for area painting and may get in the way of accessing tilestate otherwise
-        self.last_tile_key = (0, 0, 0, 0);
-        self.last_tile = Weak::new();
+        self.drop_last_cached();
 
         let width = paint_zoom as usize * canvas_width;
         let height = paint_zoom as usize * canvas_height;

@@ -421,7 +421,7 @@ fn orient2d(u1: i32, v1: i32, u2: i32, v2: i32, u3: i32, v3: i32) -> i32 {
 
 impl PaintVolume for ObjVolume {
     fn paint(
-        &mut self,
+        &self,
         xyz: [i32; 3],
         u_coord: usize,
         v_coord: usize,
@@ -445,7 +445,7 @@ impl PaintVolume for ObjVolume {
             [0, 0, 0]
         };
 
-        let mut volume = self.volume.clone();
+        let volume = self.volume.clone();
 
         let ffactor = sfactor as f64;
 
@@ -895,7 +895,7 @@ fn point(x0: i32, y0: i32, buffer: &mut Image, width: usize, r: u8, g: u8, b: u8
 }
 
 impl VoxelVolume for ObjVolume {
-    fn get(&mut self, _xyz: [f64; 3], _downsampling: i32) -> u8 {
+    fn get(&self, _xyz: [f64; 3], _downsampling: i32) -> u8 {
         todo!()
     }
 }

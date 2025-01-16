@@ -122,7 +122,7 @@ impl LayersMappedVolume {
     }
 }
 impl VoxelVolume for LayersMappedVolume {
-    fn get(&mut self, _xyz: [f64; 3], downsampling: i32) -> u8 {
+    fn get(&self, _xyz: [f64; 3], downsampling: i32) -> u8 {
         let xyz = [
             _xyz[0] as i32 * downsampling,
             _xyz[1] as i32 * downsampling,

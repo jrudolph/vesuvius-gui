@@ -88,7 +88,7 @@ impl PPMVolume {
 }
 
 impl VoxelVolume for PPMVolume {
-    fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+    fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
         let uvw: [i32; 3] = [
             xyz[0] as i32 * downsampling,
             xyz[1] as i32 * downsampling,

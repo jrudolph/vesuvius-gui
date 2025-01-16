@@ -91,7 +91,7 @@ impl FullMapVolume {
 }
 impl PaintVolume for FullMapVolume {
     fn paint(
-        &mut self,
+        &self,
         xyz: [i32; 3],
         u_coord: usize,
         v_coord: usize,
@@ -154,7 +154,7 @@ impl ConnectedFullMapVolume {
 }
 impl PaintVolume for ConnectedFullMapVolume {
     fn paint(
-        &mut self,
+        &self,
         xyz: [i32; 3],
         u_coord: usize,
         v_coord: usize,
@@ -277,7 +277,7 @@ fn connected_components(array: &ZarrContextBase<3> /* , full: &FullMapVolume */)
     let z_completed = AtomicU32::new(0);
 
     (20..shape[0] as u16).into_par_iter().for_each(|z| {
-        let mut array = array.into_ctx();
+        let array = array.into_ctx();
         let mut work_list = vec![];
         let mut visited = HashSet::new();
         let mut selected = vec![];
@@ -499,7 +499,7 @@ pub fn test_zarr() {
     //let full = FullMapVolume::new();
     connected_components(&mut zarr /* , &full */);
 
-    let mut zarr = zarr.into_ctx();
+    let zarr = zarr.into_ctx();
     let at0 = [1, 21, 115];
     let at1 = [1, 21, 116];
     let at2 = [1, 21, 117];
