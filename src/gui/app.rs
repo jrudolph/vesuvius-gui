@@ -260,7 +260,7 @@ impl TemplateApp {
                 });
             }
         }
-        app.overlay = Some(ConnectedFullMapVolume2::new().into_volume());
+        //app.overlay = Some(ConnectedFullMapVolume2::new().into_volume());
 
         if let Some(ObjFileConfig {
             obj_file,

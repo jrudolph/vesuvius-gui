@@ -4,7 +4,9 @@ use crate::{
     zarr::{blosc::BloscChunk, ZarrArray},
 };
 use egui::Color32;
+use itertools::Itertools;
 use memmap::MmapOptions;
+use rayon::iter::IntoParallelRefIterator;
 use std::{
     collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
@@ -282,6 +284,9 @@ fn color_from_palette(idx: usize) -> Color32 {
 // const CROP: [usize; 3] = [2400, 3000, 9300];
 // const CROP_SIZE: [usize; 3] = [400, 1000, 1000];
 
+/* const CROP: [usize; 3] = [2400, 3000, 9300];
+const CROP_SIZE: [usize; 3] = [2000, 2000, 2000]; */
+
 const CROP: [usize; 3] = [2400, 3000, 9300];
 const CROP_SIZE: [usize; 3] = [2000, 2000, 2000];
 
@@ -395,7 +400,7 @@ fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
         .write(true)
         .create(true)
         .truncate(true)
-        .open("data/fiber-points-connected-new2.map")
+        .open(format!("data/fiber-points-connected-new-{}.map", target_class))
         .unwrap();
 
     file.set_len(pixels as u64 * 4).unwrap();
@@ -480,10 +485,10 @@ fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
             }
             a = new_i;
         }
-        println!("{} -> {}", i, a);
+        //println!("{} -> {}", i, a);
         classes.insert(i, a);
     }
-    let vals = classes.values().collect::<HashSet<_>>();
+    let vals = classes.values().cloned().collect::<HashSet<_>>();
     println!("Classes: {}", vals.len());
 
     ids.iter_mut().for_each(|v| {
@@ -491,6 +496,38 @@ fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
             *v = *classes.get(v).unwrap();
         }
     });
+    let class_ids = vals
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v, i as u32))
+        .collect::<HashMap<_, _>>();
+
+    fn point_file(target_class: u8, id: u32) -> std::io::BufWriter<std::fs::File> {
+        let file_name = format!("data/classes/class-{}/{:06}", target_class, id);
+        std::fs::create_dir_all(format!("data/classes/class-{}", target_class)).unwrap();
+        let file = File::create(file_name).unwrap();
+        std::io::BufWriter::new(file)
+    }
+    let mut class_writers: HashMap<u32, std::io::BufWriter<std::fs::File>> =
+        class_ids.values().map(|&v| (v, point_file(target_class, v))).collect();
+
+    for z in CROP[2]..CROP[2] + CROP_SIZE[2] {
+        if z % 100 == 0 {
+            println!("z: {}", z);
+        }
+        for y in CROP[1]..CROP[1] + CROP_SIZE[1] {
+            for x in CROP[0]..CROP[0] + CROP_SIZE[0] {
+                let idx = index_of(x, y, z);
+                let v = ids[idx];
+                if v != 0 {
+                    let writer = class_writers.get_mut(class_ids.get(&v).unwrap()).unwrap();
+                    writer.write((x as u16).to_le_bytes().as_ref()).unwrap();
+                    writer.write((y as u16).to_le_bytes().as_ref()).unwrap();
+                    writer.write((z as u16).to_le_bytes().as_ref()).unwrap();
+                }
+            }
+        }
+    }
 
     /* aliases.iter().for_each(|(a, b)| {
         println!("Alias: {} -> {}", a, b);
@@ -502,6 +539,199 @@ fn test_connected_components() {
     let zarr: ZarrArray<3, u8> = ZarrArray::from_path("/home/johannes/tmp/pap/bruniss/mask-vt-hz-base-64.zarr");
     let mut zarr = zarr.into_ctx();
     connected_components2(&mut zarr, 1);
+    connected_components2(&mut zarr, 2);
+}
+
+pub struct PointCloudFile {
+    map: memmap::Mmap,
+    pub num_elements: usize,
+}
+impl PointCloudFile {
+    #[allow(dead_code)]
+    pub fn new(file_name: &str) -> PointCloudFile {
+        let file = File::open(file_name).unwrap();
+        let map = unsafe { MmapOptions::new().map(&file) }.unwrap();
+        let num_elements = map.len() / 6;
+
+        PointCloudFile { map, num_elements }
+    }
+    fn at_idx(&self, idx: usize) -> [u16; 3] {
+        let idx = idx * 6;
+        let x = u16::from_le_bytes([self.map[idx], self.map[idx + 1]]);
+        let y = u16::from_le_bytes([self.map[idx + 2], self.map[idx + 3]]);
+        let z = u16::from_le_bytes([self.map[idx + 4], self.map[idx + 5]]);
+        [x, y, z]
+    }
+    fn iter(&self) -> impl Iterator<Item = [u16; 3]> + use<'_> {
+        (0..self.num_elements).map(move |i| self.at_idx(i))
+    }
+}
+
+pub struct PointCloudCollection {
+    pub clouds: HashMap<u32, PointCloudFile>,
+    pub grid: HashMap<[u16; 3], Vec<u32>>,
+}
+impl PointCloudCollection {
+    fn load_from_dir(dir: &str) -> Self {
+        let files = std::fs::read_dir(dir).unwrap();
+        let clouds = files
+            .map(|f| {
+                let f = f.unwrap();
+                let path = f.path();
+                let file_name = path.to_str().unwrap();
+                let id = path.file_name().unwrap().to_str().unwrap().parse::<u32>().unwrap();
+                (id, PointCloudFile::new(file_name))
+            })
+            .sorted_by_key(|x| x.0)
+            .collect::<HashMap<_, _>>();
+
+        /* clouds.iter().for_each(|(id, cloud)| {
+            println!("Class {}: {}", id, cloud.num_elements);
+        }); */
+        let mut grid: HashMap<[u16; 3], Vec<u32>> = HashMap::new();
+        clouds.iter().for_each(|(id, cloud)| {
+            let mut grids = HashSet::new();
+            cloud.iter().for_each(|coords| {
+                // create a grid of 64x64x64
+                let grid_coords = coords.map(|x| x / 32 * 32);
+                grids.insert(grid_coords);
+                // overlay another grid of 64x64x64 but shifted by 32 in each direction for overlap
+                let grid_coords = coords.map(|x| x / 32 * 32 + 16);
+                grids.insert(grid_coords);
+            });
+            grids.into_iter().for_each(|grid_coords| {
+                grid.entry(grid_coords).or_insert(vec![]).push(*id);
+            });
+        });
+        /* println!("Populated grid cells: {}", grid.len());
+        grid.iter().sorted_by_key(|(k, v)| v.len()).for_each(|(k, v)| {
+            println!("{} {} {} -> {}", k[0], k[1], k[2], v.len());
+        }); */
+
+        PointCloudCollection { clouds, grid }
+    }
+}
+
+fn collide(cloud1: &PointCloudFile, cloud2: &PointCloudFile) -> Option<[u16; 3]> {
+    // figure out all point pairs that are within 4 pixels of each other
+    let mut grid: HashMap<[u16; 3], (bool, bool)> = HashMap::new();
+    cloud1.iter().for_each(|coords| {
+        let grid_coords = coords.map(|x| x / 4 * 4);
+        grid.entry(grid_coords).or_insert((false, false)).0 = true;
+        let grid_coords = coords.map(|x| x / 4 * 4 + 2);
+        grid.entry(grid_coords).or_insert((false, false)).0 = true;
+    });
+    cloud2.iter().for_each(|coords| {
+        let grid_coords = coords.map(|x| x / 4 * 4);
+        grid.entry(grid_coords).or_insert((false, false)).1 = true;
+        let grid_coords = coords.map(|x| x / 4 * 4 + 2);
+        grid.entry(grid_coords).or_insert((false, false)).1 = true;
+    });
+
+    let colliding_cells = grid
+        .iter()
+        .filter_map(|(coords, (c1, c2))| if *c1 && *c2 { Some(*coords) } else { None })
+        .collect::<Vec<_>>();
+
+    let len = colliding_cells.len() as u32;
+    if len == 0 {
+        return None;
+    }
+
+    // average grid_coords
+    let mut sum = [0, 0, 0];
+    colliding_cells.iter().for_each(|coords| {
+        sum[0] += coords[0] as u32;
+        sum[1] += coords[1] as u32;
+        sum[2] += coords[2] as u32;
+    });
+
+    // average and center into the middle of the cell
+    let avg = [
+        (sum[0] / len + 2) as u16,
+        (sum[1] / len + 2) as u16,
+        (sum[2] / len + 2) as u16,
+    ];
+    let avg = avg.map(|x| x as u16);
+    Some(avg)
+}
+
+#[test]
+fn analyze_fibers() {
+    let class1 = PointCloudCollection::load_from_dir("data/classes/class-1");
+    let class2 = PointCloudCollection::load_from_dir("data/classes/class-2");
+
+    let all_grids = class1.grid.keys().chain(class2.grid.keys()).collect::<HashSet<_>>();
+    let mut stats = all_grids
+        .iter()
+        .map(|grid| {
+            let empty = vec![];
+            let class1 = class1.grid.get(*grid).unwrap_or(&empty);
+            let class2 = class2.grid.get(*grid).unwrap_or(&empty);
+            let compares = class1
+                .iter()
+                .cloned()
+                .cartesian_product(class2.iter().cloned())
+                .collect::<Vec<_>>();
+
+            (grid, class1.len(), class2.len(), class1.len() * class2.len(), compares)
+        })
+        .collect::<Vec<_>>();
+    stats.sort_by_key(|x| x.3);
+    /* stats.iter().for_each(|(grid, c1, c2, p)| {
+        println!("{} {} {} -> {} * {} = {}", grid[0], grid[1], grid[2], c1, c2, p);
+    }); */
+    let total_compares = stats.iter().map(|x| x.3).sum::<usize>();
+    println!("Total compares: {}", total_compares);
+    let dedup_compares = stats.iter().flat_map(|x| x.4.clone()).collect::<HashSet<_>>();
+    println!("Dedup compares: {}", dedup_compares.len());
+    let pairs = dedup_compares
+        .iter()
+        .map(|(id1, id2)| {
+            let cloud1 = class1.clouds.get(id1).unwrap();
+            let cloud2 = class2.clouds.get(id2).unwrap();
+
+            (
+                id1,
+                id2,
+                cloud1.num_elements,
+                cloud2.num_elements,
+                cloud1.num_elements * cloud2.num_elements,
+            )
+        })
+        .collect::<Vec<_>>();
+    //println!("Total point pairs to consider: {}", pairs);
+    use rayon::prelude::*;
+
+    let mut colls = pairs
+        .par_iter()
+        .flat_map(|(id1, id2, c1, c2, p)| {
+            let cross = collide(class1.clouds.get(id1).unwrap(), class2.clouds.get(id2).unwrap());
+            match cross {
+                Some(cross) => Some((*id1, *id2, c1, c2, p, cross)),
+                None => None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    println!("Collisions: {}", colls.len());
+    colls.sort_by_key(|c| c.1);
+
+    // create a dot file for graphviz that connects all colliding points
+    let mut colltxt = File::create("data/collisions").unwrap();
+    let mut file = File::create("data/collisions.dot").unwrap();
+    file.write(b"graph {\n").unwrap();
+    colls.iter().for_each(|(id1, id2, c1, c2, p, [x, y, z])| {
+        file.write(format!("h{} -- v{};\n", id2, id1).as_bytes()).unwrap();
+        colltxt
+            .write(format!("h{} v{} {} {} {}\n", id2, id1, x, y, z).as_bytes())
+            .unwrap();
+        //file.write(format!("{} [label=\"{}\"];\n", id1, c1).as_bytes()).unwrap();
+        //file.write(format!("{} [label=\"{}\"];\n", id2, c2).as_bytes()).unwrap();
+        //file.write(format!("{} [pos=\"{},{}!\"];\n", id1, x, y).as_bytes()).unwrap();
+        //file.write(format!("{} [pos=\"{},{}!\"];\n", id2, x, y).as_bytes()).unwrap();
+    });
+    file.write(b"}\n").unwrap();
 }
 
 #[allow(dead_code)]
