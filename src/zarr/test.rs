@@ -10,7 +10,7 @@ use rayon::iter::IntoParallelRefIterator;
 use std::{
     collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
-    io::Write,
+    io::{BufReader, Write},
     sync::{
         atomic::{AtomicU32, Ordering},
         Mutex,
@@ -730,6 +730,101 @@ fn analyze_fibers() {
         //file.write(format!("{} [label=\"{}\"];\n", id2, c2).as_bytes()).unwrap();
         //file.write(format!("{} [pos=\"{},{}!\"];\n", id1, x, y).as_bytes()).unwrap();
         //file.write(format!("{} [pos=\"{},{}!\"];\n", id2, x, y).as_bytes()).unwrap();
+    });
+    file.write(b"}\n").unwrap();
+}
+
+#[test]
+fn analyze_collisions() {
+    let file = File::open("data/collisions").unwrap();
+    use std::io::BufRead;
+    let mut reader = BufReader::new(file);
+    let mut lines = reader.lines();
+    let mut colls = vec![];
+    while let Some(Ok(line)) = lines.next() {
+        let mut parts = line.split_whitespace().collect::<Vec<_>>();
+        // h<id1> v<id2> <x> <y> <z>
+        let id1 = parts[0][1..].parse::<u32>().unwrap();
+        let id2 = parts[1][1..].parse::<u32>().unwrap();
+        let x = parts[2].parse::<u16>().unwrap();
+        let y = parts[3].parse::<u16>().unwrap();
+        let z = parts[4].parse::<u16>().unwrap();
+
+        colls.push((id1, id2, x, y, z));
+    }
+
+    /* // group by id2 and count
+    colls
+        .iter()
+        .sorted_by_key(|x| x.1)
+        .chunk_by(|x| x.1)
+        .into_iter()
+        .map(|(id, group)| (id, group.count()))
+        .sorted_by_key(|x| x.1)
+        .chunk_by(|x| x.1)
+        .into_iter()
+        .map(|(count, group)| (count, group.count()))
+        .for_each(|(count, num)| {
+            println!("{}: {}", count, num);
+        }); */
+
+    // create new dot file that only contains edges where the vertical has rank 2
+    let selected_vertical = colls
+        .iter()
+        .sorted_by_key(|x| x.1)
+        .chunk_by(|x| x.1)
+        .into_iter()
+        .map(|(id, group)| (id, group.count()))
+        .filter_map(|(id, count)| if count == 2 { Some(id) } else { None })
+        .collect::<HashSet<_>>();
+
+    let mut file = File::create("data/collisions-pruned.dot").unwrap();
+    file.write(b"graph {\n").unwrap();
+    colls.iter().for_each(|(id1, id2, x, y, z)| {
+        if selected_vertical.contains(&id2) {
+            file.write(format!("h{} -- v{};\n", id1, id2).as_bytes()).unwrap();
+        }
+    });
+    file.write(b"}\n").unwrap();
+
+    let filtered_colls = colls
+        .iter()
+        .filter(|(id1, id2, x, y, z)| selected_vertical.contains(id2))
+        .collect::<Vec<_>>();
+    let mut neighbor_map_h: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut neighbor_map_v: HashMap<u32, Vec<u32>> = HashMap::new();
+    filtered_colls.iter().for_each(|(id1, id2, x, y, z)| {
+        neighbor_map_h.entry(*id1).or_insert(vec![]).push(*id2);
+        neighbor_map_v.entry(*id2).or_insert(vec![]).push(*id1);
+    });
+
+    // select only nodes that are two edges away from h185
+    let mut selected_nodes = HashSet::new();
+    let mut work_list = vec![(true, 185, 0)];
+
+    while let Some((is_h, id, depth)) = work_list.pop() {
+        if is_h && selected_nodes.contains(&id) || depth >= 5 {
+            continue;
+        }
+        if is_h {
+            selected_nodes.insert(id);
+            if let Some(neighbors) = neighbor_map_h.get(&id) {
+                work_list.extend(neighbors.iter().map(|id| (false, *id, depth + 1)));
+            }
+        } else {
+            // don't insert vertical nodes
+            if let Some(neighbors) = neighbor_map_v.get(&id) {
+                work_list.extend(neighbors.iter().map(|id| (true, *id, depth + 1)));
+            }
+        }
+    }
+    // write selection dot
+    let mut file = File::create("data/collisions-pruned-selected.dot").unwrap();
+    file.write(b"graph {\n").unwrap();
+    filtered_colls.iter().for_each(|(id1, id2, x, y, z)| {
+        if selected_nodes.contains(id1) {
+            file.write(format!("h{} -- v{};\n", id1, id2).as_bytes()).unwrap();
+        }
     });
     file.write(b"}\n").unwrap();
 }
