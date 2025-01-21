@@ -141,6 +141,7 @@ pub struct TemplateApp {
     notification_receiver: Receiver<UINotification>,
     #[serde(skip)]
     overlay: Option<Box<dyn PaintVolume>>,
+    catalog_panel_open: bool,
 }
 
 impl Default for TemplateApp {
@@ -178,6 +179,7 @@ impl Default for TemplateApp {
             notification_sender,
             notification_receiver,
             overlay: None,
+            catalog_panel_open: true,
         }
     }
 }
@@ -831,7 +833,9 @@ impl TemplateApp {
             self.downloading_segment = None;
         }
 
-        self.catalog_panel(ctx);
+        if self.catalog_panel_open {
+            self.catalog_panel(ctx);
+        }
 
         ctx.input(|i| {
             if i.key_pressed(egui::Key::F) {
@@ -1087,6 +1091,15 @@ impl eframe::App for TemplateApp {
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        egui::TopBottomPanel::top("op_bar")
+            .frame(egui::Frame::none().inner_margin(4.0))
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.visuals_mut().button_frame = false;
+                    ui.toggle_value(&mut self.catalog_panel_open, "📜 Catalog");
+                });
+            });
+
         self.update_main(ctx, frame);
     }
 }
