@@ -9,6 +9,7 @@ use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
+use crate::zarr::test::CollisionPanel;
 use crate::zarr::ConnectedFullMapVolume2;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
@@ -143,6 +144,8 @@ pub struct TemplateApp {
     #[serde(skip)]
     overlay: Option<Volume>,
     catalog_panel_open: bool,
+    #[serde(skip)]
+    collision_panel: CollisionPanel,
 }
 
 impl Default for TemplateApp {
@@ -181,6 +184,7 @@ impl Default for TemplateApp {
             notification_receiver,
             overlay: None,
             catalog_panel_open: true,
+            collision_panel: CollisionPanel::new(),
         }
     }
 }
@@ -198,6 +202,7 @@ impl TemplateApp {
         } else {
             Default::default()
         };
+        app.custom_3d = Custom3d::new(cc);
         app.obj_repository = ObjRepository::new(&catalog);
         app.catalog = catalog;
         if let Some(dir) = config.data_dir {
@@ -1109,5 +1114,8 @@ impl eframe::App for TemplateApp {
             });
 
         self.update_main(ctx, frame);
+        if let Some(custom_3d) = self.custom_3d.as_mut() {
+            custom_3d.update(ctx, frame);
+        }
     }
 }

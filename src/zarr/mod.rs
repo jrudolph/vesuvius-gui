@@ -1,7 +1,7 @@
 mod blosc;
 mod ome;
 //#[cfg(test)]
-mod test;
+pub mod test;
 
 pub use test::ConnectedFullMapVolume2;
 

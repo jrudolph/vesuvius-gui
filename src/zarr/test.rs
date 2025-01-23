@@ -1,9 +1,12 @@
+#![allow(unused)]
 use super::{ZarrContext, ZarrContextBase};
 use crate::{
     volume::{PaintVolume, VoxelVolume},
     zarr::{blosc::BloscChunk, ZarrArray},
 };
-use egui::Color32;
+use egui::{Color32, ColorImage, Image, Label, Sense, TextureHandle, WidgetText};
+use egui_extras::{Column, TableBuilder};
+use image::{GenericImage, GenericImageView, Rgb};
 use itertools::Itertools;
 use memmap::MmapOptions;
 use rayon::iter::IntoParallelRefIterator;
@@ -331,7 +334,7 @@ impl ConnectedFullMapVolume2 {
 #[allow(unused)]
 impl PaintVolume for ConnectedFullMapVolume2 {
     fn paint(
-        &mut self,
+        &self,
         xyz: [i32; 3],
         u_coord: usize,
         v_coord: usize,
@@ -372,10 +375,10 @@ impl PaintVolume for ConnectedFullMapVolume2 {
 }
 #[allow(unused)]
 impl VoxelVolume for ConnectedFullMapVolume2 {
-    fn get(&mut self, xyz: [f64; 3], downsampling: i32) -> u8 {
+    fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
         255
     }
-    fn get_color(&mut self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+    fn get_color(&self, xyz: [f64; 3], downsampling: i32) -> Color32 {
         let x = (xyz[0] * downsampling as f64) as usize;
         let y = (xyz[1] * downsampling as f64) as usize;
         let z = (xyz[2] * downsampling as f64) as usize;
@@ -827,6 +830,268 @@ fn analyze_collisions() {
         }
     });
     file.write(b"}\n").unwrap();
+}
+
+struct PaintableImage {
+    image: ColorImage,
+}
+impl GenericImageView for PaintableImage {
+    type Pixel = Rgb<u8>;
+    fn dimensions(&self) -> (u32, u32) {
+        (self.image.size[0] as u32, self.image.size[1] as u32)
+    }
+    fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
+        //let data = self.data[y as usize * self.width + x as usize];
+        let p = self.image[(x as usize, y as usize)];
+        Rgb([p.r(), p.g(), p.b()])
+    }
+}
+impl GenericImage for PaintableImage {
+    fn get_pixel_mut(&mut self, x: u32, y: u32) -> &mut Self::Pixel {
+        todo!()
+    }
+    fn put_pixel(&mut self, x: u32, y: u32, pixel: Self::Pixel) {
+        self.image[(x as usize, y as usize)] = Color32::from_rgb(pixel[0], pixel[1], pixel[2]);
+    }
+    fn blend_pixel(&mut self, x: u32, y: u32, pixel: Self::Pixel) {
+        todo!()
+    }
+}
+
+pub(crate) struct CollisionPanel {
+    collisions: Vec<(u32, u32, u16, u16, u16)>,
+    neighbor_map_h: HashMap<u32, Vec<u32>>,
+    neighbor_map_v: HashMap<u32, Vec<u32>>,
+    selected_h: Option<u32>,
+    texture: Option<TextureHandle>,
+}
+impl CollisionPanel {
+    pub fn new() -> CollisionPanel {
+        let file = File::open("data/collisions").unwrap();
+        use std::io::BufRead;
+        let mut reader = BufReader::new(file);
+        let mut lines = reader.lines();
+        let mut colls = vec![];
+        while let Some(Ok(line)) = lines.next() {
+            let mut parts = line.split_whitespace().collect::<Vec<_>>();
+            // h<id1> v<id2> <x> <y> <z>
+            let id1 = parts[0][1..].parse::<u32>().unwrap();
+            let id2 = parts[1][1..].parse::<u32>().unwrap();
+            let x = parts[2].parse::<u16>().unwrap();
+            let y = parts[3].parse::<u16>().unwrap();
+            let z = parts[4].parse::<u16>().unwrap();
+
+            colls.push((id1, id2, x, y, z));
+        }
+
+        /* // group by id2 and count
+        colls
+            .iter()
+            .sorted_by_key(|x| x.1)
+            .chunk_by(|x| x.1)
+            .into_iter()
+            .map(|(id, group)| (id, group.count()))
+            .sorted_by_key(|x| x.1)
+            .chunk_by(|x| x.1)
+            .into_iter()
+            .map(|(count, group)| (count, group.count()))
+            .for_each(|(count, num)| {
+                println!("{}: {}", count, num);
+            }); */
+
+        // create new dot file that only contains edges where the vertical has rank 2
+        let selected_vertical = colls
+            .iter()
+            .sorted_by_key(|x| x.1)
+            .chunk_by(|x| x.1)
+            .into_iter()
+            .map(|(id, group)| (id, group.count()))
+            .filter_map(|(id, count)| if count == 2 { Some(id) } else { None })
+            .collect::<HashSet<_>>();
+
+        let filtered_colls = colls
+            .iter()
+            .filter(|(id1, id2, x, y, z)| selected_vertical.contains(id2))
+            .collect::<Vec<_>>();
+
+        let mut neighbor_map_h: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut neighbor_map_v: HashMap<u32, Vec<u32>> = HashMap::new();
+        filtered_colls.iter().for_each(|(id1, id2, x, y, z)| {
+            neighbor_map_h.entry(*id1).or_insert(vec![]).push(*id2);
+            neighbor_map_v.entry(*id2).or_insert(vec![]).push(*id1);
+        });
+
+        CollisionPanel {
+            collisions: filtered_colls.into_iter().cloned().collect(),
+            neighbor_map_h,
+            neighbor_map_v,
+            selected_h: None,
+            texture: None,
+        }
+    }
+    pub fn draw(&mut self, ctx: &egui::Context) -> Option<[i32; 3]> {
+        egui::Window::new("Collisions")
+            .show(ctx, |ui| {
+                egui::Grid::new("my_grid")
+                    .num_columns(2)
+                    .min_row_height(500.)
+                    //.spacing([40.0, 4.0])
+                    .show(ui, |ui| {
+                        let available_height = ui.available_height();
+                        let mut table = TableBuilder::new(ui)
+                            //.vscroll(true)
+                            .auto_shrink([false, true])
+                            .resizable(true)
+                            .max_scroll_height(available_height)
+                            .column(Column::auto())
+                            .column(Column::remainder() /* Column::initial(150.0) */);
+
+                        table = table.sense(egui::Sense::click());
+
+                        table
+                            /* .header(20.0, |mut header| {
+                                header.col(|ui| {
+                                    ui.strong("ID");
+                                });
+                                header.col(|ui| {
+                                    ui.strong("Num");
+                                });
+                            }) */
+                            .body(|mut body| {
+                                for (id, neighbors) in self.neighbor_map_h.iter().sorted_by_key(|x| x.1.len()).rev() {
+                                    body.row(20., |mut row| {
+                                        row.set_selected(self.selected_h == Some(*id));
+                                        fn l(text: impl Into<WidgetText>) -> Label {
+                                            Label::new(text).selectable(false)
+                                        }
+                                        use egui::Widget;
+                                        row.col(|ui| {
+                                            l(format!("h{}", id)).ui(ui);
+                                        });
+                                        row.col(|ui| {
+                                            l(neighbors.len().to_string()).ui(ui);
+                                        });
+                                        if row.response().clicked() {
+                                            println!("Selected {}", id);
+                                            self.selected_h = Some(*id);
+                                        }
+                                    });
+                                }
+                            });
+
+                        let col_image = ColorImage::new([500, 500], Color32::BLACK);
+                        let mut im: PaintableImage = PaintableImage { image: col_image };
+
+                        let colls = self
+                            .collisions
+                            .iter()
+                            .filter(|(id1, id2, x, y, z)| self.selected_h == Some(*id1))
+                            .collect::<Vec<_>>();
+
+                        let min = colls
+                            .iter()
+                            .map(|(id1, id2, x, y, z)| [*x, *y, *z])
+                            .fold([u16::MAX, u16::MAX, u16::MAX], |acc, v| {
+                                [acc[0].min(v[0]), acc[1].min(v[1]), acc[2].min(v[2])]
+                            });
+                        let max = colls
+                            .iter()
+                            .map(|(id1, id2, x, y, z)| [*x, *y, *z])
+                            .fold([0, 0, 0], |acc, v| {
+                                [acc[0].max(v[0]), acc[1].max(v[1]), acc[2].max(v[2])]
+                            });
+                        let min = min.map(|x| x - 10);
+                        let max = max.map(|x| x + 10);
+                        let range = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+
+                        let tex = if let Some(handle) = self.texture.as_mut() {
+                            handle
+                        } else {
+                            let tex = ui.ctx().load_texture(
+                                "image",
+                                ColorImage::new([500, 500], Color32::BLACK),
+                                Default::default(),
+                            );
+                            self.texture = Some(tex);
+                            self.texture.as_ref().unwrap()
+                        };
+                        let image = Image::new(tex);
+                        let image = image.sense(Sense::click_and_drag());
+
+                        let i = ui.add(image);
+                        i.interact(Sense::click_and_drag());
+
+                        let hovered: Option<(u32, u32)> = if let Some(pos) = i.hover_pos() {
+                            let pos = pos - i.rect.min;
+
+                            let mx = (pos.x / 500.0 * range[0] as f32 + min[0] as f32) as u16;
+                            let my = (pos.y / 500.0 * range[1] as f32 + min[1] as f32) as u16;
+
+                            // find nearest point with max distance 10
+                            colls
+                                .iter()
+                                .min_by_key(|(id1, id2, x, y, z)| {
+                                    let dx = (mx as i32 - *x as i32).abs();
+                                    let dy = (my as i32 - *y as i32).abs();
+                                    dx + dy
+                                })
+                                .map(|(id1, id2, x, y, z)| (*id1, *id2))
+                        } else {
+                            None
+                        };
+
+                        let click_pos = if i.clicked() {
+                            let pos = ui.input(|i| i.pointer.interact_pos().unwrap()) - i.rect.min;
+                            println!("Clicked at {:?}", pos);
+                            //let pos = pos - i.rect.min;
+
+                            let mx = (pos.x / 500.0 * range[0] as f32 + min[0] as f32) as u16;
+                            let my = (pos.y / 500.0 * range[1] as f32 + min[1] as f32) as u16;
+
+                            // find nearest point with max distance 10
+                            colls
+                                .iter()
+                                .min_by_key(|(id1, id2, x, y, z)| {
+                                    let dx = (mx as i32 - *x as i32).abs();
+                                    let dy = (my as i32 - *y as i32).abs();
+                                    dx + dy
+                                })
+                                .map(|(id1, id2, x, y, z)| [*x as i32, *y as i32, *z as i32])
+                        } else {
+                            None
+                        };
+
+                        {
+                            use imageproc::drawing::*;
+
+                            colls.iter().for_each(|(id1, id2, x, y, z)| {
+                                let lx = (x - min[0]) as f32 / range[0] as f32 * 500.0;
+                                let ly = (y - min[1]) as f32 / range[1] as f32 * 500.0;
+
+                                let color: Rgb<u8> = if let Some((hover_id1, hover_id2)) = hovered {
+                                    if *id1 == hover_id1 && *id2 == hover_id2 {
+                                        Rgb([0, 255, 0])
+                                    } else {
+                                        Rgb([255, 0, 0])
+                                    }
+                                } else {
+                                    Rgb([255, 0, 0])
+                                };
+
+                                draw_filled_circle_mut(&mut im, (lx as i32, ly as i32), 2, color);
+                            });
+                        }
+
+                        let handle = self.texture.as_mut().unwrap();
+                        handle.set(im.image, Default::default());
+                        click_pos
+                    })
+                    .inner
+            })
+            .map(|x| x.inner)
+            .flatten()
+            .flatten()
+    }
 }
 
 #[allow(dead_code)]
