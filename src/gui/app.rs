@@ -1113,5 +1113,6 @@ impl eframe::App for TemplateApp {
             });
 
         self.update_main(ctx, frame);
+        self.collision_panel.draw(ctx);
     }
 }
