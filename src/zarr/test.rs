@@ -9,9 +9,11 @@ use egui_extras::{Column, TableBuilder};
 use image::{GenericImage, GenericImageView, Rgb};
 use itertools::Itertools;
 use memmap::MmapOptions;
+use priority_queue::PriorityQueue;
 use rayon::iter::IntoParallelRefIterator;
 use std::{
-    collections::{HashMap, HashSet},
+    cmp::Reverse,
+    collections::{BinaryHeap, HashMap, HashSet},
     fs::{File, OpenOptions},
     io::{BufReader, Write},
     sync::{
@@ -781,55 +783,275 @@ fn analyze_collisions() {
         .filter_map(|(id, count)| if count == 2 { Some(id) } else { None })
         .collect::<HashSet<_>>();
 
-    let mut file = File::create("data/collisions-pruned.dot").unwrap();
+    /* let mut file = File::create("data/collisions-pruned.dot").unwrap();
     file.write(b"graph {\n").unwrap();
     colls.iter().for_each(|(id1, id2, x, y, z)| {
         if selected_vertical.contains(&id2) {
             file.write(format!("h{} -- v{};\n", id1, id2).as_bytes()).unwrap();
         }
     });
-    file.write(b"}\n").unwrap();
+    file.write(b"}\n").unwrap(); */
 
     let filtered_colls = colls
         .iter()
         .filter(|(id1, id2, x, y, z)| selected_vertical.contains(id2))
         .collect::<Vec<_>>();
-    let mut neighbor_map_h: HashMap<u32, Vec<u32>> = HashMap::new();
+    /* let mut neighbor_map_h: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut neighbor_map_v: HashMap<u32, Vec<u32>> = HashMap::new();
     filtered_colls.iter().for_each(|(id1, id2, x, y, z)| {
         neighbor_map_h.entry(*id1).or_insert(vec![]).push(*id2);
         neighbor_map_v.entry(*id2).or_insert(vec![]).push(*id1);
-    });
+    }); */
 
-    // select only nodes that are two edges away from h185
-    let mut selected_nodes = HashSet::new();
-    let mut work_list = vec![(true, 185, 0)];
+    let horizontal_id = 10188;
 
-    while let Some((is_h, id, depth)) = work_list.pop() {
-        if is_h && selected_nodes.contains(&id) || depth >= 5 {
-            continue;
+    let collisions = filtered_colls
+        .iter()
+        .filter(|(id1, id2, x, y, z)| *id1 == horizontal_id)
+        .collect::<Vec<_>>();
+
+    println!("total collisions: {}", collisions.len());
+
+    let cloud = PointCloudFile::new(&format!("data/classes/class-2/{:06}", horizontal_id));
+    println!("cloud: {}", cloud.num_elements);
+
+    type Collision = (u32, u32, u16, u16, u16);
+
+    const DOWNSCALE: i32 = 1;
+
+    struct Map {
+        map: HashSet<[u16; 3]>,
+    }
+    impl Map {
+        fn new(cloud: &PointCloudFile) -> Self {
+            let map = cloud.iter().map(|x| x.map(|x| x / DOWNSCALE as u16)).collect();
+            Self { map }
         }
-        if is_h {
-            selected_nodes.insert(id);
-            if let Some(neighbors) = neighbor_map_h.get(&id) {
-                work_list.extend(neighbors.iter().map(|id| (false, *id, depth + 1)));
+        fn contains(&self, point: [u16; 3]) -> bool {
+            self.map.contains(&point)
+        }
+        fn neighbors(&self, point: [u16; 3]) -> Vec<[u16; 3]> {
+            let mut neighbors = vec![];
+            let candidates = [
+                // six directions, manhattan distance is good enough
+                [DOWNSCALE, 0, 0],
+                [-DOWNSCALE, 0, 0],
+                [0, DOWNSCALE, 0],
+                [0, -DOWNSCALE, 0],
+                [0, 0, DOWNSCALE],
+                [0, 0, -DOWNSCALE],
+            ];
+            for [dx, dy, dz] in candidates {
+                let neighbor = [
+                    (point[0] as i32 + dx) / DOWNSCALE as i32,
+                    (point[1] as i32 + dy) / DOWNSCALE as i32,
+                    (point[2] as i32 + dz) / DOWNSCALE as i32,
+                ];
+                if neighbor.iter().all(|x| *x >= 0 && *x < u16::MAX as i32) {
+                    let neighbor = [neighbor[0] as u16, neighbor[1] as u16, neighbor[2] as u16];
+                    if self.map.contains(&neighbor) {
+                        neighbors.push(neighbor.map(|x| x as u16 * DOWNSCALE as u16));
+                    }
+                }
             }
+            neighbors
+        }
+    }
+
+    struct DistanceMap {
+        distances: HashMap<[u16; 3], i32>,
+    }
+    impl DistanceMap {
+        fn get(&self, point: &[u16; 3]) -> Option<i32> {
+            self.distances
+                .get(&point.map(|x| x as u16 / DOWNSCALE as u16 * DOWNSCALE as u16))
+                .copied()
+        }
+    }
+
+    fn dijkstra(start: [u16; 3], map: &Map) -> DistanceMap {
+        let mut distances = HashMap::new();
+        let mut queue: PriorityQueue<[u16; 3], Reverse<i32>> = PriorityQueue::new();
+        queue.push(start, Reverse(0));
+        distances.insert(start, 0);
+        let mut step = 0;
+        while let Some((p, Reverse(distance))) = queue.pop() {
+            for neighbor in map.neighbors(p) {
+                let new_distance = distance + 1;
+                if new_distance < *distances.get(&neighbor).unwrap_or(&i32::MAX) {
+                    distances.insert(neighbor, new_distance);
+                    queue.push_increase(neighbor, Reverse(new_distance));
+                }
+            }
+            step += 1;
+            if step % 1000000 == 0 {
+                println!("At step {}, queue_size: {}", step, queue.len());
+            }
+        }
+        DistanceMap { distances }
+    }
+
+    let map = Map::new(&cloud);
+    println!("Map entries: {}", map.map.len());
+
+    // calculate the geodesic adjacency matrix for all collision points on h22554
+    let mut adjacency_matrix: HashMap<(Collision, Collision), u64> = HashMap::new();
+    for start_coll @ (_, start_id_v, start_x, start_y, start_z) in &collisions {
+        println!("At start_id_v: {}", start_id_v);
+        let start = [*start_x, *start_y, *start_z];
+        // collision point might near the surface of the cloud but not contained in it
+        let start = if !map.contains(start) {
+            cloud
+                .iter()
+                .min_by_key(|x| {
+                    let dx = (x[0] as i32 - start[0] as i32).abs();
+                    let dy = (x[1] as i32 - start[1] as i32).abs();
+                    let dz = (x[2] as i32 - start[2] as i32).abs();
+                    dx + dy + dz
+                })
+                .unwrap()
         } else {
-            // don't insert vertical nodes
-            if let Some(neighbors) = neighbor_map_v.get(&id) {
-                work_list.extend(neighbors.iter().map(|id| (true, *id, depth + 1)));
+            start
+        };
+        let distances = dijkstra(start, &map);
+        println!("distances: {}", distances.distances.len());
+
+        for end_coll @ (_, end_id_v, end_x, end_y, end_z) in &collisions {
+            if start_id_v >= end_id_v {
+                continue;
+            }
+            let end = [*end_x, *end_y, *end_z];
+            let end = if !map.contains(end) {
+                cloud
+                    .iter()
+                    .min_by_key(|x| {
+                        let dx = (x[0] as i32 - end[0] as i32).abs();
+                        let dy = (x[1] as i32 - end[1] as i32).abs();
+                        let dz = (x[2] as i32 - end[2] as i32).abs();
+                        dx + dy + dz
+                    })
+                    .unwrap()
+            } else {
+                end
+            };
+            if let Some(distance) = distances.get(&end) {
+                adjacency_matrix.insert((***start_coll, ***end_coll), distance as u64);
+            } else {
+                println!("No distance found for {:?}", end_coll);
             }
         }
     }
-    // write selection dot
-    let mut file = File::create("data/collisions-pruned-selected.dot").unwrap();
-    file.write(b"graph {\n").unwrap();
-    filtered_colls.iter().for_each(|(id1, id2, x, y, z)| {
-        if selected_nodes.contains(id1) {
-            file.write(format!("h{} -- v{};\n", id1, id2).as_bytes()).unwrap();
+
+    println!("Adjacency matrix: {}", adjacency_matrix.len());
+    adjacency_matrix.iter().for_each(|((start, end), distance)| {
+        println!("{} {} {}", start.1, end.1, distance);
+    });
+
+    struct Adjacency {
+        matrix: HashMap<(Collision, Collision), u64>,
+    }
+    impl Adjacency {
+        fn get_distance(&self, key1: u32, key2: u32) -> Option<u64> {
+            let min = key1.min(key2);
+            let max = key1.max(key2);
+            self.get(min).get(&max).copied()
         }
+        fn get(&self, key: u32) -> HashMap<u32, u64> {
+            self.matrix
+                .iter()
+                .filter(|(k, _)| k.0 .1 == key || k.1 .1 == key)
+                .map(|(k, v)| if k.0 .1 == key { (k.1 .1, *v) } else { (k.0 .1, *v) })
+                .collect()
+        }
+        fn neighbors2(&self, key: u32) -> (u32, u32) {
+            let mut neighbors = self.get(key);
+            let mut next2 = neighbors
+                .into_iter()
+                //.filter(|(_, dist)| *dist > 30) // FIXME: hacky way to ignore points that are too close
+                .sorted_by_key(|(id, dist)| *dist)
+                .take(2);
+            (next2.next().unwrap().0, next2.next().unwrap().0)
+        }
+        fn neighbor1(&self, key: u32) -> u32 {
+            self.neighbors2(key).0
+        }
+    }
+    let adjacency = Adjacency {
+        matrix: adjacency_matrix,
+    };
+
+    let first_node = adjacency.matrix.iter().next().unwrap().0 .0 .1;
+    let most_distant = adjacency.get(first_node).into_iter().max_by_key(|(_, d)| *d).unwrap();
+    println!("Most distant: {:?}", &most_distant);
+
+    let other_end = adjacency
+        .get(most_distant.0)
+        .into_iter()
+        .max_by_key(|(_, d)| *d)
+        .unwrap();
+    println!("Other end: {:?}", other_end);
+
+    #[derive(PartialEq, Eq, Hash)]
+    struct Edge(u32, u32);
+    impl Edge {
+        fn new(id1: u32, id2: u32) -> Self {
+            Self(id1.min(id2), id1.max(id2))
+        }
+    }
+    let mut edges = HashSet::new();
+    let keys = collisions.iter().map(|x| x.1).collect::<HashSet<_>>();
+    keys.into_iter().for_each(|key| {
+        /* if key == most_distant.0 || key == other_end.0 {
+            edges.insert(Edge::new(key, adjacency.neighbor1(key)));
+        } else {
+            let (n1, n2) = adjacency.neighbors2(key);
+            edges.insert(Edge::new(key, n1));
+            edges.insert(Edge::new(key, n2));
+        } */
+        adjacency
+            .get(key)
+            .into_iter()
+            .sorted_by_key(|(_, d)| *d)
+            .take(2)
+            .for_each(|(other, d)| {
+                edges.insert(Edge::new(key, other));
+            });
+    });
+
+    println!("Edges: {}", edges.len());
+    edges.iter().for_each(|edge| {
+        println!("{} {}", edge.0, edge.1);
+    });
+
+    // create dot file
+    let mut file = File::create(&format!("data/h{:06}.dot", horizontal_id)).unwrap();
+    file.write(b"graph {\n").unwrap();
+    file.write(b"edge [len=2.0]\n").unwrap();
+    edges.iter().for_each(|Edge(v1, v2)| {
+        // add label with distance
+        let distance = adjacency.get_distance(*v1, *v2).unwrap();
+        file.write(format!("v{} -- v{} [label=\"{}\", weight=-{}];\n", v1, v2, distance, distance).as_bytes())
+            .unwrap();
     });
     file.write(b"}\n").unwrap();
+
+    /* let first_node = adjacency_matrix.iter().next().unwrap().0 .0;
+
+    // find most distant node from first_node
+    let most_distant = adjacency_matrix
+        .iter()
+        .filter(|(key, _)| key.0 == first_node || key.1 == first_node)
+        .max_by_key(|(_, distance)| *distance)
+        .unwrap()
+        .0;
+    println!("Most distant: {:?}", most_distant);
+    let other_end = adjacency_matrix
+        .iter()
+        .filter(|(key, _)| key != most_distant && key.0 == most_distant.0 .1 || key.1 == most_distant.0 .1)
+        .max_by_key(|(_, distance)| *distance)
+        .unwrap()
+        .0;
+    println!("Other end: {:?}", other_end); */
 }
 
 struct PaintableImage {
