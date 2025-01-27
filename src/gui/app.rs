@@ -143,6 +143,8 @@ pub struct TemplateApp {
     notification_receiver: Receiver<UINotification>,
     #[serde(skip)]
     overlay: Option<Volume>,
+    #[serde(skip)]
+    overlay2: Option<Volume>,
     catalog_panel_open: bool,
     #[serde(skip)]
     collision_panel: CollisionPanel,
@@ -183,6 +185,7 @@ impl Default for TemplateApp {
             notification_sender,
             notification_receiver,
             overlay: None,
+            overlay2: None,
             catalog_panel_open: true,
             collision_panel: CollisionPanel::new(),
         }
@@ -251,6 +254,7 @@ impl TemplateApp {
                         ZarrArray::from_url_to_default_cache_dir(&segment_file)
                             .into_ctx()
                             .into_ctx()
+                            .with_color_scheme(Box::new(ConstantColor::new(Color32::GREEN)))
                             .into_volume()
                         // TODO: autodetect or allow to choose whether to use ome-zarr or zarr
                         /* Box::new(OmeZarrContext::<FourColors>::from_url_to_default_cache_dir(
@@ -262,6 +266,13 @@ impl TemplateApp {
                         // OmeZarrContext::<crate::zarr::FourColors>::from_path(&segment_file).into_volume()
                     }
                 });
+                app.overlay2 = Some(
+                    ZarrArray::from_path("/home/johannes/tmp/pap/bruniss/scrolls/s1/fibers/vt_regular.zarr")
+                        .into_ctx()
+                        .into_ctx()
+                        .with_color_scheme(Box::new(ConstantColor::new(Color32::RED)))
+                        .into_volume(),
+                );
             }
         }
         //app.overlay = Some(ConnectedFullMapVolume2::new().into_volume());
@@ -541,6 +552,20 @@ impl TemplateApp {
 
         if !segment_pane && self.show_overlay {
             if let Some(overlay) = self.overlay.as_mut() {
+                overlay.paint(
+                    coords,
+                    u_coord,
+                    v_coord,
+                    d_coord,
+                    width,
+                    height,
+                    1 << min_level as u8,
+                    paint_zoom,
+                    &self.drawing_config,
+                    &mut image,
+                );
+            }
+            if let Some(overlay) = self.overlay2.as_mut() {
                 overlay.paint(
                     coords,
                     u_coord,
