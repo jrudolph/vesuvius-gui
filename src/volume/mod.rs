@@ -109,6 +109,41 @@ pub trait VoxelVolume {
     }
 }
 
+pub trait ColorScheme {
+    fn get_color(&self, value: u8) -> Color32;
+}
+pub struct FourColors {}
+impl ColorScheme for FourColors {
+    fn get_color(&self, value: u8) -> Color32 {
+        match value {
+            1 => Color32::RED,
+            2 => Color32::GREEN,
+            3 => Color32::YELLOW,
+            _ => Color32::BLUE,
+        }
+    }
+}
+pub struct GrayScale {}
+impl ColorScheme for GrayScale {
+    fn get_color(&self, value: u8) -> Color32 {
+        Color32::from_gray(value)
+    }
+}
+
+pub struct ConstantColor {
+    color: Color32,
+}
+impl ConstantColor {
+    pub fn new(color: Color32) -> Self {
+        Self { color }
+    }
+}
+impl ColorScheme for ConstantColor {
+    fn get_color(&self, _value: u8) -> Color32 {
+        self.color
+    }
+}
+
 pub struct Image {
     width: usize,
     height: usize,

@@ -6,9 +6,8 @@ pub mod test;
 pub use test::ConnectedFullMapVolume2;
 
 pub use ome::OmeZarrContext;
-pub use ome::{ColorScheme, FourColors, GrayScale};
 
-use crate::volume::{PaintVolume, VoxelVolume};
+use crate::volume::{ColorScheme, FourColors, PaintVolume, VoxelVolume};
 use blosc::{BloscChunk, BloscContext};
 use derive_more::Debug;
 use egui::Color32;
@@ -365,6 +364,7 @@ impl<const N: usize> ZarrContextBase<N> {
                 last_context: None,
             }
             .into(),
+            color_scheme: Box::new(FourColors {}),
         }
     }
 }
@@ -472,6 +472,7 @@ pub struct ZarrContext<const N: usize> {
     cache_missing: bool,
     cache: Arc<Mutex<ZarrContextCache<N>>>,
     state: RefCell<ZarrContextState<N>>,
+    color_scheme: Box<dyn ColorScheme>,
 }
 
 impl ZarrContext<3> {
@@ -554,6 +555,15 @@ impl ZarrContext<3> {
             }
         }
     }
+    pub fn with_color_scheme(self, color_scheme: Box<dyn ColorScheme>) -> ZarrContext<3> {
+        ZarrContext {
+            array: self.array,
+            cache_missing: self.cache_missing,
+            cache: self.cache,
+            state: self.state,
+            color_scheme: color_scheme,
+        }
+    }
 }
 
 impl PaintVolume for ZarrContext<3> {
@@ -599,12 +609,7 @@ impl PaintVolume for ZarrContext<3> {
                 let v = self.get([z as usize, y as usize, x as usize]).unwrap_or(0);
                 if v != 0 {
                     //println!("painting at {} {} {} {}", x, y, z, v);
-                    let color = match v {
-                        1 => Color32::RED,
-                        2 => Color32::GREEN,
-                        3 => Color32::YELLOW,
-                        _ => Color32::BLUE,
-                    };
+                    let color = self.color_scheme.get_color(v);
                     buffer.blend(im_u, im_v, color, 0.4);
                 }
             }
@@ -628,13 +633,7 @@ impl VoxelVolume for ZarrContext<3> {
         let v = self
             .get([(xyz[2] * f) as usize, (xyz[1] * f) as usize, (xyz[0] * f) as usize])
             .unwrap_or(0);
-        let color = match v {
-            0 => Color32::BLACK,
-            1 => Color32::RED,
-            2 => Color32::GREEN,
-            3 => Color32::YELLOW,
-            _ => Color32::BLUE,
-        };
+        let color = self.color_scheme.get_color(v);
         color
     }
     fn get_color_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> Color32 {

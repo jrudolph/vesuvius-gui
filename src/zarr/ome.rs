@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use super::{ZarrArray, ZarrContext};
+use crate::volume::ColorScheme;
 use crate::volume::PaintVolume;
 use crate::volume::VoxelVolume;
 use egui::Color32;
@@ -61,32 +62,14 @@ pub struct OmeZarrContext<C: ColorScheme> {
     ome_zarr: OmeZarr,
     cache_missing: bool,
     zarr_contexts: Vec<ZarrContext<3>>, // TODO: make generic
-    phantom: std::marker::PhantomData<C>,
-}
-
-pub trait ColorScheme {
-    fn get_color(value: u8) -> Color32;
-}
-pub struct FourColors {}
-impl ColorScheme for FourColors {
-    fn get_color(value: u8) -> Color32 {
-        match value {
-            1 => Color32::RED,
-            2 => Color32::GREEN,
-            3 => Color32::YELLOW,
-            _ => Color32::BLUE,
-        }
-    }
-}
-pub struct GrayScale {}
-impl ColorScheme for GrayScale {
-    fn get_color(value: u8) -> Color32 {
-        Color32::from_gray(value)
-    }
+    color_scheme: C,
 }
 
 impl<C: ColorScheme> OmeZarrContext<C> {
-    pub fn from_url(url: &str, local_cache_dir: &str) -> Self {
+    pub fn from_url(url: &str, local_cache_dir: &str) -> Self
+    where
+        C: Default,
+    {
         let attrs = Self::load_attrs(url, local_cache_dir);
 
         let ome_zarr = OmeZarr { attrs };
@@ -105,16 +88,22 @@ impl<C: ColorScheme> OmeZarrContext<C> {
             ome_zarr,
             zarr_contexts,
             cache_missing: false,
-            phantom: std::marker::PhantomData,
+            color_scheme: C::default(),
         }
     }
-    pub fn from_url_to_default_cache_dir(url: &str) -> Self {
+    pub fn from_url_to_default_cache_dir(url: &str) -> Self
+    where
+        C: Default,
+    {
         let canonical_url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
         let sha256 = format!("{:x}", Sha256::digest(canonical_url.as_bytes()));
         let local_cache_dir = std::env::temp_dir().join("vesuvius-gui").join(sha256);
         Self::from_url(url, local_cache_dir.to_str().unwrap())
     }
-    pub fn from_path(path: &str) -> Self {
+    pub fn from_path(path: &str) -> Self
+    where
+        C: Default,
+    {
         let attrs = {
             let target_file = format!("{}/.zattrs", path);
             let zarray = std::fs::read_to_string(&target_file).unwrap();
@@ -137,7 +126,7 @@ impl<C: ColorScheme> OmeZarrContext<C> {
             ome_zarr,
             zarr_contexts,
             cache_missing: false,
-            phantom: std::marker::PhantomData,
+            color_scheme: C::default(),
         }
     }
 
@@ -216,7 +205,7 @@ impl<C: ColorScheme> PaintVolume for OmeZarrContext<C> {
 
                 let v = self.get([z as usize, y as usize, x as usize], scale);
                 if v != 0 {
-                    buffer.blend(im_u, im_v, C::get_color(v), 0.4);
+                    buffer.blend(im_u, im_v, self.color_scheme.get_color(v), 0.4);
                 }
             }
         }
@@ -245,6 +234,6 @@ impl<C: ColorScheme> VoxelVolume for OmeZarrContext<C> {
             ],
             scale,
         );
-        C::get_color(v)
+        self.color_scheme.get_color(v)
     }
 }
