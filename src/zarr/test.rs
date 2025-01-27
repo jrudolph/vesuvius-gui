@@ -803,7 +803,12 @@ fn analyze_collisions() {
         neighbor_map_v.entry(*id2).or_insert(vec![]).push(*id1);
     }); */
 
-    let horizontal_id = 10188;
+    let h_candidates: HashSet<_> = vec![
+        22554, 10188, 37034, 21236, 31603, 10486, 19854, 34754, 23691, 39304, 6831,
+    ]
+    .into_iter()
+    .collect();
+    let horizontal_id = 6831;
 
     let collisions = filtered_colls
         .iter()
@@ -817,7 +822,7 @@ fn analyze_collisions() {
 
     type Collision = (u32, u32, u16, u16, u16);
 
-    const DOWNSCALE: i32 = 1;
+    const DOWNSCALE: i32 = 2;
 
     struct Map {
         map: HashSet<[u16; 3]>,
@@ -1030,10 +1035,47 @@ fn analyze_collisions() {
     edges.iter().for_each(|Edge(v1, v2)| {
         // add label with distance
         let distance = adjacency.get_distance(*v1, *v2).unwrap();
-        file.write(format!("v{} -- v{} [label=\"{}\", weight=-{}];\n", v1, v2, distance, distance).as_bytes())
-            .unwrap();
+        file.write(
+            format!(
+                "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}];\n",
+                horizontal_id, v1, horizontal_id, v2, distance, distance
+            )
+            .as_bytes(),
+        )
+        .unwrap();
     });
+
     file.write(b"}\n").unwrap();
+
+    // create dot file for vertical connections
+    let vertical_connections = colls
+        .iter()
+        .filter(|x| selected_vertical.contains(&x.1))
+        .sorted_by_key(|x| x.1)
+        .chunk_by(|x| x.1)
+        .into_iter()
+        .map(|(v, colls)| {
+            let hs = colls.map(|x| x.0).collect::<HashSet<_>>();
+            (v, hs)
+        })
+        .collect::<Vec<_>>();
+    let mut file = File::create("data/verticals.dot").unwrap();
+    file.write(b"graph {\n").unwrap();
+    file.write(b"edge [len=2.0]\n").unwrap();
+    for (v, hs) in vertical_connections {
+        assert!(hs.len() == 2);
+        let hs = hs.into_iter().collect::<Vec<_>>();
+        let h1 = hs[0];
+        let h2 = hs[1];
+
+        if h_candidates.contains(&h1) || h_candidates.contains(&h2) {
+            file.write(format!("h{}_v{} -- h{}_v{}\n", h1, v, h2, v).as_bytes())
+                .unwrap();
+        }
+    }
+    file.write(b"}\n").unwrap();
+
+    // v19894 -> h22554
 
     /* let first_node = adjacency_matrix.iter().next().unwrap().0 .0;
 
