@@ -820,18 +820,35 @@ fn analyze_collisions() {
         neighbor_map_v.entry(*id2).or_insert(vec![]).push(*id1);
     }); */
 
-    fn create_collision_graph(horizontal_id: u32, colls: &[(u32, u32, u16, u16, u16)]) {
-        let collisions = colls
-            .iter()
-            .filter(|(id1, id2, x, y, z)| *id1 == horizontal_id)
-            .collect::<Vec<_>>();
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    struct Collision {
+        h_id: u32,
+        v_id: u32,
+        x: u16,
+        y: u16,
+        z: u16,
+    }
+    impl From<(u32, u32, u16, u16, u16)> for Collision {
+        fn from(x: (u32, u32, u16, u16, u16)) -> Self {
+            Self {
+                h_id: x.0,
+                v_id: x.1,
+                x: x.2,
+                y: x.3,
+                z: x.4,
+            }
+        }
+    }
+
+    fn create_collision_graph(horizontal_id: u32, colls: &[Collision]) {
+        let collisions = colls.iter().filter(|c| c.h_id == horizontal_id).collect::<Vec<_>>();
 
         println!("total collisions: {}", collisions.len());
 
         let cloud = PointCloudFile::new(horizontal_id, &format!("data/classes/class-2/{:06}", horizontal_id));
         println!("cloud: {}", cloud.num_elements);
 
-        type Collision = (u32, u32, u16, u16, u16);
+        //type Collision = (u32, u32, u16, u16, u16);
 
         const DOWNSCALE: i32 = 2;
 
@@ -912,7 +929,14 @@ fn analyze_collisions() {
 
         // calculate the geodesic adjacency matrix for all collision points on h22554
         let mut adjacency_matrix: HashMap<(Collision, Collision), u64> = HashMap::default();
-        for start_coll @ (_, start_id_v, start_x, start_y, start_z) in &collisions {
+        for start_coll @ Collision {
+            v_id: start_id_v,
+            x: start_x,
+            y: start_y,
+            z: start_z,
+            ..
+        } in &collisions
+        {
             println!("At start_id_v: {}", start_id_v);
             let start = [*start_x, *start_y, *start_z];
             // collision point might near the surface of the cloud but not contained in it
@@ -932,7 +956,14 @@ fn analyze_collisions() {
             let distances = dijkstra(start, &map);
             println!("distances: {}", distances.distances.len());
 
-            for end_coll @ (_, end_id_v, end_x, end_y, end_z) in &collisions {
+            for end_coll @ Collision {
+                v_id: end_id_v,
+                x: end_x,
+                y: end_y,
+                z: end_z,
+                ..
+            } in &collisions
+            {
                 if start_id_v >= end_id_v {
                     continue;
                 }
@@ -960,7 +991,7 @@ fn analyze_collisions() {
 
         println!("Adjacency matrix: {}", adjacency_matrix.len());
         adjacency_matrix.iter().for_each(|((start, end), distance)| {
-            println!("{} {} {}", start.1, end.1, distance);
+            println!("{} {} {}", start.v_id, end.v_id, distance);
         });
 
         struct Adjacency {
@@ -975,8 +1006,14 @@ fn analyze_collisions() {
             fn get(&self, key: u32) -> HashMap<u32, u64> {
                 self.matrix
                     .iter()
-                    .filter(|(k, _)| k.0 .1 == key || k.1 .1 == key)
-                    .map(|(k, v)| if k.0 .1 == key { (k.1 .1, *v) } else { (k.0 .1, *v) })
+                    .filter(|(k, _)| k.0.v_id == key || k.1.v_id == key)
+                    .map(|(k, v)| {
+                        if k.0.v_id == key {
+                            (k.1.v_id, *v)
+                        } else {
+                            (k.0.v_id, *v)
+                        }
+                    })
                     .collect()
             }
             fn neighbors2(&self, key: u32) -> (u32, u32) {
@@ -996,7 +1033,7 @@ fn analyze_collisions() {
             matrix: adjacency_matrix,
         };
 
-        let first_node = adjacency.matrix.iter().next().unwrap().0 .0 .1;
+        let first_node = adjacency.matrix.iter().next().unwrap().0 .0.v_id;
         let most_distant = adjacency.get(first_node).into_iter().max_by_key(|(_, d)| *d).unwrap();
         println!("Most distant: {:?}", &most_distant);
 
@@ -1015,7 +1052,7 @@ fn analyze_collisions() {
             }
         }
         let mut edges = HashSet::default();
-        let keys = collisions.iter().map(|x| x.1).collect::<HashSet<_>>();
+        let keys = collisions.iter().map(|x| x.v_id).collect::<HashSet<_>>();
         keys.into_iter().for_each(|key| {
             /* if key == most_distant.0 || key == other_end.0 {
                 edges.insert(Edge::new(key, adjacency.neighbor1(key)));
@@ -1061,7 +1098,7 @@ fn analyze_collisions() {
 
     let h_candidates: HashSet<_> = vec![7317].into_iter().collect();
     let horizontal_id = 7317;
-    create_collision_graph(horizontal_id, &colls);
+    create_collision_graph(horizontal_id, &colls.into_iter().map(|x| x.into()).collect::<Vec<_>>());
 
     // create dot file for vertical connections
     /* let vertical_connections = colls
