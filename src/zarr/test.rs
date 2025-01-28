@@ -15,7 +15,10 @@ use rayon::iter::IntoParallelRefIterator;
 use std::{
     cmp::Reverse,
     collections::BinaryHeap,
+    fmt::Debug,
+    fmt::Display,
     fs::{File, OpenOptions},
+    hash::Hash,
     io::{BufReader, Write},
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -840,104 +843,108 @@ fn analyze_collisions() {
         }
     }
 
-    fn create_collision_graph(horizontal_id: u32, colls: &[Collision]) {
-        let collisions = colls.iter().filter(|c| c.h_id == horizontal_id).collect::<Vec<_>>();
+    const DOWNSCALE: i32 = 2;
+
+    struct Map {
+        map: HashSet<[u16; 3]>,
+    }
+    impl Map {
+        fn new(cloud: &PointCloudFile) -> Self {
+            let map = cloud.iter().map(|x| x.map(|x| x / DOWNSCALE as u16)).collect();
+            Self { map }
+        }
+        fn contains(&self, point: [u16; 3]) -> bool {
+            self.map.contains(&point)
+        }
+        fn neighbors(&self, point: [u16; 3]) -> Vec<[u16; 3]> {
+            let mut neighbors = vec![];
+            let candidates = [
+                // six directions, manhattan distance is good enough
+                [DOWNSCALE, 0, 0],
+                [-DOWNSCALE, 0, 0],
+                [0, DOWNSCALE, 0],
+                [0, -DOWNSCALE, 0],
+                [0, 0, DOWNSCALE],
+                [0, 0, -DOWNSCALE],
+            ];
+            for [dx, dy, dz] in candidates {
+                let neighbor = [
+                    (point[0] as i32 + dx) / DOWNSCALE as i32,
+                    (point[1] as i32 + dy) / DOWNSCALE as i32,
+                    (point[2] as i32 + dz) / DOWNSCALE as i32,
+                ];
+                if neighbor.iter().all(|x| *x >= 0 && *x < u16::MAX as i32) {
+                    let neighbor = [neighbor[0] as u16, neighbor[1] as u16, neighbor[2] as u16];
+                    if self.map.contains(&neighbor) {
+                        neighbors.push(neighbor.map(|x| x as u16 * DOWNSCALE as u16));
+                    }
+                }
+            }
+            neighbors
+        }
+    }
+
+    struct DistanceMap {
+        distances: HashMap<[u16; 3], i32>,
+    }
+    impl DistanceMap {
+        fn get(&self, point: &[u16; 3]) -> Option<i32> {
+            self.distances
+                .get(&point.map(|x| x as u16 / DOWNSCALE as u16 * DOWNSCALE as u16))
+                .copied()
+        }
+    }
+
+    fn dijkstra(start: [u16; 3], map: &Map) -> DistanceMap {
+        let mut distances = HashMap::default();
+        let mut queue: PriorityQueue<[u16; 3], Reverse<i32>> = PriorityQueue::new();
+        queue.push(start, Reverse(0));
+        distances.insert(start, 0);
+        let mut step = 0;
+        while let Some((p, Reverse(distance))) = queue.pop() {
+            for neighbor in map.neighbors(p) {
+                let new_distance = distance + 1;
+                if new_distance < *distances.get(&neighbor).unwrap_or(&i32::MAX) {
+                    distances.insert(neighbor, new_distance);
+                    queue.push_increase(neighbor, Reverse(new_distance));
+                }
+            }
+            step += 1;
+            if step % 1000000 == 0 {
+                println!("At step {}, queue_size: {}", step, queue.len());
+            }
+        }
+        DistanceMap { distances }
+    }
+
+    fn create_collision_graph<
+        AlongId: Hash + Eq + Copy + Display + Ord + Debug,
+        AcrossId: Hash + Eq + Copy + Display + Ord + Debug,
+    >(
+        along_id: AlongId,
+        colls: &[Collision],
+        get_along_id: impl Fn(&Collision) -> AlongId,
+        get_across_id: impl Fn(&Collision) -> AcrossId,
+        cloud: &PointCloudFile,
+    ) {
+        let collisions = colls.iter().filter(|c| get_along_id(c) == along_id).collect::<Vec<_>>();
 
         println!("total collisions: {}", collisions.len());
-
-        let cloud = PointCloudFile::new(horizontal_id, &format!("data/classes/class-2/{:06}", horizontal_id));
-        println!("cloud: {}", cloud.num_elements);
-
-        //type Collision = (u32, u32, u16, u16, u16);
-
-        const DOWNSCALE: i32 = 2;
-
-        struct Map {
-            map: HashSet<[u16; 3]>,
-        }
-        impl Map {
-            fn new(cloud: &PointCloudFile) -> Self {
-                let map = cloud.iter().map(|x| x.map(|x| x / DOWNSCALE as u16)).collect();
-                Self { map }
-            }
-            fn contains(&self, point: [u16; 3]) -> bool {
-                self.map.contains(&point)
-            }
-            fn neighbors(&self, point: [u16; 3]) -> Vec<[u16; 3]> {
-                let mut neighbors = vec![];
-                let candidates = [
-                    // six directions, manhattan distance is good enough
-                    [DOWNSCALE, 0, 0],
-                    [-DOWNSCALE, 0, 0],
-                    [0, DOWNSCALE, 0],
-                    [0, -DOWNSCALE, 0],
-                    [0, 0, DOWNSCALE],
-                    [0, 0, -DOWNSCALE],
-                ];
-                for [dx, dy, dz] in candidates {
-                    let neighbor = [
-                        (point[0] as i32 + dx) / DOWNSCALE as i32,
-                        (point[1] as i32 + dy) / DOWNSCALE as i32,
-                        (point[2] as i32 + dz) / DOWNSCALE as i32,
-                    ];
-                    if neighbor.iter().all(|x| *x >= 0 && *x < u16::MAX as i32) {
-                        let neighbor = [neighbor[0] as u16, neighbor[1] as u16, neighbor[2] as u16];
-                        if self.map.contains(&neighbor) {
-                            neighbors.push(neighbor.map(|x| x as u16 * DOWNSCALE as u16));
-                        }
-                    }
-                }
-                neighbors
-            }
-        }
-
-        struct DistanceMap {
-            distances: HashMap<[u16; 3], i32>,
-        }
-        impl DistanceMap {
-            fn get(&self, point: &[u16; 3]) -> Option<i32> {
-                self.distances
-                    .get(&point.map(|x| x as u16 / DOWNSCALE as u16 * DOWNSCALE as u16))
-                    .copied()
-            }
-        }
-
-        fn dijkstra(start: [u16; 3], map: &Map) -> DistanceMap {
-            let mut distances = HashMap::default();
-            let mut queue: PriorityQueue<[u16; 3], Reverse<i32>> = PriorityQueue::new();
-            queue.push(start, Reverse(0));
-            distances.insert(start, 0);
-            let mut step = 0;
-            while let Some((p, Reverse(distance))) = queue.pop() {
-                for neighbor in map.neighbors(p) {
-                    let new_distance = distance + 1;
-                    if new_distance < *distances.get(&neighbor).unwrap_or(&i32::MAX) {
-                        distances.insert(neighbor, new_distance);
-                        queue.push_increase(neighbor, Reverse(new_distance));
-                    }
-                }
-                step += 1;
-                if step % 1000000 == 0 {
-                    println!("At step {}, queue_size: {}", step, queue.len());
-                }
-            }
-            DistanceMap { distances }
-        }
 
         let map = Map::new(&cloud);
         println!("Map entries: {}", map.map.len());
 
         // calculate the geodesic adjacency matrix for all collision points on h22554
-        let mut adjacency_matrix: HashMap<(Collision, Collision), u64> = HashMap::default();
+        let mut adjacency_matrix: HashMap<(AcrossId, AcrossId), u64> = HashMap::default();
         for start_coll @ Collision {
-            v_id: start_id_v,
             x: start_x,
             y: start_y,
             z: start_z,
             ..
         } in &collisions
         {
-            println!("At start_id_v: {}", start_id_v);
+            let start_id_across = get_across_id(start_coll);
+            println!("At start_id_across: {}", start_id_across);
             let start = [*start_x, *start_y, *start_z];
             // collision point might near the surface of the cloud but not contained in it
             let start = if !map.contains(start) {
@@ -957,14 +964,14 @@ fn analyze_collisions() {
             println!("distances: {}", distances.distances.len());
 
             for end_coll @ Collision {
-                v_id: end_id_v,
                 x: end_x,
                 y: end_y,
                 z: end_z,
                 ..
             } in &collisions
             {
-                if start_id_v >= end_id_v {
+                let end_id_across = get_across_id(end_coll);
+                if start_id_across >= end_id_across {
                     continue;
                 }
                 let end = [*end_x, *end_y, *end_z];
@@ -982,7 +989,7 @@ fn analyze_collisions() {
                     end
                 };
                 if let Some(distance) = distances.get(&end) {
-                    adjacency_matrix.insert((**start_coll, **end_coll), distance as u64);
+                    adjacency_matrix.insert((start_id_across, end_id_across), distance as u64);
                 } else {
                     println!("No distance found for {:?}", end_coll);
                 }
@@ -990,33 +997,27 @@ fn analyze_collisions() {
         }
 
         println!("Adjacency matrix: {}", adjacency_matrix.len());
-        adjacency_matrix.iter().for_each(|((start, end), distance)| {
+        /* adjacency_matrix.iter().for_each(|((start, end), distance)| {
             println!("{} {} {}", start.v_id, end.v_id, distance);
-        });
+        }); */
 
-        struct Adjacency {
-            matrix: HashMap<(Collision, Collision), u64>,
+        struct Adjacency<AcrossId: Hash + Eq + Copy + Ord> {
+            matrix: HashMap<(AcrossId, AcrossId), u64>,
         }
-        impl Adjacency {
-            fn get_distance(&self, key1: u32, key2: u32) -> Option<u64> {
+        impl<AcrossId: Hash + Eq + Copy + Ord> Adjacency<AcrossId> {
+            fn get_distance(&self, key1: AcrossId, key2: AcrossId) -> Option<u64> {
                 let min = key1.min(key2);
                 let max = key1.max(key2);
                 self.get(min).get(&max).copied()
             }
-            fn get(&self, key: u32) -> HashMap<u32, u64> {
+            fn get(&self, key: AcrossId) -> HashMap<AcrossId, u64> {
                 self.matrix
                     .iter()
-                    .filter(|(k, _)| k.0.v_id == key || k.1.v_id == key)
-                    .map(|(k, v)| {
-                        if k.0.v_id == key {
-                            (k.1.v_id, *v)
-                        } else {
-                            (k.0.v_id, *v)
-                        }
-                    })
+                    .filter(|(k, _)| k.0 == key || k.1 == key)
+                    .map(|(k, v)| if k.0 == key { (k.1, *v) } else { (k.0, *v) })
                     .collect()
             }
-            fn neighbors2(&self, key: u32) -> (u32, u32) {
+            /* fn neighbors2(&self, key: u32) -> (u32, u32) {
                 let mut neighbors = self.get(key);
                 let mut next2 = neighbors
                     .into_iter()
@@ -1027,13 +1028,13 @@ fn analyze_collisions() {
             }
             fn neighbor1(&self, key: u32) -> u32 {
                 self.neighbors2(key).0
-            }
+            } */
         }
         let adjacency = Adjacency {
             matrix: adjacency_matrix,
         };
 
-        let first_node = adjacency.matrix.iter().next().unwrap().0 .0.v_id;
+        let first_node: AcrossId = adjacency.matrix.iter().next().unwrap().0 .0;
         let most_distant = adjacency.get(first_node).into_iter().max_by_key(|(_, d)| *d).unwrap();
         println!("Most distant: {:?}", &most_distant);
 
@@ -1045,14 +1046,14 @@ fn analyze_collisions() {
         println!("Other end: {:?}", other_end);
 
         #[derive(PartialEq, Eq, Hash)]
-        struct Edge(u32, u32);
-        impl Edge {
-            fn new(id1: u32, id2: u32) -> Self {
+        struct Edge<AcrossId: Ord + Copy>(AcrossId, AcrossId);
+        impl<AcrossId: Ord + Copy> Edge<AcrossId> {
+            fn new(id1: AcrossId, id2: AcrossId) -> Self {
                 Self(id1.min(id2), id1.max(id2))
             }
         }
         let mut edges = HashSet::default();
-        let keys = collisions.iter().map(|x| x.v_id).collect::<HashSet<_>>();
+        let keys = collisions.iter().map(|x| get_across_id(x)).collect::<HashSet<_>>();
         keys.into_iter().for_each(|key| {
             /* if key == most_distant.0 || key == other_end.0 {
                 edges.insert(Edge::new(key, adjacency.neighbor1(key)));
@@ -1077,7 +1078,7 @@ fn analyze_collisions() {
         });
 
         // create dot file
-        let mut file = File::create(&format!("data/h{:06}.dot", horizontal_id)).unwrap();
+        let mut file = File::create(&format!("data/h{:06}.dot", along_id)).unwrap();
         file.write(b"graph {\n").unwrap();
         file.write(b"edge [len=2.0]\n").unwrap();
         edges.iter().for_each(|Edge(v1, v2)| {
@@ -1086,7 +1087,7 @@ fn analyze_collisions() {
             file.write(
                 format!(
                     "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}];\n",
-                    horizontal_id, v1, horizontal_id, v2, distance, distance
+                    along_id, v1, along_id, v2, distance, distance
                 )
                 .as_bytes(),
             )
@@ -1098,7 +1099,14 @@ fn analyze_collisions() {
 
     let h_candidates: HashSet<_> = vec![7317].into_iter().collect();
     let horizontal_id = 7317;
-    create_collision_graph(horizontal_id, &colls.into_iter().map(|x| x.into()).collect::<Vec<_>>());
+    let cloud = PointCloudFile::new(horizontal_id, &format!("data/classes/class-2/{:06}", horizontal_id));
+    create_collision_graph(
+        horizontal_id,
+        &colls.into_iter().map(|x| x.into()).collect::<Vec<_>>(),
+        |x| x.h_id,
+        |x| x.v_id,
+        &cloud,
+    );
 
     // create dot file for vertical connections
     /* let vertical_connections = colls
