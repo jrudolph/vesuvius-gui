@@ -627,10 +627,10 @@ impl PointCloudCollection {
 }
 
 fn collide(cloud1: &PointCloudFile, cloud2: &PointCloudFile) -> Option<[u16; 3]> {
-    println!(
+    /* println!(
         "Colliding v{} ({}) h{} ({})",
         cloud1.id, cloud1.num_elements, cloud2.id, cloud2.num_elements
-    );
+    ); */
     // figure out all point pairs that are within 4 pixels of each other
     let mut grid: HashMap<[u16; 3], (bool, bool)> = HashMap::default();
     cloud1.iter().for_each(|coords| {
@@ -721,10 +721,12 @@ fn analyze_fibers() {
         })
         .collect::<Vec<_>>();
     //println!("Total point pairs to consider: {}", pairs);
+    use indicatif::ParallelProgressIterator;
     use rayon::prelude::*;
 
     let mut colls = pairs
         .par_iter()
+        .progress_count(pairs.len() as u64)
         .flat_map(|(id1, id2, c1, c2, p)| {
             let cross = collide(class1.clouds.get(id1).unwrap(), class2.clouds.get(id2).unwrap());
             match cross {
