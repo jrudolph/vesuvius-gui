@@ -23,6 +23,7 @@ egui_extras     = { version = "0.30", features = [ "all_loaders" ] }
 ehttp           = { version = "0.5", features = ["native-async"] }
 emath           = { version = "0.30"}
 futures         = { version = "0.3" }
+fxhash          = { version = "0.2" }
 image           = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg"] }
 imageproc       = { version = "0.25", default-features = false }
 indicatif       = { version = "0.17", features = ["rayon"]}
@@ -31,7 +32,7 @@ libm            = { version = "0.2" }
 log             = { version = "0.4" }
 lz4-compression = { version = "0.7" }
 num_cpus        = { version = "1" }
-priority-queue = "2.1.1"
+priority-queue  = { version = "2" }
 rayon           = { version = "1" }
 regex           = { version = "1", default-features=false, features = ["unicode-perl"] }
 ruzstd          = { version = "0.8" }

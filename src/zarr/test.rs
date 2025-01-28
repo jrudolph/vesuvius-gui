@@ -6,6 +6,7 @@ use crate::{
 };
 use egui::{Color32, ColorImage, Image, Label, Sense, TextureHandle, WidgetText};
 use egui_extras::{Column, TableBuilder};
+use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use image::{GenericImage, GenericImageView, Rgb};
 use itertools::Itertools;
 use memmap::MmapOptions;
@@ -13,7 +14,7 @@ use priority_queue::PriorityQueue;
 use rayon::iter::IntoParallelRefIterator;
 use std::{
     cmp::Reverse,
-    collections::{BinaryHeap, HashMap, HashSet},
+    collections::BinaryHeap,
     fs::{File, OpenOptions},
     io::{BufReader, Write},
     sync::{
@@ -21,6 +22,9 @@ use std::{
         Mutex,
     },
 };
+
+type HashMap<K, V> = FxHashMap<K, V>;
+type HashSet<K> = FxHashSet<K>;
 
 #[allow(dead_code)]
 struct SparsePointCloud {
@@ -308,7 +312,7 @@ pub struct ConnectedFullMapVolume2 {
 impl ConnectedFullMapVolume2 {
     #[allow(dead_code)]
     pub fn new() -> ConnectedFullMapVolume2 {
-        let file = File::open("data/fiber-points-connected-new2.map").unwrap();
+        let file = File::open("data/fiber-points-connected-new-255.map").unwrap();
         let map = unsafe { MmapOptions::new().map(&file) }.unwrap();
         let ids: &[u32] = unsafe { std::slice::from_raw_parts_mut(map.as_ptr() as *mut u32, map.len() / 4) };
 
@@ -416,7 +420,7 @@ fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
         unsafe { std::slice::from_raw_parts_mut(map.as_mut().as_mut_ptr() as *mut u32, map.len() / 4) };
 
     let mut next_id: u32 = 1u32;
-    let mut classes: HashMap<u32, u32> = HashMap::new();
+    let mut classes: HashMap<u32, u32> = HashMap::default();
 
     fn index_of(x: usize, y: usize, z: usize) -> usize {
         ((z + 1 - CROP[2]) * CROP_SIZE[1] + (y + 1 - CROP[1])) * CROP_SIZE[0] + (x + 1 - CROP[0])
@@ -455,7 +459,7 @@ fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
                         }
                         next_id += 1;
                     } else {
-                        let mut set = HashSet::new();
+                        let mut set = HashSet::default();
                         set.insert(nx);
                         set.insert(ny);
                         set.insert(nz);
@@ -495,6 +499,7 @@ fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
     }
     let vals = classes.values().cloned().collect::<HashSet<_>>();
     println!("Classes: {}", vals.len());
+    println!("Resolving aliases");
 
     ids.iter_mut().for_each(|v| {
         if *v != 0 {
@@ -515,6 +520,8 @@ fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
     }
     let mut class_writers: HashMap<u32, std::io::BufWriter<std::fs::File>> =
         class_ids.values().map(|&v| (v, point_file(target_class, v))).collect();
+
+    println!("Writing component files");
 
     for z in CROP[2]..CROP[2] + CROP_SIZE[2] {
         if z % 100 == 0 {
@@ -541,24 +548,26 @@ fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
 
 #[test]
 fn test_connected_components() {
-    let zarr: ZarrArray<3, u8> = ZarrArray::from_path("/home/johannes/tmp/pap/bruniss/mask-vt-hz-base-64.zarr");
+    let zarr: ZarrArray<3, u8> =
+        ZarrArray::from_path("/home/johannes/tmp/pap/bruniss/scrolls/s1/fibers/vt_regular.zarr");
     let mut zarr = zarr.into_ctx();
-    connected_components2(&mut zarr, 1);
-    connected_components2(&mut zarr, 2);
+    connected_components2(&mut zarr, 255);
+    //connected_components2(&mut zarr, 2);
 }
 
 pub struct PointCloudFile {
+    pub id: u32,
     map: memmap::Mmap,
     pub num_elements: usize,
 }
 impl PointCloudFile {
     #[allow(dead_code)]
-    pub fn new(file_name: &str) -> PointCloudFile {
+    pub fn new(id: u32, file_name: &str) -> PointCloudFile {
         let file = File::open(file_name).unwrap();
         let map = unsafe { MmapOptions::new().map(&file) }.unwrap();
         let num_elements = map.len() / 6;
 
-        PointCloudFile { map, num_elements }
+        PointCloudFile { id, map, num_elements }
     }
     fn at_idx(&self, idx: usize) -> [u16; 3] {
         let idx = idx * 6;
@@ -585,7 +594,7 @@ impl PointCloudCollection {
                 let path = f.path();
                 let file_name = path.to_str().unwrap();
                 let id = path.file_name().unwrap().to_str().unwrap().parse::<u32>().unwrap();
-                (id, PointCloudFile::new(file_name))
+                (id, PointCloudFile::new(id, file_name))
             })
             .sorted_by_key(|x| x.0)
             .collect::<HashMap<_, _>>();
@@ -593,9 +602,9 @@ impl PointCloudCollection {
         /* clouds.iter().for_each(|(id, cloud)| {
             println!("Class {}: {}", id, cloud.num_elements);
         }); */
-        let mut grid: HashMap<[u16; 3], Vec<u32>> = HashMap::new();
+        let mut grid: HashMap<[u16; 3], Vec<u32>> = HashMap::default();
         clouds.iter().for_each(|(id, cloud)| {
-            let mut grids = HashSet::new();
+            let mut grids: HashSet<[u16; 3]> = HashSet::default();
             cloud.iter().for_each(|coords| {
                 // create a grid of 64x64x64
                 let grid_coords = coords.map(|x| x / 32 * 32);
@@ -618,8 +627,12 @@ impl PointCloudCollection {
 }
 
 fn collide(cloud1: &PointCloudFile, cloud2: &PointCloudFile) -> Option<[u16; 3]> {
+    println!(
+        "Colliding v{} ({}) h{} ({})",
+        cloud1.id, cloud1.num_elements, cloud2.id, cloud2.num_elements
+    );
     // figure out all point pairs that are within 4 pixels of each other
-    let mut grid: HashMap<[u16; 3], (bool, bool)> = HashMap::new();
+    let mut grid: HashMap<[u16; 3], (bool, bool)> = HashMap::default();
     cloud1.iter().for_each(|coords| {
         let grid_coords = coords.map(|x| x / 4 * 4);
         grid.entry(grid_coords).or_insert((false, false)).0 = true;
@@ -663,7 +676,9 @@ fn collide(cloud1: &PointCloudFile, cloud2: &PointCloudFile) -> Option<[u16; 3]>
 
 #[test]
 fn analyze_fibers() {
+    println!("Loading class 1");
     let class1 = PointCloudCollection::load_from_dir("data/classes/class-1");
+    println!("Loading class 2");
     let class2 = PointCloudCollection::load_from_dir("data/classes/class-2");
 
     let all_grids = class1.grid.keys().chain(class2.grid.keys()).collect::<HashSet<_>>();
@@ -817,7 +832,7 @@ fn analyze_collisions() {
 
     println!("total collisions: {}", collisions.len());
 
-    let cloud = PointCloudFile::new(&format!("data/classes/class-2/{:06}", horizontal_id));
+    let cloud = PointCloudFile::new(horizontal_id, &format!("data/classes/class-2/{:06}", horizontal_id));
     println!("cloud: {}", cloud.num_elements);
 
     type Collision = (u32, u32, u16, u16, u16);
@@ -875,7 +890,7 @@ fn analyze_collisions() {
     }
 
     fn dijkstra(start: [u16; 3], map: &Map) -> DistanceMap {
-        let mut distances = HashMap::new();
+        let mut distances = HashMap::default();
         let mut queue: PriorityQueue<[u16; 3], Reverse<i32>> = PriorityQueue::new();
         queue.push(start, Reverse(0));
         distances.insert(start, 0);
@@ -900,7 +915,7 @@ fn analyze_collisions() {
     println!("Map entries: {}", map.map.len());
 
     // calculate the geodesic adjacency matrix for all collision points on h22554
-    let mut adjacency_matrix: HashMap<(Collision, Collision), u64> = HashMap::new();
+    let mut adjacency_matrix: HashMap<(Collision, Collision), u64> = HashMap::default();
     for start_coll @ (_, start_id_v, start_x, start_y, start_z) in &collisions {
         println!("At start_id_v: {}", start_id_v);
         let start = [*start_x, *start_y, *start_z];
@@ -1003,7 +1018,7 @@ fn analyze_collisions() {
             Self(id1.min(id2), id1.max(id2))
         }
     }
-    let mut edges = HashSet::new();
+    let mut edges = HashSet::default();
     let keys = collisions.iter().map(|x| x.1).collect::<HashSet<_>>();
     keys.into_iter().for_each(|key| {
         /* if key == most_distant.0 || key == other_end.0 {
@@ -1178,8 +1193,8 @@ impl CollisionPanel {
             .filter(|(id1, id2, x, y, z)| selected_vertical.contains(id2))
             .collect::<Vec<_>>();
 
-        let mut neighbor_map_h: HashMap<u32, Vec<u32>> = HashMap::new();
-        let mut neighbor_map_v: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut neighbor_map_h: HashMap<u32, Vec<u32>> = HashMap::default();
+        let mut neighbor_map_v: HashMap<u32, Vec<u32>> = HashMap::default();
         filtered_colls.iter().for_each(|(id1, id2, x, y, z)| {
             neighbor_map_h.entry(*id1).or_insert(vec![]).push(*id2);
             neighbor_map_v.entry(*id2).or_insert(vec![]).push(*id1);
@@ -1387,7 +1402,7 @@ fn connected_components(array: &ZarrContextBase<3> /* , full: &FullMapVolume */)
     (20..shape[0] as u16).into_par_iter().for_each(|z| {
         let array = array.into_ctx();
         let mut work_list = vec![];
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         let mut selected = vec![];
         let mut selected_coords = vec![];
 
