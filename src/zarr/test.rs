@@ -20,6 +20,7 @@ use std::{
     hash::Hash,
     io::{BufReader, BufWriter, Write},
     path::Path,
+    str::FromStr,
     sync::{
         atomic::{AtomicU32, Ordering},
         Mutex,
@@ -971,8 +972,8 @@ fn analyze_collisions() {
     }
 
     trait Direction {
-        type AlongId: Hash + Eq + Copy + Display + Ord + Debug;
-        type AcrossId: Hash + Eq + Copy + Display + Ord + Debug;
+        type AlongId: Hash + Eq + Copy + Display + Ord + Debug + FromStr<Err: Debug>;
+        type AcrossId: Hash + Eq + Copy + Display + Ord + Debug + FromStr<Err: Debug>;
 
         fn get_along_id(c: &Collision) -> Self::AlongId;
         fn get_across_id(c: &Collision) -> Self::AcrossId;
@@ -1107,6 +1108,41 @@ fn analyze_collisions() {
         adjacency_matrix
     }
 
+    fn create_or_cached_adjacency_matrix<D: Direction>(
+        along_id: D::AlongId,
+        collisions: &[&Collision],
+        cloud: &PointCloudFile,
+    ) -> HashMap<(D::AcrossId, D::AcrossId), u64> {
+        let file_name = format!("data/fiber-graph-adjacency/{}{}.txt", D::along_id_prefix(), along_id);
+        // simple format: lines with `<across_id> <across_id> <distance>`
+        if Path::new(&file_name).exists() {
+            let file = File::open(file_name).unwrap();
+            let mut reader = BufReader::new(file);
+            let mut adjacency_matrix = HashMap::default();
+            for line in reader.lines() {
+                let line = line.unwrap();
+                let parts = line.split_whitespace().collect::<Vec<_>>();
+                let across_id1 = parts[0].parse::<D::AcrossId>().unwrap();
+                let across_id2 = parts[1].parse::<D::AcrossId>().unwrap();
+                let distance = parts[2].parse::<u64>().unwrap();
+                adjacency_matrix.insert((across_id1, across_id2), distance);
+            }
+            adjacency_matrix
+        } else {
+            let adjacency_matrix = create_adjacency_matrix::<D>(along_id, collisions, cloud);
+            let tmp_file = format!("{}.tmp", file_name);
+            let dir = Path::new(&file_name).parent().unwrap();
+            std::fs::create_dir_all(dir).unwrap();
+            let file = File::create(&tmp_file).unwrap();
+            let mut writer = BufWriter::new(file);
+            adjacency_matrix.iter().for_each(|((start, end), distance)| {
+                writeln!(writer, "{} {} {}", start, end, distance).unwrap();
+            });
+            std::fs::rename(tmp_file, file_name).unwrap();
+            adjacency_matrix
+        }
+    }
+
     fn create_collision_graph<D: Direction>(
         along_id: D::AlongId,
         colls: &[Collision],
@@ -1116,7 +1152,7 @@ fn analyze_collisions() {
             .iter()
             .filter(|c| D::get_along_id(c) == along_id)
             .collect::<Vec<_>>();
-        let adjacency_matrix = create_adjacency_matrix::<D>(along_id, &collisions, cloud);
+        let adjacency_matrix = create_or_cached_adjacency_matrix::<D>(along_id, &collisions, cloud);
 
         //println!("Adjacency matrix: {}", adjacency_matrix.len());
         /* adjacency_matrix.iter().for_each(|((start, end), distance)| {
