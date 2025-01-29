@@ -15,11 +15,11 @@ use rayon::iter::IntoParallelRefIterator;
 use std::{
     cmp::Reverse,
     collections::BinaryHeap,
-    fmt::Debug,
-    fmt::Display,
+    fmt::{Debug, Display},
     fs::{File, OpenOptions},
     hash::Hash,
-    io::{BufReader, Write},
+    io::{BufReader, BufWriter, Write},
+    path::Path,
     sync::{
         atomic::{AtomicU32, Ordering},
         Mutex,
@@ -293,14 +293,14 @@ fn color_from_palette(idx: usize) -> Color32 {
     from_hsb(h, 1.0, b)
 }
 
-// const CROP: [usize; 3] = [2400, 3000, 9300];
-// const CROP_SIZE: [usize; 3] = [400, 1000, 1000];
+// const CROP: [usize; 3] = [4400, 3300, 10550];
+// const CROP_SIZE: [usize; 3] = [100, 100, 100];
 
 /* const CROP: [usize; 3] = [2400, 3000, 9300];
 const CROP_SIZE: [usize; 3] = [2000, 2000, 2000]; */
 
 const CROP: [usize; 3] = [2400, 3000, 9300];
-const CROP_SIZE: [usize; 3] = [2000, 2000, 2000];
+const CROP_SIZE: [usize; 3] = [1000, 1000, 5000];
 
 /* const CROP: [usize; 3] = [2585, 3013, 9300];
 const CROP_SIZE: [usize; 3] = [30, 45, 1]; */
@@ -758,7 +758,7 @@ fn analyze_fibers() {
         })
         .collect::<Vec<_>>();
     //println!("Total point pairs to consider: {}", pairs);
-    use indicatif::ParallelProgressIterator;
+    use indicatif::{ParallelProgressIterator, ProgressIterator};
     use rayon::prelude::*;
 
     let mut colls = pairs
@@ -951,6 +951,25 @@ fn analyze_collisions() {
         DistanceMap { distances }
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    struct CollisionPoint {
+        horizontal_id: u32,
+        vertical_id: u32,
+    }
+    impl CollisionPoint {
+        fn new(horizontal_id: u32, vertical_id: u32) -> Self {
+            Self {
+                horizontal_id,
+                vertical_id,
+            }
+        }
+    }
+    struct GlobalEdge {
+        p1: CollisionPoint,
+        p2: CollisionPoint,
+        distance: u64,
+    }
+
     fn create_collision_graph<
         AlongId: Hash + Eq + Copy + Display + Ord + Debug,
         AcrossId: Hash + Eq + Copy + Display + Ord + Debug,
@@ -959,11 +978,19 @@ fn analyze_collisions() {
         colls: &[Collision],
         get_along_id: impl Fn(&Collision) -> AlongId,
         get_across_id: impl Fn(&Collision) -> AcrossId,
+        create_collision_point: impl Fn(AlongId, AcrossId) -> CollisionPoint,
         cloud: &PointCloudFile,
-    ) {
+        along_id_prefix: &str,
+        across_id_prefix: &str,
+    ) -> Vec<GlobalEdge> {
         let collisions = colls.iter().filter(|c| get_along_id(c) == along_id).collect::<Vec<_>>();
 
-        println!("total collisions: {}", collisions.len());
+        println!(
+            "At {}{} total collisions: {}",
+            along_id_prefix,
+            along_id,
+            collisions.len()
+        );
 
         let map = Map::new(&cloud);
         println!("Map entries: {}", map.map.len());
@@ -978,7 +1005,10 @@ fn analyze_collisions() {
         } in &collisions
         {
             let start_id_across = get_across_id(start_coll);
-            println!("At start_id_across: {}", start_id_across);
+            println!(
+                "At {}{} start_id_across: {}",
+                along_id_prefix, along_id, start_id_across
+            );
             let start = [*start_x, *start_y, *start_z];
             // collision point might near the surface of the cloud but not contained in it
             let start = if !map.contains(start) {
@@ -1051,23 +1081,27 @@ fn analyze_collisions() {
                     .map(|(k, v)| if k.0 == key { (k.1, *v) } else { (k.0, *v) })
                     .collect()
             }
-            /* fn neighbors2(&self, key: u32) -> (u32, u32) {
+            fn neighbors2(&self, key: AcrossId) -> [(AcrossId, u64); 2] {
                 let mut neighbors = self.get(key);
                 let mut next2 = neighbors
                     .into_iter()
                     //.filter(|(_, dist)| *dist > 30) // FIXME: hacky way to ignore points that are too close
                     .sorted_by_key(|(id, dist)| *dist)
                     .take(2);
-                (next2.next().unwrap().0, next2.next().unwrap().0)
+                [next2.next().unwrap(), next2.next().unwrap()]
             }
-            fn neighbor1(&self, key: u32) -> u32 {
-                self.neighbors2(key).0
-            } */
+            fn neighbor1(&self, key: AcrossId) -> (AcrossId, u64) {
+                //self.neighbors2(key)[0]
+                self.get(key).into_iter().min_by_key(|(_, d)| *d).unwrap()
+            }
         }
         let adjacency = Adjacency {
             matrix: adjacency_matrix,
         };
 
+        if adjacency.matrix.is_empty() {
+            return vec![];
+        }
         let first_node: AcrossId = adjacency.matrix.iter().next().unwrap().0 .0;
         let most_distant = adjacency.get(first_node).into_iter().max_by_key(|(_, d)| *d).unwrap();
         println!("Most distant: {:?}", &most_distant);
@@ -1080,67 +1114,457 @@ fn analyze_collisions() {
         println!("Other end: {:?}", other_end);
 
         #[derive(PartialEq, Eq, Hash)]
-        struct Edge<AcrossId: Ord + Copy>(AcrossId, AcrossId);
+        struct Edge<AcrossId: Ord + Copy>(AcrossId, AcrossId, u64);
         impl<AcrossId: Ord + Copy> Edge<AcrossId> {
-            fn new(id1: AcrossId, id2: AcrossId) -> Self {
-                Self(id1.min(id2), id1.max(id2))
+            fn new(id1: AcrossId, id2: AcrossId, distance: u64) -> Self {
+                Self(id1.min(id2), id1.max(id2), distance)
             }
         }
         let mut edges = HashSet::default();
         let keys = collisions.iter().map(|x| get_across_id(x)).collect::<HashSet<_>>();
         keys.into_iter().for_each(|key| {
-            /* if key == most_distant.0 || key == other_end.0 {
-                edges.insert(Edge::new(key, adjacency.neighbor1(key)));
-            } else {
-                let (n1, n2) = adjacency.neighbors2(key);
-                edges.insert(Edge::new(key, n1));
-                edges.insert(Edge::new(key, n2));
-            } */
-            adjacency
-                .get(key)
-                .into_iter()
-                .sorted_by_key(|(_, d)| *d)
-                .take(3)
-                .for_each(|(other, d)| {
-                    edges.insert(Edge::new(key, other));
-                });
+            let num_neighbors = adjacency.get(key).len();
+            if (key == most_distant.0 || key == other_end.0) && num_neighbors >= 1 {
+                let (n1, d) = adjacency.neighbor1(key);
+                edges.insert(Edge::new(key, n1, d));
+            } else if num_neighbors >= 2 {
+                let [(n1, d1), (n2, d2)] = adjacency.neighbors2(key);
+                edges.insert(Edge::new(key, n1, d1));
+                edges.insert(Edge::new(key, n2, d2));
+            }
+            /* adjacency
+            .get(key)
+            .into_iter()
+            .sorted_by_key(|(_, d)| *d)
+            .take(2)
+            .for_each(|(other, d)| {
+                edges.insert(Edge::new(key, other, d));
+            }); */
         });
 
-        println!("Edges: {}", edges.len());
+        /* println!("Edges: {}", edges.len());
         edges.iter().for_each(|edge| {
             println!("{} {}", edge.0, edge.1);
-        });
+        }); */
 
-        // create dot file
-        let mut file = File::create(&format!("data/h{:06}.dot", along_id)).unwrap();
+        edges
+            .into_iter()
+            .map(|Edge(v1, v2, distance)| GlobalEdge {
+                p1: create_collision_point(along_id, v1),
+                p2: create_collision_point(along_id, v2),
+                distance,
+            })
+            .collect()
+    }
+
+    fn load_edges_from_file(
+        along_id: u32,
+        along_prefix: &str,
+        create_collision_point: impl Fn(u32, u32) -> CollisionPoint,
+    ) -> Option<Vec<GlobalEdge>> {
+        let file_name = format!("data/fiber-graph/{}/{}.txt", along_prefix, along_id);
+        if !Path::new(&file_name).exists() {
+            return None;
+        }
+        let file = File::open(file_name).unwrap();
+        let mut reader = BufReader::new(file);
+        let mut lines = reader.lines();
+        let mut edges = vec![];
+        while let Some(Ok(line)) = lines.next() {
+            let parts = line.split_whitespace().collect::<Vec<_>>();
+            let start_across_id = parts[0].parse::<u32>().unwrap();
+            let end_across_id = parts[1].parse::<u32>().unwrap();
+            let distance = parts[2].parse::<u64>().unwrap();
+            edges.push(GlobalEdge {
+                p1: create_collision_point(along_id, start_across_id),
+                p2: create_collision_point(along_id, end_across_id),
+                distance,
+            });
+        }
+        Some(edges)
+    }
+    fn save_edges_to_file(
+        edges: &[GlobalEdge],
+        along_id: u32,
+        along_prefix: &str,
+        get_across_id: impl Fn(&CollisionPoint) -> u32,
+    ) {
+        let dir = format!("data/fiber-graph/{}", along_prefix);
+        std::fs::create_dir_all(dir.clone()).unwrap();
+
+        let file = File::create(format!("{}/{}.txt", dir, along_id)).unwrap();
+        let mut writer = BufWriter::new(file);
+        edges.iter().for_each(|edge| {
+            writeln!(
+                writer,
+                "{} {} {}",
+                get_across_id(&edge.p1),
+                get_across_id(&edge.p2),
+                edge.distance
+            )
+            .unwrap();
+        });
+    }
+
+    fn create_horizontal_graph(horizontal_id: u32, colls: &[Collision]) -> Vec<GlobalEdge> {
+        if let Some(edges) = load_edges_from_file(horizontal_id, "h", |h, v| CollisionPoint::new(h, v)) {
+            return edges;
+        }
+
+        let cloud = PointCloudFile::new(horizontal_id, &format!("data/classes/class-2/{:06}", horizontal_id));
+        let edges = create_collision_graph(
+            horizontal_id,
+            &colls,
+            |x| x.h_id,
+            |x| x.v_id,
+            |h, v| CollisionPoint {
+                horizontal_id: h,
+                vertical_id: v,
+            },
+            &cloud,
+            "h",
+            "v",
+        );
+        save_edges_to_file(&edges, horizontal_id, "h", |x| x.vertical_id);
+        edges
+    }
+    fn create_vertical_graph(vertical_id: u32, colls: &[Collision]) -> Vec<GlobalEdge> {
+        if let Some(edges) = load_edges_from_file(vertical_id, "v", |v, h| CollisionPoint::new(h, v)) {
+            return edges;
+        }
+
+        let cloud = PointCloudFile::new(vertical_id, &format!("data/classes/class-1/{:06}", vertical_id));
+        let edges = create_collision_graph(
+            vertical_id,
+            &colls,
+            |x| x.v_id,
+            |x| x.h_id,
+            |v, h| CollisionPoint {
+                horizontal_id: h,
+                vertical_id: v,
+            },
+            &cloud,
+            "v",
+            "h",
+        );
+        save_edges_to_file(&edges, vertical_id, "v", |x| x.horizontal_id);
+        edges
+    }
+
+    fn write_dot_file(edges: &[GlobalEdge], file_name: &str) {
+        // create parent dirs
+        let dir = Path::new(file_name).parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let mut file = File::create(file_name).unwrap();
         file.write(b"graph {\n").unwrap();
         file.write(b"edge [len=2.0]\n").unwrap();
-        edges.iter().for_each(|Edge(v1, v2)| {
-            // add label with distance
-            let distance = adjacency.get_distance(*v1, *v2).unwrap();
+        edges.iter().for_each(|g| {
             file.write(
                 format!(
-                    "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}];\n",
-                    along_id, v1, along_id, v2, distance, distance
+                    "h{}_v{} -- h{}_v{} [label=\"{}\"]\n",
+                    g.p1.horizontal_id, g.p1.vertical_id, g.p2.horizontal_id, g.p2.vertical_id, g.distance
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        });
+        file.write(b"}\n").unwrap();
+    }
+
+    //let h_candidates: HashSet<_> = vec![7317].into_iter().collect();
+    //let horizontal_id = 7317;
+    let colls: Vec<Collision> = colls.into_iter().map(|x| x.into()).collect::<Vec<_>>();
+    let mut global_edges: Vec<GlobalEdge> = Vec::new();
+    /* global_edges.extend(create_horizontal_graph(7317, &colls));
+    global_edges.extend(create_horizontal_graph(672, &colls));
+    global_edges.extend(create_vertical_graph(13594, &colls));
+    global_edges.extend(create_vertical_graph(10281, &colls)); */
+
+    let horizontal_blacklist: HashSet<_> = vec![345].into_iter().collect();
+    let vertical_blacklist: HashSet<_> = vec![2131, 8168].into_iter().collect();
+
+    let all_horizontal_ids = colls
+        .iter()
+        .map(|x| x.h_id)
+        .filter(|x| !horizontal_blacklist.contains(x))
+        .collect::<HashSet<_>>();
+    let all_vertical_ids = colls
+        .iter()
+        .map(|x| x.v_id)
+        .filter(|x| !vertical_blacklist.contains(x))
+        .collect::<HashSet<_>>();
+
+    use indicatif::{ParallelProgressIterator, ProgressIterator};
+    use rayon::prelude::*;
+
+    let num_horizontal_ids = all_horizontal_ids.len();
+    let num_vertical_ids = all_vertical_ids.len();
+
+    all_horizontal_ids
+        .into_par_iter()
+        .progress_count(num_horizontal_ids as u64)
+        .map(|h| (h, create_horizontal_graph(h, &colls)))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|(h, edges)| {
+            write_dot_file(&edges, &format!("data/fiber-dot/h{}.dot", h));
+            global_edges.extend(edges);
+        });
+    all_vertical_ids
+        .into_par_iter()
+        .progress_count(num_vertical_ids as u64)
+        .map(|v| (v, create_vertical_graph(v, &colls)))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|(v, edges)| {
+            write_dot_file(&edges, &format!("data/fiber-dot/v{}.dot", v));
+            global_edges.extend(edges);
+        });
+
+    // create dot file
+    let mut file = File::create("data/global.dot").unwrap();
+    file.write(b"graph {\n").unwrap();
+    file.write(b"edge [len=2.0]\n").unwrap();
+    global_edges.iter().for_each(|g| {
+        // add label with distance
+        file.write(
+            format!(
+                "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}];\n",
+                g.p1.horizontal_id, g.p1.vertical_id, g.p2.horizontal_id, g.p2.vertical_id, g.distance, g.distance
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    });
+
+    file.write(b"}\n").unwrap();
+
+    let h_whitelist: HashSet<_> = vec![
+        351, 673, 934, 1049, 2063, 2380, 2970, 3036, 3158, 3177, 3181, 3260, 3637, 3791, 4505, 4685, 4785, 4869, 4881,
+        5017, 5113, 5275, 5332,
+    ]
+    .into_iter()
+    .collect();
+    let v_whitelist: HashSet<_> = vec![581, 4417, 5880, 6056, 8955].into_iter().collect();
+    let v_blacklist: HashSet<u32> = vec![].into_iter().collect();
+
+    let mut file = File::create("data/inc.dot").unwrap();
+    file.write(b"graph {\n").unwrap();
+    file.write(b"edge [len=2.0]\n").unwrap();
+    global_edges
+        .iter()
+        .filter(|g| {
+            h_whitelist.contains(&g.p1.horizontal_id)
+                || h_whitelist.contains(&g.p2.horizontal_id)
+                || v_whitelist.contains(&g.p1.vertical_id)
+                || v_whitelist.contains(&g.p2.vertical_id)
+        })
+        .filter(|g| !v_blacklist.contains(&g.p1.vertical_id) && !v_blacklist.contains(&g.p2.vertical_id))
+        .for_each(|g| {
+            let is_vertical = g.p1.vertical_id == g.p2.vertical_id;
+            let color = if is_vertical { "red" } else { "blue" };
+            // add label with distance
+            file.write(
+                format!(
+                    "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}, color={}];\n",
+                    g.p1.horizontal_id,
+                    g.p1.vertical_id,
+                    g.p2.horizontal_id,
+                    g.p2.vertical_id,
+                    g.distance,
+                    g.distance,
+                    color
                 )
                 .as_bytes(),
             )
             .unwrap();
         });
 
-        file.write(b"}\n").unwrap();
-    }
+    file.write(b"}\n").unwrap();
 
-    let h_candidates: HashSet<_> = vec![7317].into_iter().collect();
-    let horizontal_id = 7317;
-    let cloud = PointCloudFile::new(horizontal_id, &format!("data/classes/class-2/{:06}", horizontal_id));
-    create_collision_graph(
-        horizontal_id,
-        &colls.into_iter().map(|x| x.into()).collect::<Vec<_>>(),
-        |x| x.h_id,
-        |x| x.v_id,
-        &cloud,
-    );
+    {
+        let h_whitelist: HashSet<_> = vec![
+            3260, 351, 4785, 3036, 4881, 5275, 2970, 5332, 934, 5017, 3158, 3791, 3637, 3177, 3181,
+        ]
+        .into_iter()
+        .collect();
+        let v_whitelist: HashSet<_> = vec![8034, 5880, 7449, 761, 581, 6056, 4417].into_iter().collect();
+        let v_blacklist: HashSet<u32> = vec![].into_iter().collect();
+
+        // ignore these edges
+        //h5275_v8034 -- h5332_v8034 [label="75", weight=-75, color=red];
+        //h3181_v761 -- h3637_v761 [label="78", weight=-78, color=red];
+        //h934_v761 -- h2970_v761 [label="84", weight=-84, color=red];
+        //h934_v6056 -- h2970_v6056 [label="88", weight=-88, color=red];
+        //h934_v5880 -- h2970_v5880 [label="76", weight=-76, color=red];
+        //h3181_v581 -- h3637_v581 [label="80", weight=-80, color=red];
+        //h934_v581 -- h2970_v581 [label="89", weight=-89, color=red];
+        //h2970_v7449 -- h2970_v8034 [label="87", weight=-87, color=blue];
+        //h934_v7449 -- h2970_v7449 [label="79", weight=-79, color=red];
+        //h3181_v6056 -- h3637_v6056 [label="80", weight=-80, color=red];
+        //h3158_v6056 -- h3791_v6056 [label="98", weight=-98, color=red];
+        let ignore_edges: HashSet<_> = vec![
+            ((5275, 8034), (5332, 8034)),
+            ((3181, 761), (3637, 761)),
+            ((934, 761), (2970, 761)),
+            ((934, 6056), (2970, 6056)),
+            ((934, 5880), (2970, 5880)),
+            ((3181, 581), (3637, 581)),
+            ((934, 581), (2970, 581)),
+            ((2970, 7449), (2970, 8034)),
+            ((934, 7449), (2970, 7449)),
+            ((3181, 6056), (3637, 6056)),
+            ((3158, 6056), (3791, 6056)),
+        ]
+        .into_iter()
+        .collect();
+
+        let selected_edges = global_edges
+            .iter()
+            .filter(|g| {
+                h_whitelist.contains(&g.p1.horizontal_id)
+                    && h_whitelist.contains(&g.p2.horizontal_id)
+                    && v_whitelist.contains(&g.p1.vertical_id)
+                    && v_whitelist.contains(&g.p2.vertical_id)
+            })
+            .filter(|g| {
+                !ignore_edges.contains(&(
+                    (g.p1.horizontal_id, g.p1.vertical_id),
+                    (g.p2.horizontal_id, g.p2.vertical_id),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let mut file = File::create("data/excl.dot").unwrap();
+        file.write(b"graph {\n").unwrap();
+        file.write(b"edge [len=2.0]\n").unwrap();
+
+        selected_edges.iter().for_each(|&g| {
+            let is_vertical = g.p1.vertical_id == g.p2.vertical_id;
+            let color = if is_vertical { "red" } else { "blue" };
+            // add label with distance
+            file.write(
+                format!(
+                    "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}, color={}];\n",
+                    g.p1.horizontal_id,
+                    g.p1.vertical_id,
+                    g.p2.horizontal_id,
+                    g.p2.vertical_id,
+                    g.distance,
+                    g.distance,
+                    color
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        });
+        file.write(b"}\n").unwrap();
+
+        let mut positions: HashMap<CollisionPoint, (u32, u32)> = HashMap::default();
+        let start = CollisionPoint::new(3260, 8034);
+        let mut queue: PriorityQueue<(CollisionPoint, (u32, u32)), Reverse<u32>> = PriorityQueue::new();
+        queue.push((start, (0, 0)), Reverse(0));
+        while let Some(((current, (x, y)), _)) = queue.pop() {
+            if !positions.contains_key(&current) {
+                positions.insert(current, (x, y));
+                selected_edges
+                    .iter()
+                    .filter(|g| g.p1 == current || g.p2 == current)
+                    .for_each(|g| {
+                        let next = if g.p1 == current { g.p2 } else { g.p1 };
+                        let is_horizontal = g.p1.horizontal_id == g.p2.horizontal_id;
+                        let (dx, dy) = if is_horizontal { (1, 0) } else { (0, 1) };
+                        queue.push((next, (x + dx, y + dy)), Reverse(x + dx + y + dy));
+                    });
+            }
+        }
+        positions
+            .iter()
+            .sorted_by_key(|(_, pos)| *pos)
+            .for_each(|(point, (x, y))| {
+                println!("{:?}: {:?}", (x, y), point);
+            });
+
+        let grid = positions
+            .iter()
+            .map(|(point, (x, y))| ((*x, *y), point))
+            .collect::<HashMap<_, _>>();
+
+        let position_map = colls
+            .iter()
+            .map(|c| ((c.h_id, c.v_id), (c.x, c.y, c.z)))
+            .collect::<HashMap<_, _>>();
+
+        let max_grid_x = grid.keys().map(|(x, _)| x).max().unwrap();
+        let max_grid_y = grid.keys().map(|(_, y)| y).max().unwrap();
+
+        let mut vertices = vec![];
+
+        for ((x, y), point) in &grid {
+            let x = *x;
+            let y = *y;
+            //try to build two triangles with adjacent points, only if all points are in the grid
+            let t1 = [(x, y), (x + 1, y), (x + 1, y + 1)];
+            let t2 = [(x, y), (x + 1, y + 1), (x, y + 1)];
+            if t1.iter().all(|p| grid.contains_key(p)) {
+                let p1 = grid.get(&t1[0]).unwrap();
+                let p2 = grid.get(&t1[1]).unwrap();
+                let p3 = grid.get(&t1[2]).unwrap();
+                let p1 = position_map.get(&(p1.horizontal_id, p1.vertical_id)).unwrap();
+                let p2 = position_map.get(&(p2.horizontal_id, p2.vertical_id)).unwrap();
+                let p3 = position_map.get(&(p3.horizontal_id, p3.vertical_id)).unwrap();
+
+                vertices.push((p1, t1[0]));
+                vertices.push((p2, t1[1]));
+                vertices.push((p3, t1[2]));
+            }
+            if t2.iter().all(|p| grid.contains_key(p)) {
+                let p1 = grid.get(&t2[0]).unwrap();
+                let p2 = grid.get(&t2[1]).unwrap();
+                let p3 = grid.get(&t2[2]).unwrap();
+                let p1 = position_map.get(&(p1.horizontal_id, p1.vertical_id)).unwrap();
+                let p2 = position_map.get(&(p2.horizontal_id, p2.vertical_id)).unwrap();
+                let p3 = position_map.get(&(p3.horizontal_id, p3.vertical_id)).unwrap();
+
+                vertices.push((p1, t2[0]));
+                vertices.push((p2, t2[1]));
+                vertices.push((p3, t2[2]));
+            }
+        }
+
+        let mut file = File::create("data/vertices.obj").unwrap();
+        for ((x, y, z), (u, v)) in vertices.iter() {
+            file.write(format!("v {} {} {}\n", x, y, z).as_bytes()).unwrap();
+            file.write(
+                format!(
+                    "vt {} {}\n",
+                    *u as f64 / *max_grid_x as f64,
+                    *v as f64 / *max_grid_y as f64
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            file.write(format!("vn 0 0 0\n").as_bytes()).unwrap();
+        }
+        for i in 0..vertices.len() / 3 {
+            file.write(
+                format!(
+                    "f {}/{}/{} {}/{}/{} {}/{}/{}\n",
+                    i * 3 + 1,
+                    i * 3 + 1,
+                    i * 3 + 1,
+                    i * 3 + 2,
+                    i * 3 + 2,
+                    i * 3 + 2,
+                    i * 3 + 3,
+                    i * 3 + 3,
+                    i * 3 + 3
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        }
+    }
 
     // create dot file for vertical connections
     /* let vertical_connections = colls
@@ -1259,29 +1683,26 @@ impl CollisionPanel {
             }); */
 
         // create new dot file that only contains edges where the vertical has rank 2
-        let selected_vertical = colls
-            .iter()
-            .sorted_by_key(|x| x.1)
-            .chunk_by(|x| x.1)
-            .into_iter()
-            .map(|(id, group)| (id, group.count()))
-            .filter_map(|(id, count)| if count == 2 { Some(id) } else { None })
-            .collect::<HashSet<_>>();
+        /* let selected_vertical = colls
+        .iter()
+        .sorted_by_key(|x| x.1)
+        .chunk_by(|x| x.1)
+        .into_iter()
+        .map(|(id, group)| (id, group.count()))
+        .filter_map(|(id, count)| if count == 2 { Some(id) } else { None })
+        .collect::<HashSet<_>>(); */
 
-        let filtered_colls = colls
-            .iter()
-            .filter(|(id1, id2, x, y, z)| selected_vertical.contains(id2))
-            .collect::<Vec<_>>();
+        //let filtered_colls = colls;
 
         let mut neighbor_map_h: HashMap<u32, Vec<u32>> = HashMap::default();
         let mut neighbor_map_v: HashMap<u32, Vec<u32>> = HashMap::default();
-        filtered_colls.iter().for_each(|(id1, id2, x, y, z)| {
+        colls.iter().for_each(|(id1, id2, x, y, z)| {
             neighbor_map_h.entry(*id1).or_insert(vec![]).push(*id2);
             neighbor_map_v.entry(*id2).or_insert(vec![]).push(*id1);
         });
 
         CollisionPanel {
-            collisions: filtered_colls.into_iter().cloned().collect(),
+            collisions: colls,
             neighbor_map_h,
             neighbor_map_v,
             selected_h: None,
