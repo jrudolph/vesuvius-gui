@@ -634,19 +634,21 @@ fn collide(cloud1: &PointCloudFile, cloud2: &PointCloudFile) -> Option<[u16; 3]>
         "Colliding v{} ({}) h{} ({})",
         cloud1.id, cloud1.num_elements, cloud2.id, cloud2.num_elements
     ); */
+
+    const GRID_SIZE: u16 = 16;
     // figure out all point pairs that are within 4 pixels of each other
     let mut grid: HashMap<[u16; 3], (bool, bool)> = HashMap::default();
     cloud1.iter().for_each(|coords| {
-        let grid_coords = coords.map(|x| x / 4 * 4);
+        let grid_coords = coords.map(|x| x / GRID_SIZE * GRID_SIZE);
         grid.entry(grid_coords).or_insert((false, false)).0 = true;
-        let grid_coords = coords.map(|x| x / 4 * 4 + 2);
-        grid.entry(grid_coords).or_insert((false, false)).0 = true;
+        //let grid_coords = coords.map(|x| x / 4 * 4 + 2);
+        //grid.entry(grid_coords).or_insert((false, false)).0 = true;
     });
     cloud2.iter().for_each(|coords| {
-        let grid_coords = coords.map(|x| x / 4 * 4);
+        let grid_coords = coords.map(|x| x / GRID_SIZE * GRID_SIZE);
         grid.entry(grid_coords).or_insert((false, false)).1 = true;
-        let grid_coords = coords.map(|x| x / 4 * 4 + 2);
-        grid.entry(grid_coords).or_insert((false, false)).1 = true;
+        //let grid_coords = coords.map(|x| x / 4 * 4 + 2);
+        //grid.entry(grid_coords).or_insert((false, false)).1 = true;
     });
 
     let colliding_cells = grid
@@ -659,22 +661,54 @@ fn collide(cloud1: &PointCloudFile, cloud2: &PointCloudFile) -> Option<[u16; 3]>
         return None;
     }
 
-    // average grid_coords
-    let mut sum = [0, 0, 0];
-    colliding_cells.iter().for_each(|coords| {
-        sum[0] += coords[0] as u32;
-        sum[1] += coords[1] as u32;
-        sum[2] += coords[2] as u32;
-    });
+    // actually find all points in the intersection of the two clouds
+    let cloud1_points = cloud1
+        .iter()
+        .filter(|coords| {
+            let grid_cooods = coords.map(|x| x / GRID_SIZE * GRID_SIZE);
+            colliding_cells.contains(&grid_cooods)
+        })
+        .collect::<HashSet<_>>();
+    let cloud2_points = cloud2
+        .iter()
+        .filter(|coords| {
+            let grid_cooods = coords.map(|x| x / GRID_SIZE * GRID_SIZE);
+            colliding_cells.contains(&grid_cooods)
+        })
+        .collect::<HashSet<_>>();
 
-    // average and center into the middle of the cell
-    let avg = [
-        (sum[0] / len + 2) as u16,
-        (sum[1] / len + 2) as u16,
-        (sum[2] / len + 2) as u16,
+    let intersection = cloud1_points.intersection(&cloud2_points).collect::<Vec<_>>();
+    if intersection.len() == 0 {
+        return None;
+    }
+    /* println!(
+        "Intersection of {} and {} has {} points",
+        cloud1.id,
+        cloud2.id,
+        intersection.len()
+    ); */
+    let mut sum = [0, 0, 0];
+    intersection.iter().for_each(|coords| {
+        sum[0] += coords[0] as i32;
+        sum[1] += coords[1] as i32;
+        sum[2] += coords[2] as i32;
+    });
+    let centroid = [
+        sum[0] / intersection.len() as i32,
+        sum[1] / intersection.len() as i32,
+        sum[2] / intersection.len() as i32,
     ];
-    let avg = avg.map(|x| x as u16);
-    Some(avg)
+    // we need an actual candidate that is included in both sets
+    let medoid = *intersection
+        .iter()
+        .min_by_key(|coords| {
+            let dx = (coords[0] as i32 - centroid[0]).abs();
+            let dy = (coords[1] as i32 - centroid[1]).abs();
+            let dz = (coords[2] as i32 - centroid[2]).abs();
+            dx + dy + dz
+        })
+        .unwrap();
+    Some(*medoid)
 }
 
 #[test]
