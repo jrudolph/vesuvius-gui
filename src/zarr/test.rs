@@ -1163,20 +1163,20 @@ fn analyze_collisions() {
             matrix: HashMap<(AcrossId, AcrossId), u64>,
         }
         impl<AcrossId: Hash + Eq + Copy + Ord> Adjacency<AcrossId> {
-            fn get_distance(&self, key1: AcrossId, key2: AcrossId) -> Option<u64> {
+            fn get_distance(&self, key1: &AcrossId, key2: &AcrossId) -> Option<u64> {
                 let min = key1.min(key2);
                 let max = key1.max(key2);
-                self.get(min).get(&max).copied()
+                self.neighbors(min).get(&max).copied()
             }
-            fn get(&self, key: AcrossId) -> HashMap<AcrossId, u64> {
+            fn neighbors(&self, key: &AcrossId) -> HashMap<AcrossId, u64> {
                 self.matrix
                     .iter()
-                    .filter(|(k, _)| k.0 == key || k.1 == key)
-                    .map(|(k, v)| if k.0 == key { (k.1, *v) } else { (k.0, *v) })
+                    .filter(|(k, _)| k.0 == *key || k.1 == *key)
+                    .map(|(k, v)| if k.0 == *key { (k.1, *v) } else { (k.0, *v) })
                     .collect()
             }
-            fn neighbors2(&self, key: AcrossId) -> [(AcrossId, u64); 2] {
-                let mut neighbors = self.get(key);
+            fn neighbors2(&self, key: &AcrossId) -> [(AcrossId, u64); 2] {
+                let mut neighbors = self.neighbors(key);
                 let mut next2 = neighbors
                     .into_iter()
                     //.filter(|(_, dist)| *dist > 30) // FIXME: hacky way to ignore points that are too close
@@ -1184,28 +1184,38 @@ fn analyze_collisions() {
                     .take(2);
                 [next2.next().unwrap(), next2.next().unwrap()]
             }
-            fn neighbor1(&self, key: AcrossId) -> (AcrossId, u64) {
+            fn neighbor1(&self, key: &AcrossId) -> (AcrossId, u64) {
                 //self.neighbors2(key)[0]
-                self.get(key).into_iter().min_by_key(|(_, d)| *d).unwrap()
+                self.neighbors(key).into_iter().min_by_key(|(_, d)| *d).unwrap()
+            }
+            fn remove_node(&mut self, key: &AcrossId) {
+                self.matrix.retain(|k, v| k.0 != *key && k.1 != *key);
+            }
+            fn remove_edge(&mut self, key1: &AcrossId, key2: &AcrossId) {
+                self.matrix.remove(&(*key1.min(key2), *key1.max(key2)));
             }
         }
-        let adjacency = Adjacency {
+        let mut adjacency = Adjacency {
             matrix: adjacency_matrix,
         };
 
         if adjacency.matrix.is_empty() {
             return vec![];
         }
-        let first_node: D::AcrossId = adjacency.matrix.iter().next().unwrap().0 .0;
-        let most_distant = adjacency.get(first_node).into_iter().max_by_key(|(_, d)| *d).unwrap();
-        println!("Most distant: {:?}", &most_distant);
-
-        let other_end = adjacency
-            .get(most_distant.0)
+        /* let first_node: D::AcrossId = adjacency.matrix.iter().next().unwrap().0 .0;
+        let most_distant = adjacency
+            .neighbors(&first_node)
             .into_iter()
             .max_by_key(|(_, d)| *d)
             .unwrap();
-        println!("Other end: {:?}", other_end);
+        println!("Most distant: {:?}", &most_distant);
+
+        let other_end = adjacency
+            .neighbors(&most_distant.0)
+            .into_iter()
+            .max_by_key(|(_, d)| *d)
+            .unwrap();
+        println!("Other end: {:?}", other_end); */
 
         #[derive(PartialEq, Eq, Hash)]
         struct Edge<AcrossId: Ord + Copy>(AcrossId, AcrossId, u64);
@@ -1214,10 +1224,122 @@ fn analyze_collisions() {
                 Self(id1.min(id2), id1.max(id2), distance)
             }
         }
+
+        // step 0: create graph by taking only 2 nearest edges into account
         let mut edges = HashSet::default();
         let keys = collisions.iter().map(|x| D::get_across_id(x)).collect::<HashSet<_>>();
+        keys.iter().for_each(|&key| {
+            let num_neighbors = adjacency.neighbors(&key).len();
+            if num_neighbors >= 2 {
+                let [(n1, d1), (n2, d2)] = adjacency.neighbors2(&key);
+                edges.insert(Edge::new(key, n1, d1));
+                edges.insert(Edge::new(key, n2, d2));
+            } else if num_neighbors == 1 {
+                let (n1, d1) = adjacency.neighbor1(&key);
+                edges.insert(Edge::new(key, n1, d1));
+            }
+        });
+
+        // create pruned adjacency matrix
+        let matrix = edges.into_iter().map(|Edge(e1, e2, d)| ((e1, e2), d)).collect();
+        let mut adjacency = Adjacency { matrix };
+
+        // steps:
+        //  1. prune all nodes with more than 3 neighbors
+        //  2. find and resolve all 3-cliques
+        //      - if 1 node has rank 3, remove the edge of the clique that start at that node and is longest
+        //      - if 2 nodes have rank 3, remove this edge between them
+        //      - if all 3 nodes have rank 3 remove whole clique and start from the beginning?
+        //  3. prune all remaining nodes with 3 neighbors
+
+        // step 1
+        let mut keys = keys.clone();
+        //let mut removed = HashSet::default();
+
+        for key in &keys {
+            let num_neighbors = adjacency.neighbors(&key).len();
+            if num_neighbors > 3 {
+                adjacency.remove_node(key);
+            }
+        }
+
+        // find all triangles
+        let mut triangles: HashSet<[(D::AcrossId, usize); 3]> = HashSet::default();
+        let sorted_keys = keys.iter().sorted().cloned().collect::<Vec<_>>();
+        for u in &sorted_keys {
+            let neighbors = adjacency.neighbors(u);
+            for v in neighbors.keys() {
+                if *v <= *u {
+                    continue;
+                }
+                let neighbors2 = adjacency.neighbors(v);
+                for w in neighbors2.keys() {
+                    if *w <= *v {
+                        continue;
+                    }
+                    if neighbors.keys().contains(w) {
+                        let neighbors3 = adjacency.neighbors(w);
+                        triangles.insert([(*u, neighbors.len()), (*v, neighbors2.len()), (*w, neighbors3.len())]);
+                    }
+                }
+            }
+        }
+        println!("Triangles: {}", triangles.len());
+        triangles.iter().for_each(|t| {
+            println!(
+                "{} ({}) {} ({}) {} ({})",
+                t[0].0, t[0].1, t[1].0, t[1].1, t[2].0, t[2].1
+            );
+        });
+
+        for t in triangles {
+            let with_rank_3 = t.iter().filter(|(_, rank)| *rank == 3).collect::<Vec<_>>();
+
+            match with_rank_3.len() {
+                0 => {
+                    // remove the longest edge of the triangle
+                    let edges = [
+                        (t[0].0, t[1].0, adjacency.get_distance(&t[0].0, &t[1].0).unwrap()),
+                        (t[0].0, t[2].0, adjacency.get_distance(&t[0].0, &t[2].0).unwrap()),
+                        (t[1].0, t[2].0, adjacency.get_distance(&t[1].0, &t[2].0).unwrap()),
+                    ];
+                    let longest_edge = edges.iter().max_by_key(|(_, _, d)| *d).unwrap();
+                    adjacency.remove_edge(&longest_edge.0, &longest_edge.1);
+                }
+                1 => {
+                    // ballon shape, will happen at every corner of the graph due to its construction
+                    // just remove the longer of the two edges leading to the triangle
+                    let single = with_rank_3[0].0;
+                    let ns = adjacency.neighbors(&single);
+                    let other_nodes = t.iter().filter(|(id, _)| *id != single).collect::<Vec<_>>();
+                    let d1 = adjacency.get_distance(&single, &other_nodes[0].0).unwrap();
+                    let d2 = adjacency.get_distance(&single, &other_nodes[1].0).unwrap();
+                    if d1 > d2 {
+                        adjacency.remove_edge(&single, &other_nodes[0].0);
+                    } else {
+                        adjacency.remove_edge(&single, &other_nodes[1].0);
+                    }
+                }
+                2 => {
+                    // one extra node, sitting "on the side", two options:
+                    //  - remove the extra node (since it has non-linear geometry leading to the triangle)
+                    //  - include the extra node in a linear path (<- do this for now)
+                    adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[1].0);
+                }
+                3 => {
+                    // remove triangle but keep nodes on their resp linear paths
+                    adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[1].0);
+                    adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[2].0);
+                    adjacency.remove_edge(&with_rank_3[1].0, &with_rank_3[2].0);
+                }
+                _ => panic!("Invalid number of nodes with rank 3: {}", with_rank_3.len()),
+            }
+        }
+
+        /* let mut edges = HashSet::default();
+        let keys = collisions.iter().map(|x| D::get_across_id(x)).collect::<HashSet<_>>();
         keys.into_iter().for_each(|key| {
-            let num_neighbors = adjacency.get(key).len();
+            let num_neighbors = adjacency.neighbors(key).len();
             if (key == most_distant.0 || key == other_end.0) && num_neighbors >= 1 {
                 let (n1, d) = adjacency.neighbor1(key);
                 edges.insert(Edge::new(key, n1, d));
@@ -1226,21 +1348,22 @@ fn analyze_collisions() {
                 edges.insert(Edge::new(key, n1, d1));
                 edges.insert(Edge::new(key, n2, d2));
             }
-        });
+        }); */
 
         /* println!("Edges: {}", edges.len());
         edges.iter().for_each(|edge| {
             println!("{} {}", edge.0, edge.1);
         }); */
 
-        edges
-            .into_iter()
-            .map(|Edge(v1, v2, distance)| GlobalEdge {
+        let mut edges = Vec::new();
+        for ((v1, v2), distance) in adjacency.matrix.into_iter() {
+            edges.push(GlobalEdge {
                 p1: D::create_collision_point(along_id, v1),
                 p2: D::create_collision_point(along_id, v2),
                 distance,
-            })
-            .collect()
+            });
+        }
+        edges
     }
 
     fn load_edges_from_file(
