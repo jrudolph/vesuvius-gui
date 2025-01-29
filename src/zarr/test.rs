@@ -426,7 +426,7 @@ fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
     let mut classes: HashMap<u32, u32> = HashMap::default();
 
     fn index_of(x: usize, y: usize, z: usize) -> usize {
-        ((z - CROP[2]) * CROP_SIZE[1] + (y - CROP[1])) * CROP_SIZE[0] + (x - CROP[0])
+        ((z + 1 - CROP[2]) * (CROP_SIZE[1] + 1) + (y + 1 - CROP[1])) * (CROP_SIZE[0] + 1) + (x + 1 - CROP[0])
     }
 
     for z in CROP[2]..CROP[2] + CROP_SIZE[2] {
@@ -449,9 +449,9 @@ fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
                         let nv = array.get([nz as usize, ny as usize, nx as usize]).unwrap_or(0);
 
                     } */
-                    let nx = if x > CROP[0] { ids[index_of(x - 1, y, z)] } else { 0 };
-                    let ny = if y > CROP[1] { ids[index_of(x, y - 1, z)] } else { 0 };
-                    let nz = if z > CROP[2] { ids[index_of(x, y, z - 1)] } else { 0 };
+                    let nx = ids[index_of(x - 1, y, z)];
+                    let ny = ids[index_of(x, y - 1, z)];
+                    let nz = ids[index_of(x, y, z - 1)];
 
                     let idx = index_of(x, y, z);
 
