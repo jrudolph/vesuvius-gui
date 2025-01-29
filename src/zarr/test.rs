@@ -1336,6 +1336,13 @@ fn analyze_collisions() {
             }
         }
 
+        for key in &keys {
+            let num_neighbors = adjacency.neighbors(&key).len();
+            if num_neighbors >= 3 {
+                adjacency.remove_node(key);
+            }
+        }
+
         /* let mut edges = HashSet::default();
         let keys = collisions.iter().map(|x| D::get_across_id(x)).collect::<HashSet<_>>();
         keys.into_iter().for_each(|key| {
@@ -1525,13 +1532,19 @@ fn analyze_collisions() {
     file.write(b"}\n").unwrap();
 
     let h_whitelist: HashSet<_> = vec![
-        351, 673, 934, 1049, 2063, 2380, 2970, 3036, 3158, 3177, 3181, 3260, 3637, 3791, 4505, 4685, 4785, 4869, 4881,
-        5017, 5113, 5275, 5332,
+        99, 351, 640, 673, 835, 934, 1049, 2063, 2380, 2970, 3036, 3158, 3177, 3260, 3637, 3791, 4336, 4505, 4685,
+        4785, 4869, 4881, 5017, 5113, 5275, 5332, 5451, 6520, 8034,
     ]
     .into_iter()
     .collect();
-    let v_whitelist: HashSet<_> = vec![581, 4417, 5880, 6056, 8955].into_iter().collect();
-    let v_blacklist: HashSet<u32> = vec![].into_iter().collect();
+    let v_whitelist: HashSet<_> = vec![
+        581, 682, 921, 932, 1554, 3452, 4151, 4417, 4903, 5880, 6056, 6520, 6826, 8955, 9282,
+    ]
+    .into_iter()
+    .collect();
+    let h_blacklist: HashSet<u32> = vec![3181].into_iter().collect();
+    let v_blacklist: HashSet<u32> = vec![1594].into_iter().collect();
+    let ignore_edges: HashSet<_> = vec![((673, 651), (3177, 651))].into_iter().collect();
 
     let mut file = File::create("data/inc.dot").unwrap();
     file.write(b"graph {\n").unwrap();
@@ -1545,6 +1558,13 @@ fn analyze_collisions() {
                 || v_whitelist.contains(&g.p2.vertical_id)
         })
         .filter(|g| !v_blacklist.contains(&g.p1.vertical_id) && !v_blacklist.contains(&g.p2.vertical_id))
+        .filter(|g| !h_blacklist.contains(&g.p1.horizontal_id) && !h_blacklist.contains(&g.p2.horizontal_id))
+        .filter(|g| {
+            !ignore_edges.contains(&(
+                (g.p1.horizontal_id, g.p1.vertical_id),
+                (g.p2.horizontal_id, g.p2.vertical_id),
+            ))
+        })
         .for_each(|g| {
             let is_vertical = g.p1.vertical_id == g.p2.vertical_id;
             let color = if is_vertical { "red" } else { "blue" };
@@ -1569,11 +1589,14 @@ fn analyze_collisions() {
 
     {
         let h_whitelist: HashSet<_> = vec![
-            3260, 351, 4785, 3036, 4881, 5275, 2970, 5332, 934, 5017, 3158, 3791, 3637, 3177, 3181,
+            3260, 351, 4785, 3036, 4881, 5275, 2970, 5332, 934, 5017, 3158, 3791, 3637, 3177, 3181, 5113, 4685, 1049,
+            673, 4505, 2063,
         ]
         .into_iter()
         .collect();
-        let v_whitelist: HashSet<_> = vec![8034, 5880, 7449, 761, 581, 6056, 4417].into_iter().collect();
+        let v_whitelist: HashSet<_> = vec![8034, 5880, 7449, 761, 581, 6056, 4417, 932, 4353, 1554, 669]
+            .into_iter()
+            .collect();
         let v_blacklist: HashSet<u32> = vec![].into_iter().collect();
 
         // ignore these edges
@@ -1646,7 +1669,7 @@ fn analyze_collisions() {
         file.write(b"}\n").unwrap();
 
         let mut positions: HashMap<CollisionPoint, (u32, u32)> = HashMap::default();
-        let start = CollisionPoint::new(3260, 8034);
+        let start = CollisionPoint::new(2063, 6056);
         let mut queue: PriorityQueue<(CollisionPoint, (u32, u32)), Reverse<u32>> = PriorityQueue::new();
         queue.push((start, (0, 0)), Reverse(0));
         while let Some(((current, (x, y)), _)) = queue.pop() {
