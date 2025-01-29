@@ -970,24 +970,67 @@ fn analyze_collisions() {
         distance: u64,
     }
 
-    fn create_collision_graph<
-        AlongId: Hash + Eq + Copy + Display + Ord + Debug,
-        AcrossId: Hash + Eq + Copy + Display + Ord + Debug,
-    >(
-        along_id: AlongId,
-        colls: &[Collision],
-        get_along_id: impl Fn(&Collision) -> AlongId,
-        get_across_id: impl Fn(&Collision) -> AcrossId,
-        create_collision_point: impl Fn(AlongId, AcrossId) -> CollisionPoint,
-        cloud: &PointCloudFile,
-        along_id_prefix: &str,
-        across_id_prefix: &str,
-    ) -> Vec<GlobalEdge> {
-        let collisions = colls.iter().filter(|c| get_along_id(c) == along_id).collect::<Vec<_>>();
+    trait Direction {
+        type AlongId: Hash + Eq + Copy + Display + Ord + Debug;
+        type AcrossId: Hash + Eq + Copy + Display + Ord + Debug;
 
+        fn get_along_id(c: &Collision) -> Self::AlongId;
+        fn get_across_id(c: &Collision) -> Self::AcrossId;
+        fn along_id_prefix() -> &'static str;
+        fn across_id_prefix() -> &'static str;
+        fn create_collision_point(along_id: Self::AlongId, across_id: Self::AcrossId) -> CollisionPoint;
+    }
+    struct AlongHorizontal {}
+    impl Direction for AlongHorizontal {
+        type AlongId = u32;
+        type AcrossId = u32;
+
+        fn get_along_id(c: &Collision) -> Self::AlongId {
+            c.h_id
+        }
+        fn get_across_id(c: &Collision) -> Self::AcrossId {
+            c.v_id
+        }
+        fn along_id_prefix() -> &'static str {
+            "h"
+        }
+        fn across_id_prefix() -> &'static str {
+            "v"
+        }
+        fn create_collision_point(along_id: Self::AlongId, across_id: Self::AcrossId) -> CollisionPoint {
+            CollisionPoint::new(along_id, across_id)
+        }
+    }
+    struct AlongVertical {}
+    impl Direction for AlongVertical {
+        type AlongId = u32;
+        type AcrossId = u32;
+
+        fn get_along_id(c: &Collision) -> Self::AlongId {
+            c.v_id
+        }
+        fn get_across_id(c: &Collision) -> Self::AcrossId {
+            c.h_id
+        }
+        fn along_id_prefix() -> &'static str {
+            "v"
+        }
+        fn across_id_prefix() -> &'static str {
+            "h"
+        }
+        fn create_collision_point(along_id: Self::AlongId, across_id: Self::AcrossId) -> CollisionPoint {
+            CollisionPoint::new(across_id, along_id)
+        }
+    }
+
+    fn create_adjacency_matrix<D: Direction>(
+        along_id: D::AlongId,
+        collisions: &[&Collision],
+        cloud: &PointCloudFile,
+    ) -> HashMap<(D::AcrossId, D::AcrossId), u64> {
         println!(
             "At {}{} total collisions: {}",
-            along_id_prefix,
+            D::along_id_prefix(),
             along_id,
             collisions.len()
         );
@@ -996,18 +1039,20 @@ fn analyze_collisions() {
         println!("Map entries: {}", map.map.len());
 
         // calculate the geodesic adjacency matrix for all collision points on h22554
-        let mut adjacency_matrix: HashMap<(AcrossId, AcrossId), u64> = HashMap::default();
+        let mut adjacency_matrix: HashMap<(D::AcrossId, D::AcrossId), u64> = HashMap::default();
         for start_coll @ Collision {
             x: start_x,
             y: start_y,
             z: start_z,
             ..
-        } in &collisions
+        } in collisions
         {
-            let start_id_across = get_across_id(start_coll);
+            let start_id_across = D::get_across_id(start_coll);
             println!(
                 "At {}{} start_id_across: {}",
-                along_id_prefix, along_id, start_id_across
+                D::across_id_prefix(),
+                along_id,
+                start_id_across
             );
             let start = [*start_x, *start_y, *start_z];
             // collision point might near the surface of the cloud but not contained in it
@@ -1032,9 +1077,9 @@ fn analyze_collisions() {
                 y: end_y,
                 z: end_z,
                 ..
-            } in &collisions
+            } in collisions
             {
-                let end_id_across = get_across_id(end_coll);
+                let end_id_across = D::get_across_id(end_coll);
                 if start_id_across >= end_id_across {
                     continue;
                 }
@@ -1059,8 +1104,21 @@ fn analyze_collisions() {
                 }
             }
         }
+        adjacency_matrix
+    }
 
-        println!("Adjacency matrix: {}", adjacency_matrix.len());
+    fn create_collision_graph<D: Direction>(
+        along_id: D::AlongId,
+        colls: &[Collision],
+        cloud: &PointCloudFile,
+    ) -> Vec<GlobalEdge> {
+        let collisions = colls
+            .iter()
+            .filter(|c| D::get_along_id(c) == along_id)
+            .collect::<Vec<_>>();
+        let adjacency_matrix = create_adjacency_matrix::<D>(along_id, &collisions, cloud);
+
+        //println!("Adjacency matrix: {}", adjacency_matrix.len());
         /* adjacency_matrix.iter().for_each(|((start, end), distance)| {
             println!("{} {} {}", start.v_id, end.v_id, distance);
         }); */
@@ -1102,7 +1160,7 @@ fn analyze_collisions() {
         if adjacency.matrix.is_empty() {
             return vec![];
         }
-        let first_node: AcrossId = adjacency.matrix.iter().next().unwrap().0 .0;
+        let first_node: D::AcrossId = adjacency.matrix.iter().next().unwrap().0 .0;
         let most_distant = adjacency.get(first_node).into_iter().max_by_key(|(_, d)| *d).unwrap();
         println!("Most distant: {:?}", &most_distant);
 
@@ -1121,7 +1179,7 @@ fn analyze_collisions() {
             }
         }
         let mut edges = HashSet::default();
-        let keys = collisions.iter().map(|x| get_across_id(x)).collect::<HashSet<_>>();
+        let keys = collisions.iter().map(|x| D::get_across_id(x)).collect::<HashSet<_>>();
         keys.into_iter().for_each(|key| {
             let num_neighbors = adjacency.get(key).len();
             if (key == most_distant.0 || key == other_end.0) && num_neighbors >= 1 {
@@ -1132,14 +1190,6 @@ fn analyze_collisions() {
                 edges.insert(Edge::new(key, n1, d1));
                 edges.insert(Edge::new(key, n2, d2));
             }
-            /* adjacency
-            .get(key)
-            .into_iter()
-            .sorted_by_key(|(_, d)| *d)
-            .take(2)
-            .for_each(|(other, d)| {
-                edges.insert(Edge::new(key, other, d));
-            }); */
         });
 
         /* println!("Edges: {}", edges.len());
@@ -1150,8 +1200,8 @@ fn analyze_collisions() {
         edges
             .into_iter()
             .map(|Edge(v1, v2, distance)| GlobalEdge {
-                p1: create_collision_point(along_id, v1),
-                p2: create_collision_point(along_id, v2),
+                p1: D::create_collision_point(along_id, v1),
+                p2: D::create_collision_point(along_id, v2),
                 distance,
             })
             .collect()
@@ -1212,19 +1262,7 @@ fn analyze_collisions() {
         }
 
         let cloud = PointCloudFile::new(horizontal_id, &format!("data/classes/class-2/{:06}", horizontal_id));
-        let edges = create_collision_graph(
-            horizontal_id,
-            &colls,
-            |x| x.h_id,
-            |x| x.v_id,
-            |h, v| CollisionPoint {
-                horizontal_id: h,
-                vertical_id: v,
-            },
-            &cloud,
-            "h",
-            "v",
-        );
+        let edges = create_collision_graph::<AlongHorizontal>(horizontal_id, &colls, &cloud);
         save_edges_to_file(&edges, horizontal_id, "h", |x| x.vertical_id);
         edges
     }
@@ -1234,19 +1272,7 @@ fn analyze_collisions() {
         }
 
         let cloud = PointCloudFile::new(vertical_id, &format!("data/classes/class-1/{:06}", vertical_id));
-        let edges = create_collision_graph(
-            vertical_id,
-            &colls,
-            |x| x.v_id,
-            |x| x.h_id,
-            |v, h| CollisionPoint {
-                horizontal_id: h,
-                vertical_id: v,
-            },
-            &cloud,
-            "v",
-            "h",
-        );
+        let edges = create_collision_graph::<AlongVertical>(vertical_id, &colls, &cloud);
         save_edges_to_file(&edges, vertical_id, "v", |x| x.horizontal_id);
         edges
     }
