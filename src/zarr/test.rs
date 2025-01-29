@@ -14,7 +14,7 @@ use priority_queue::PriorityQueue;
 use rayon::iter::IntoParallelRefIterator;
 use std::{
     cmp::Reverse,
-    collections::BinaryHeap,
+    collections::{BinaryHeap, VecDeque},
     fmt::{Debug, Display},
     fs::{File, OpenOptions},
     hash::Hash,
@@ -952,7 +952,7 @@ fn analyze_collisions() {
         DistanceMap { distances }
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
     struct CollisionPoint {
         horizontal_id: u32,
         vertical_id: u32,
@@ -1143,6 +1143,14 @@ fn analyze_collisions() {
         }
     }
 
+    #[derive(PartialEq, Eq, Hash)]
+    struct Edge<T: Ord + Copy>(T, T, u64);
+    impl<T: Ord + Copy> Edge<T> {
+        fn new(id1: T, id2: T, distance: u64) -> Self {
+            Self(id1.min(id2), id1.max(id2), distance)
+        }
+    }
+
     fn create_collision_graph<D: Direction>(
         along_id: D::AlongId,
         colls: &[Collision],
@@ -1216,14 +1224,6 @@ fn analyze_collisions() {
             .max_by_key(|(_, d)| *d)
             .unwrap();
         println!("Other end: {:?}", other_end); */
-
-        #[derive(PartialEq, Eq, Hash)]
-        struct Edge<AcrossId: Ord + Copy>(AcrossId, AcrossId, u64);
-        impl<AcrossId: Ord + Copy> Edge<AcrossId> {
-            fn new(id1: AcrossId, id2: AcrossId, distance: u64) -> Self {
-                Self(id1.min(id2), id1.max(id2), distance)
-            }
-        }
 
         // step 0: create graph by taking only 2 nearest edges into account
         let mut edges = HashSet::default();
@@ -1587,8 +1587,257 @@ fn analyze_collisions() {
 
     file.write(b"}\n").unwrap();
 
-    {
-        let h_whitelist: HashSet<_> = vec![
+    fn write_obj_from_grid(colls: &[Collision], grid: &HashMap<GridCoord, CollisionPoint>) {
+        let position_map = colls
+            .iter()
+            .map(|c| ((c.h_id, c.v_id), (c.x, c.y, c.z)))
+            .collect::<HashMap<_, _>>();
+
+        let max_grid_x = grid.keys().map(|(x, _)| x).max().unwrap();
+        let max_grid_y = grid.keys().map(|(_, y)| y).max().unwrap();
+
+        let mut vertices = vec![];
+
+        for ((x, y), point) in grid {
+            let x = *x;
+            let y = *y;
+            //try to build two triangles with adjacent points, only if all points are in the grid
+            let t1 = [(x, y), (x + 1, y), (x + 1, y + 1)];
+            let t2 = [(x, y), (x + 1, y + 1), (x, y + 1)];
+            if t1.iter().all(|p| grid.contains_key(p)) {
+                let p1 = grid.get(&t1[0]).unwrap();
+                let p2 = grid.get(&t1[1]).unwrap();
+                let p3 = grid.get(&t1[2]).unwrap();
+                let p1 = position_map.get(&(p1.horizontal_id, p1.vertical_id)).unwrap();
+                let p2 = position_map.get(&(p2.horizontal_id, p2.vertical_id)).unwrap();
+                let p3 = position_map.get(&(p3.horizontal_id, p3.vertical_id)).unwrap();
+
+                vertices.push((p1, t1[0]));
+                vertices.push((p2, t1[1]));
+                vertices.push((p3, t1[2]));
+            }
+            if t2.iter().all(|p| grid.contains_key(p)) {
+                let p1 = grid.get(&t2[0]).unwrap();
+                let p2 = grid.get(&t2[1]).unwrap();
+                let p3 = grid.get(&t2[2]).unwrap();
+                let p1 = position_map.get(&(p1.horizontal_id, p1.vertical_id)).unwrap();
+                let p2 = position_map.get(&(p2.horizontal_id, p2.vertical_id)).unwrap();
+                let p3 = position_map.get(&(p3.horizontal_id, p3.vertical_id)).unwrap();
+
+                vertices.push((p1, t2[0]));
+                vertices.push((p2, t2[1]));
+                vertices.push((p3, t2[2]));
+            }
+        }
+
+        let mut file = File::create("data/vertices.obj").unwrap();
+        for ((x, y, z), (u, v)) in vertices.iter() {
+            file.write(format!("v {} {} {}\n", x, y, z).as_bytes()).unwrap();
+            file.write(
+                format!(
+                    "vt {} {}\n",
+                    *u as f64 / *max_grid_x as f64,
+                    *v as f64 / *max_grid_y as f64
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            file.write(format!("vn 0 0 0\n").as_bytes()).unwrap();
+        }
+        for i in 0..vertices.len() / 3 {
+            file.write(
+                format!(
+                    "f {}/{}/{} {}/{}/{} {}/{}/{}\n",
+                    i * 3 + 1,
+                    i * 3 + 1,
+                    i * 3 + 1,
+                    i * 3 + 2,
+                    i * 3 + 2,
+                    i * 3 + 2,
+                    i * 3 + 3,
+                    i * 3 + 3,
+                    i * 3 + 3
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        }
+    }
+
+    type GridCoord = (i32, i32);
+    struct Grid {
+        grid: HashMap<GridCoord, CollisionPoint>,
+        positions: HashMap<CollisionPoint, GridCoord>,
+    }
+    impl Grid {
+        fn new() -> Self {
+            Self {
+                grid: HashMap::default(),
+                positions: HashMap::default(),
+            }
+        }
+        fn insert(&mut self, position: GridCoord, point: CollisionPoint) {
+            self.grid.insert(position, point);
+            self.positions.insert(point, position);
+        }
+        fn at_pos(&self, position: GridCoord) -> Option<CollisionPoint> {
+            self.grid.get(&position).cloned()
+        }
+        fn get_position(&self, point: CollisionPoint) -> Option<GridCoord> {
+            self.positions.get(&point).cloned()
+        }
+    }
+    //let mut grid: HashMap<(u32, u32), CollisionPoint> = HashMap::default();
+    let mut grid = Grid::new();
+
+    // iteratively add points to grid by looking at graph
+    // start with one square:
+    // 1000,1000 h5275_v7449
+    // 1001,1000 h5275_v761
+    // 1000,1001 h4881_v7449
+    // 1001,1001 h4881_v761
+
+    let n1 = CollisionPoint::new(5275, 7449);
+    let n2 = CollisionPoint::new(5275, 761);
+    let n3 = CollisionPoint::new(4881, 7449);
+    let n4 = CollisionPoint::new(4881, 761);
+
+    let mut edges: HashSet<Edge<CollisionPoint>> = HashSet::default();
+    grid.insert((0, 0), n1);
+    grid.insert((1, 0), n2);
+    grid.insert((0, 1), n3);
+    grid.insert((1, 1), n4);
+
+    let mut queue = VecDeque::from([(n1, (0, 0)), (n2, (1, 0)), (n3, (0, 1)), (n4, (1, 1))]);
+
+    let mut horizontal_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>> = HashMap::default();
+    let mut vertical_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>> = HashMap::default();
+    global_edges.iter().for_each(|g| {
+        let is_horizontal = g.p1.horizontal_id == g.p2.horizontal_id;
+        if is_horizontal {
+            horizontal_neighbors
+                .entry(g.p1)
+                .or_insert(HashSet::default())
+                .insert(g.p2);
+            horizontal_neighbors
+                .entry(g.p2)
+                .or_insert(HashSet::default())
+                .insert(g.p1);
+        } else {
+            vertical_neighbors
+                .entry(g.p1)
+                .or_insert(HashSet::default())
+                .insert(g.p2);
+            vertical_neighbors
+                .entry(g.p2)
+                .or_insert(HashSet::default())
+                .insert(g.p1);
+        }
+    });
+    struct PathFinder {
+        horizontal_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
+        vertical_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
+    }
+    impl PathFinder {
+        fn new(
+            horizontal_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
+            vertical_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
+        ) -> Self {
+            Self {
+                horizontal_neighbors,
+                vertical_neighbors,
+            }
+        }
+        fn find_squares_at_horizontal_first(&self, point: CollisionPoint) -> Vec<[CollisionPoint; 4]> {
+            let mut squares = vec![];
+            for p1 in self.horizontal_neighbors.get(&point).unwrap_or(&HashSet::default()) {
+                for p2 in self.vertical_neighbors.get(p1).unwrap_or(&HashSet::default()) {
+                    for p3 in self.horizontal_neighbors.get(p2).unwrap_or(&HashSet::default()) {
+                        for p4 in self.vertical_neighbors.get(p3).unwrap_or(&HashSet::default()) {
+                            if p4 == &point {
+                                squares.push([*p1, *p2, *p3, *p4]);
+                            }
+                        }
+                    }
+                }
+            }
+            squares
+        }
+    }
+
+    let path_finder = PathFinder::new(horizontal_neighbors, vertical_neighbors);
+
+    while let Some((current, (x, y))) = queue.pop_front() {
+        println!("Processing {:?} at {:?}", current, (x, y));
+
+        let grid_neighbors = [
+            (x - 1, y),
+            (x + 1, y),
+            (x, y - 1),
+            (x, y + 1),
+            (x - 1, y - 1),
+            (x - 1, y + 1),
+            (x + 1, y - 1),
+            (x + 1, y + 1),
+        ];
+        if grid_neighbors.iter().all(|(x, y)| grid.at_pos((*x, *y)).is_some()) {
+            println!("Skipping {:?} at {:?}", current, (x, y));
+            continue; // done for this point as whole neighborhood is already in grid
+        }
+
+        for [p1, p2, p3, p4] in path_finder.find_squares_at_horizontal_first(current) {
+            //println!("Found square {:?}", [p1, p2, p3, p4]);
+            let dx = if let Some(p1) = grid.get_position(p1) {
+                p1.0 - x
+            } else {
+                // exactly one neighbor must be in the grid already, find out which one, and go in opposite direction
+                x - [(x - 1, y), (x + 1, y)]
+                    .iter()
+                    .find(|(x, y)| grid.at_pos((*x, *y)).is_some())
+                    .unwrap()
+                    .0
+            };
+
+            let dy = if let Some(p3) = grid.get_position(p3) {
+                p3.1 - y
+            } else {
+                y - [(x, y - 1), (x, y + 1)]
+                    .iter()
+                    .find(|(x, y)| grid.at_pos((*x, *y)).is_some())
+                    .unwrap()
+                    .1
+            };
+
+            // println!("dx: {}, dy: {}", dx, dy);
+
+            // p1 -> (x+dx, y)
+            // p2 -> (x+dx, y+dy)
+            // p3 -> (x, y+dy)
+            // p4 -> (x, y)
+            if !grid.get_position(p1).is_some() {
+                //println!("Adding p1 to grid at {:?}", (x + dx, y));
+                grid.insert((x + dx, y), p1);
+                queue.push_back((p1, (x + dx, y)));
+            }
+            if !grid.get_position(p2).is_some() {
+                //println!("Adding p2 to grid at {:?}", (x + dx, y + dy));
+                grid.insert((x + dx, y + dy), p2);
+                queue.push_back((p2, (x + dx, y + dy)));
+            }
+            if !grid.get_position(p3).is_some() {
+                //println!("Adding p3 to grid at {:?}", (x, y + dy));
+                grid.insert((x, y + dy), p3);
+                queue.push_back((p3, (x, y + dy)));
+            }
+        }
+    }
+    grid.grid.iter().for_each(|(pos, p)| {
+        println!("{:?}: {:?}", pos, p);
+    });
+
+    write_obj_from_grid(&colls, &grid.grid);
+
+    /*let h_whitelist: HashSet<_> = vec![
             3260, 351, 4785, 3036, 4881, 5275, 2970, 5332, 934, 5017, 3158, 3791, 3637, 3177, 3181, 5113, 4685, 1049,
             673, 4505, 2063,
         ]
@@ -1697,130 +1946,7 @@ fn analyze_collisions() {
             .iter()
             .map(|(point, (x, y))| ((*x, *y), point))
             .collect::<HashMap<_, _>>();
-
-        let position_map = colls
-            .iter()
-            .map(|c| ((c.h_id, c.v_id), (c.x, c.y, c.z)))
-            .collect::<HashMap<_, _>>();
-
-        let max_grid_x = grid.keys().map(|(x, _)| x).max().unwrap();
-        let max_grid_y = grid.keys().map(|(_, y)| y).max().unwrap();
-
-        let mut vertices = vec![];
-
-        for ((x, y), point) in &grid {
-            let x = *x;
-            let y = *y;
-            //try to build two triangles with adjacent points, only if all points are in the grid
-            let t1 = [(x, y), (x + 1, y), (x + 1, y + 1)];
-            let t2 = [(x, y), (x + 1, y + 1), (x, y + 1)];
-            if t1.iter().all(|p| grid.contains_key(p)) {
-                let p1 = grid.get(&t1[0]).unwrap();
-                let p2 = grid.get(&t1[1]).unwrap();
-                let p3 = grid.get(&t1[2]).unwrap();
-                let p1 = position_map.get(&(p1.horizontal_id, p1.vertical_id)).unwrap();
-                let p2 = position_map.get(&(p2.horizontal_id, p2.vertical_id)).unwrap();
-                let p3 = position_map.get(&(p3.horizontal_id, p3.vertical_id)).unwrap();
-
-                vertices.push((p1, t1[0]));
-                vertices.push((p2, t1[1]));
-                vertices.push((p3, t1[2]));
-            }
-            if t2.iter().all(|p| grid.contains_key(p)) {
-                let p1 = grid.get(&t2[0]).unwrap();
-                let p2 = grid.get(&t2[1]).unwrap();
-                let p3 = grid.get(&t2[2]).unwrap();
-                let p1 = position_map.get(&(p1.horizontal_id, p1.vertical_id)).unwrap();
-                let p2 = position_map.get(&(p2.horizontal_id, p2.vertical_id)).unwrap();
-                let p3 = position_map.get(&(p3.horizontal_id, p3.vertical_id)).unwrap();
-
-                vertices.push((p1, t2[0]));
-                vertices.push((p2, t2[1]));
-                vertices.push((p3, t2[2]));
-            }
-        }
-
-        let mut file = File::create("data/vertices.obj").unwrap();
-        for ((x, y, z), (u, v)) in vertices.iter() {
-            file.write(format!("v {} {} {}\n", x, y, z).as_bytes()).unwrap();
-            file.write(
-                format!(
-                    "vt {} {}\n",
-                    *u as f64 / *max_grid_x as f64,
-                    *v as f64 / *max_grid_y as f64
-                )
-                .as_bytes(),
-            )
-            .unwrap();
-            file.write(format!("vn 0 0 0\n").as_bytes()).unwrap();
-        }
-        for i in 0..vertices.len() / 3 {
-            file.write(
-                format!(
-                    "f {}/{}/{} {}/{}/{} {}/{}/{}\n",
-                    i * 3 + 1,
-                    i * 3 + 1,
-                    i * 3 + 1,
-                    i * 3 + 2,
-                    i * 3 + 2,
-                    i * 3 + 2,
-                    i * 3 + 3,
-                    i * 3 + 3,
-                    i * 3 + 3
-                )
-                .as_bytes(),
-            )
-            .unwrap();
-        }
-    }
-
-    // create dot file for vertical connections
-    /* let vertical_connections = colls
-        .iter()
-        //.filter(|x| selected_vertical.contains(&x.1))
-        .sorted_by_key(|x| x.1)
-        .chunk_by(|x| x.1)
-        .into_iter()
-        .map(|(v, colls)| {
-            let hs = colls.map(|x| x.0).collect::<HashSet<_>>();
-            (v, hs)
-        })
-        .collect::<Vec<_>>();
-    let mut file = File::create("data/verticals.dot").unwrap();
-    file.write(b"graph {\n").unwrap();
-    file.write(b"edge [len=2.0]\n").unwrap();
-    for (v, hs) in vertical_connections {
-        assert!(hs.len() == 2);
-        let hs = hs.into_iter().collect::<Vec<_>>();
-        let h1 = hs[0];
-        let h2 = hs[1];
-
-        if h_candidates.contains(&h1) || h_candidates.contains(&h2) {
-            file.write(format!("h{}_v{} -- h{}_v{}\n", h1, v, h2, v).as_bytes())
-                .unwrap();
-        }
-    }
-    file.write(b"}\n").unwrap(); */
-
-    // v19894 -> h22554
-
-    /* let first_node = adjacency_matrix.iter().next().unwrap().0 .0;
-
-    // find most distant node from first_node
-    let most_distant = adjacency_matrix
-        .iter()
-        .filter(|(key, _)| key.0 == first_node || key.1 == first_node)
-        .max_by_key(|(_, distance)| *distance)
-        .unwrap()
-        .0;
-    println!("Most distant: {:?}", most_distant);
-    let other_end = adjacency_matrix
-        .iter()
-        .filter(|(key, _)| key != most_distant && key.0 == most_distant.0 .1 || key.1 == most_distant.0 .1)
-        .max_by_key(|(_, distance)| *distance)
-        .unwrap()
-        .0;
-    println!("Other end: {:?}", other_end); */
+    } */
 }
 
 struct PaintableImage {
