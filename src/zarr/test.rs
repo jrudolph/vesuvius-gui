@@ -300,8 +300,13 @@ fn color_from_palette(idx: usize) -> Color32 {
 /* const CROP: [usize; 3] = [2400, 3000, 9300];
 const CROP_SIZE: [usize; 3] = [2000, 2000, 2000]; */
 
-const CROP: [usize; 3] = [2400, 3000, 9300];
-const CROP_SIZE: [usize; 3] = [1000, 1000, 5000];
+const CROP: [usize; 3] = [2400, 3000, 7500];
+const CROP_SIZE: [usize; 3] = [2000, 2000, 4000];
+// the max distance to consider for the dijkstra algorithm, i.e. between two points on the fiber to be still considered connected
+// we need a cut-off to guard against the huge clusters
+const MAX_DISTANCE: i32 = 300;
+// skip large cluster for now because of the large slowdown of figuring out pairwise distances O(n^2)
+const SKIP_LARGE_CLUSTERS_THRESHOLD: usize = 120;
 
 /* const CROP: [usize; 3] = [2585, 3013, 9300];
 const CROP_SIZE: [usize; 3] = [30, 45, 1]; */
@@ -930,7 +935,7 @@ fn analyze_collisions() {
         }
     }
 
-    fn dijkstra(start: [u16; 3], map: &Map) -> DistanceMap {
+    fn dijkstra(start: [u16; 3], map: &Map, max_distance: i32) -> DistanceMap {
         let mut distances = HashMap::default();
         let mut queue: PriorityQueue<[u16; 3], Reverse<i32>> = PriorityQueue::new();
         queue.push(start, Reverse(0));
@@ -939,7 +944,7 @@ fn analyze_collisions() {
         while let Some((p, Reverse(distance))) = queue.pop() {
             for neighbor in map.neighbors(p) {
                 let new_distance = distance + 1;
-                if new_distance < *distances.get(&neighbor).unwrap_or(&i32::MAX) {
+                if new_distance <= max_distance && new_distance < *distances.get(&neighbor).unwrap_or(&i32::MAX) {
                     distances.insert(neighbor, new_distance);
                     queue.push_increase(neighbor, Reverse(new_distance));
                 }
@@ -1041,18 +1046,24 @@ fn analyze_collisions() {
 
         // calculate the geodesic adjacency matrix for all collision points on h22554
         let mut adjacency_matrix: HashMap<(D::AcrossId, D::AcrossId), u64> = HashMap::default();
-        for start_coll @ Collision {
-            x: start_x,
-            y: start_y,
-            z: start_z,
-            ..
-        } in collisions
+        for (
+            i,
+            start_coll @ Collision {
+                x: start_x,
+                y: start_y,
+                z: start_z,
+                ..
+            },
+        ) in collisions.iter().enumerate()
         {
             let start_id_across = D::get_across_id(start_coll);
             println!(
-                "At {}{} start_id_across: {}",
-                D::across_id_prefix(),
+                "At {}{} [{}/{}] start_id_across: {}{}",
+                D::along_id_prefix(),
                 along_id,
+                i,
+                collisions.len(),
+                D::across_id_prefix(),
                 start_id_across
             );
             let start = [*start_x, *start_y, *start_z];
@@ -1070,7 +1081,7 @@ fn analyze_collisions() {
             } else {
                 start
             };
-            let distances = dijkstra(start, &map);
+            let distances = dijkstra(start, &map, MAX_DISTANCE);
             println!("distances: {}", distances.distances.len());
 
             for end_coll @ Collision {
@@ -1129,6 +1140,11 @@ fn analyze_collisions() {
             }
             adjacency_matrix
         } else {
+            // skip large clusters for now
+            if collisions.len() > SKIP_LARGE_CLUSTERS_THRESHOLD {
+                return HashMap::default();
+            }
+
             let adjacency_matrix = create_adjacency_matrix::<D>(along_id, collisions, cloud);
             let tmp_file = format!("{}.tmp", file_name);
             let dir = Path::new(&file_name).parent().unwrap();
@@ -1587,7 +1603,7 @@ fn analyze_collisions() {
 
     file.write(b"}\n").unwrap();
 
-    fn write_obj_from_grid(colls: &[Collision], grid: &HashMap<GridCoord, CollisionPoint>) {
+    fn write_obj_from_grid(grid_id: u32, colls: &[Collision], grid: &HashMap<GridCoord, CollisionPoint>) {
         let position_map = colls
             .iter()
             .map(|c| ((c.h_id, c.v_id), (c.x, c.y, c.z)))
@@ -1630,7 +1646,7 @@ fn analyze_collisions() {
             }
         }
 
-        let mut file = File::create("data/vertices.obj").unwrap();
+        let mut file = File::create(format!("data/vertices-{}.obj", grid_id)).unwrap();
         for ((x, y, z), (u, v)) in vertices.iter() {
             file.write(format!("v {} {} {}\n", x, y, z).as_bytes()).unwrap();
             file.write(
