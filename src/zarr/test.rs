@@ -1208,6 +1208,15 @@ fn analyze_collisions() {
                     .take(2);
                 [next2.next().unwrap(), next2.next().unwrap()]
             }
+            fn neighbors3(&self, key: &AcrossId) -> [(AcrossId, u64); 3] {
+                let mut neighbors = self.neighbors(key);
+                let mut next3 = neighbors
+                    .into_iter()
+                    //.filter(|(_, dist)| *dist > 30) // FIXME: hacky way to ignore points that are too close
+                    .sorted_by_key(|(id, dist)| *dist)
+                    .take(3);
+                [next3.next().unwrap(), next3.next().unwrap(), next3.next().unwrap()]
+            }
             fn neighbor1(&self, key: &AcrossId) -> (AcrossId, u64) {
                 //self.neighbors2(key)[0]
                 self.neighbors(key).into_iter().min_by_key(|(_, d)| *d).unwrap()
@@ -1246,6 +1255,12 @@ fn analyze_collisions() {
         let keys = collisions.iter().map(|x| D::get_across_id(x)).collect::<HashSet<_>>();
         keys.iter().for_each(|&key| {
             let num_neighbors = adjacency.neighbors(&key).len();
+            /* if num_neighbors >= 3 {
+                let [(n1, d1), (n2, d2), (n3, d3)] = adjacency.neighbors3(&key);
+                edges.insert(Edge::new(key, n1, d1));
+                edges.insert(Edge::new(key, n2, d2));
+                edges.insert(Edge::new(key, n3, d3));
+            } else */
             if num_neighbors >= 2 {
                 let [(n1, d1), (n2, d2)] = adjacency.neighbors2(&key);
                 edges.insert(Edge::new(key, n1, d1));
@@ -1255,6 +1270,98 @@ fn analyze_collisions() {
                 edges.insert(Edge::new(key, n1, d1));
             }
         });
+
+        fn remove_high_rank_nodes<D: Direction>(adjacency: &mut Adjacency<D::AcrossId>, keys: &HashSet<D::AcrossId>) {
+            for key in keys {
+                let num_neighbors = adjacency.neighbors(&key).len();
+                if num_neighbors > 3 {
+                    adjacency.remove_node(key);
+                }
+            }
+        }
+        fn resolve_triangles<D: Direction>(adjacency: &mut Adjacency<D::AcrossId>, keys: &HashSet<D::AcrossId>) {
+            // find all triangles
+            let mut triangles: HashSet<[(D::AcrossId, usize); 3]> = HashSet::default();
+            let sorted_keys = keys.iter().sorted().cloned().collect::<Vec<_>>();
+            for u in &sorted_keys {
+                let neighbors = adjacency.neighbors(u);
+                for v in neighbors.keys() {
+                    if *v <= *u {
+                        continue;
+                    }
+                    let neighbors2 = adjacency.neighbors(v);
+                    for w in neighbors2.keys() {
+                        if *w <= *v {
+                            continue;
+                        }
+                        if neighbors.keys().contains(w) {
+                            let neighbors3 = adjacency.neighbors(w);
+                            triangles.insert([(*u, neighbors.len()), (*v, neighbors2.len()), (*w, neighbors3.len())]);
+                        }
+                    }
+                }
+            }
+            println!("Triangles: {}", triangles.len());
+            triangles.iter().for_each(|t| {
+                println!(
+                    "{} ({}) {} ({}) {} ({})",
+                    t[0].0, t[0].1, t[1].0, t[1].1, t[2].0, t[2].1
+                );
+            });
+
+            for t in triangles {
+                let with_rank_3 = t.iter().filter(|(_, rank)| *rank == 3).collect::<Vec<_>>();
+
+                match with_rank_3.len() {
+                    0 => {
+                        // remove the longest edge of the triangle
+                        let edges = [
+                            (t[0].0, t[1].0, adjacency.get_distance(&t[0].0, &t[1].0).unwrap()),
+                            (t[0].0, t[2].0, adjacency.get_distance(&t[0].0, &t[2].0).unwrap()),
+                            (t[1].0, t[2].0, adjacency.get_distance(&t[1].0, &t[2].0).unwrap()),
+                        ];
+                        let longest_edge = edges.iter().max_by_key(|(_, _, d)| *d).unwrap();
+                        adjacency.remove_edge(&longest_edge.0, &longest_edge.1);
+                    }
+                    1 => {
+                        // ballon shape, will happen at every corner of the graph due to its construction
+                        // just remove the longer of the two edges leading to the triangle
+                        let single = with_rank_3[0].0;
+                        let ns = adjacency.neighbors(&single);
+                        let other_nodes = t.iter().filter(|(id, _)| *id != single).collect::<Vec<_>>();
+                        let d1 = adjacency.get_distance(&single, &other_nodes[0].0).unwrap();
+                        let d2 = adjacency.get_distance(&single, &other_nodes[1].0).unwrap();
+                        if d1 > d2 {
+                            adjacency.remove_edge(&single, &other_nodes[0].0);
+                        } else {
+                            adjacency.remove_edge(&single, &other_nodes[1].0);
+                        }
+                    }
+                    2 => {
+                        // one extra node, sitting "on the side", two options:
+                        //  - remove the extra node (since it has non-linear geometry leading to the triangle)
+                        //  - include the extra node in a linear path (<- do this for now)
+                        adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[1].0);
+                    }
+                    3 => {
+                        // remove triangle but keep nodes on their resp linear paths
+                        adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[1].0);
+                        adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[2].0);
+                        adjacency.remove_edge(&with_rank_3[1].0, &with_rank_3[2].0);
+                    }
+                    _ => panic!("Invalid number of nodes with rank 3: {}", with_rank_3.len()),
+                }
+            }
+        }
+
+        fn remove_rank_3_nodes<D: Direction>(adjacency: &mut Adjacency<D::AcrossId>, keys: &HashSet<D::AcrossId>) {
+            for key in keys {
+                let num_neighbors = adjacency.neighbors(&key).len();
+                if num_neighbors >= 3 {
+                    adjacency.remove_node(key);
+                }
+            }
+        }
 
         // create pruned adjacency matrix
         let matrix = edges.into_iter().map(|Edge(e1, e2, d)| ((e1, e2), d)).collect();
@@ -1270,94 +1377,10 @@ fn analyze_collisions() {
 
         // step 1
         let mut keys = keys.clone();
-        //let mut removed = HashSet::default();
 
-        for key in &keys {
-            let num_neighbors = adjacency.neighbors(&key).len();
-            if num_neighbors > 3 {
-                adjacency.remove_node(key);
-            }
-        }
-
-        // find all triangles
-        let mut triangles: HashSet<[(D::AcrossId, usize); 3]> = HashSet::default();
-        let sorted_keys = keys.iter().sorted().cloned().collect::<Vec<_>>();
-        for u in &sorted_keys {
-            let neighbors = adjacency.neighbors(u);
-            for v in neighbors.keys() {
-                if *v <= *u {
-                    continue;
-                }
-                let neighbors2 = adjacency.neighbors(v);
-                for w in neighbors2.keys() {
-                    if *w <= *v {
-                        continue;
-                    }
-                    if neighbors.keys().contains(w) {
-                        let neighbors3 = adjacency.neighbors(w);
-                        triangles.insert([(*u, neighbors.len()), (*v, neighbors2.len()), (*w, neighbors3.len())]);
-                    }
-                }
-            }
-        }
-        println!("Triangles: {}", triangles.len());
-        triangles.iter().for_each(|t| {
-            println!(
-                "{} ({}) {} ({}) {} ({})",
-                t[0].0, t[0].1, t[1].0, t[1].1, t[2].0, t[2].1
-            );
-        });
-
-        for t in triangles {
-            let with_rank_3 = t.iter().filter(|(_, rank)| *rank == 3).collect::<Vec<_>>();
-
-            match with_rank_3.len() {
-                0 => {
-                    // remove the longest edge of the triangle
-                    let edges = [
-                        (t[0].0, t[1].0, adjacency.get_distance(&t[0].0, &t[1].0).unwrap()),
-                        (t[0].0, t[2].0, adjacency.get_distance(&t[0].0, &t[2].0).unwrap()),
-                        (t[1].0, t[2].0, adjacency.get_distance(&t[1].0, &t[2].0).unwrap()),
-                    ];
-                    let longest_edge = edges.iter().max_by_key(|(_, _, d)| *d).unwrap();
-                    adjacency.remove_edge(&longest_edge.0, &longest_edge.1);
-                }
-                1 => {
-                    // ballon shape, will happen at every corner of the graph due to its construction
-                    // just remove the longer of the two edges leading to the triangle
-                    let single = with_rank_3[0].0;
-                    let ns = adjacency.neighbors(&single);
-                    let other_nodes = t.iter().filter(|(id, _)| *id != single).collect::<Vec<_>>();
-                    let d1 = adjacency.get_distance(&single, &other_nodes[0].0).unwrap();
-                    let d2 = adjacency.get_distance(&single, &other_nodes[1].0).unwrap();
-                    if d1 > d2 {
-                        adjacency.remove_edge(&single, &other_nodes[0].0);
-                    } else {
-                        adjacency.remove_edge(&single, &other_nodes[1].0);
-                    }
-                }
-                2 => {
-                    // one extra node, sitting "on the side", two options:
-                    //  - remove the extra node (since it has non-linear geometry leading to the triangle)
-                    //  - include the extra node in a linear path (<- do this for now)
-                    adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[1].0);
-                }
-                3 => {
-                    // remove triangle but keep nodes on their resp linear paths
-                    adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[1].0);
-                    adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[2].0);
-                    adjacency.remove_edge(&with_rank_3[1].0, &with_rank_3[2].0);
-                }
-                _ => panic!("Invalid number of nodes with rank 3: {}", with_rank_3.len()),
-            }
-        }
-
-        for key in &keys {
-            let num_neighbors = adjacency.neighbors(&key).len();
-            if num_neighbors >= 3 {
-                adjacency.remove_node(key);
-            }
-        }
+        remove_high_rank_nodes::<D>(&mut adjacency, &keys);
+        resolve_triangles::<D>(&mut adjacency, &keys);
+        remove_rank_3_nodes::<D>(&mut adjacency, &keys);
 
         /* let mut edges = HashSet::default();
         let keys = collisions.iter().map(|x| D::get_across_id(x)).collect::<HashSet<_>>();
