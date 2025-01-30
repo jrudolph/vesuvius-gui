@@ -558,7 +558,7 @@ fn connected_components2(array: &ZarrContextBase<3>, target_class: u8) {
 #[test]
 fn test_connected_components() {
     let zarr: ZarrArray<3, u8> =
-        ZarrArray::from_path("/home/johannes/tmp/pap/bruniss/scrolls/s1/fibers/vt_regular.zarr");
+        ZarrArray::from_path("/home/johannes/tmp/pap/bruniss/scrolls/s1/fibers/hz_regular.zarr");
     let mut zarr = zarr.into_ctx();
     connected_components2(&mut zarr, 255);
     //connected_components2(&mut zarr, 2);
@@ -1112,7 +1112,7 @@ fn analyze_collisions() {
                 if let Some(distance) = distances.get(&end) {
                     adjacency_matrix.insert((start_id_across, end_id_across), distance as u64);
                 } else {
-                    println!("No distance found for {:?}", end_coll);
+                    //println!("No distance found for {:?}", end_coll);
                 }
             }
         }
@@ -1603,6 +1603,8 @@ fn analyze_collisions() {
 
     file.write(b"}\n").unwrap();
 
+    type GridCoord = (i32, i32);
+
     fn write_obj_from_grid(grid_id: u32, colls: &[Collision], grid: &HashMap<GridCoord, CollisionPoint>) {
         let position_map = colls
             .iter()
@@ -1680,178 +1682,261 @@ fn analyze_collisions() {
         }
     }
 
-    type GridCoord = (i32, i32);
-    struct Grid {
-        grid: HashMap<GridCoord, CollisionPoint>,
-        positions: HashMap<CollisionPoint, GridCoord>,
-    }
-    impl Grid {
-        fn new() -> Self {
-            Self {
-                grid: HashMap::default(),
-                positions: HashMap::default(),
+    // Somewhat failed experiment to build a grid from all squares found in the graph
+    fn build_grid_from_squares(global_edges: &[GlobalEdge], colls: &[Collision]) {
+        struct Grid {
+            grid: HashMap<GridCoord, CollisionPoint>,
+            positions: HashMap<CollisionPoint, GridCoord>,
+        }
+        impl Grid {
+            fn new() -> Self {
+                Self {
+                    grid: HashMap::default(),
+                    positions: HashMap::default(),
+                }
+            }
+            fn insert(&mut self, position: GridCoord, point: CollisionPoint) {
+                self.grid.insert(position, point);
+                self.positions.insert(point, position);
+            }
+            fn at_pos(&self, position: GridCoord) -> Option<CollisionPoint> {
+                self.grid.get(&position).cloned()
+            }
+            fn get_position(&self, point: CollisionPoint) -> Option<GridCoord> {
+                self.positions.get(&point).cloned()
             }
         }
-        fn insert(&mut self, position: GridCoord, point: CollisionPoint) {
-            self.grid.insert(position, point);
-            self.positions.insert(point, position);
-        }
-        fn at_pos(&self, position: GridCoord) -> Option<CollisionPoint> {
-            self.grid.get(&position).cloned()
-        }
-        fn get_position(&self, point: CollisionPoint) -> Option<GridCoord> {
-            self.positions.get(&point).cloned()
-        }
-    }
-    //let mut grid: HashMap<(u32, u32), CollisionPoint> = HashMap::default();
-    let mut grid = Grid::new();
+        //let mut grid: HashMap<(u32, u32), CollisionPoint> = HashMap::default();
 
-    // iteratively add points to grid by looking at graph
-    // start with one square:
-    // 1000,1000 h5275_v7449
-    // 1001,1000 h5275_v761
-    // 1000,1001 h4881_v7449
-    // 1001,1001 h4881_v761
-
-    let n1 = CollisionPoint::new(5275, 7449);
-    let n2 = CollisionPoint::new(5275, 761);
-    let n3 = CollisionPoint::new(4881, 7449);
-    let n4 = CollisionPoint::new(4881, 761);
-
-    let mut edges: HashSet<Edge<CollisionPoint>> = HashSet::default();
-    grid.insert((0, 0), n1);
-    grid.insert((1, 0), n2);
-    grid.insert((0, 1), n3);
-    grid.insert((1, 1), n4);
-
-    let mut queue = VecDeque::from([(n1, (0, 0)), (n2, (1, 0)), (n3, (0, 1)), (n4, (1, 1))]);
-
-    let mut horizontal_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>> = HashMap::default();
-    let mut vertical_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>> = HashMap::default();
-    global_edges.iter().for_each(|g| {
-        let is_horizontal = g.p1.horizontal_id == g.p2.horizontal_id;
-        if is_horizontal {
-            horizontal_neighbors
-                .entry(g.p1)
-                .or_insert(HashSet::default())
-                .insert(g.p2);
-            horizontal_neighbors
-                .entry(g.p2)
-                .or_insert(HashSet::default())
-                .insert(g.p1);
-        } else {
-            vertical_neighbors
-                .entry(g.p1)
-                .or_insert(HashSet::default())
-                .insert(g.p2);
-            vertical_neighbors
-                .entry(g.p2)
-                .or_insert(HashSet::default())
-                .insert(g.p1);
-        }
-    });
-    struct PathFinder {
-        horizontal_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
-        vertical_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
-    }
-    impl PathFinder {
-        fn new(
+        let mut horizontal_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>> = HashMap::default();
+        let mut vertical_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>> = HashMap::default();
+        global_edges.iter().for_each(|g| {
+            let is_horizontal = g.p1.horizontal_id == g.p2.horizontal_id;
+            if is_horizontal {
+                horizontal_neighbors
+                    .entry(g.p1)
+                    .or_insert(HashSet::default())
+                    .insert(g.p2);
+                horizontal_neighbors
+                    .entry(g.p2)
+                    .or_insert(HashSet::default())
+                    .insert(g.p1);
+            } else {
+                vertical_neighbors
+                    .entry(g.p1)
+                    .or_insert(HashSet::default())
+                    .insert(g.p2);
+                vertical_neighbors
+                    .entry(g.p2)
+                    .or_insert(HashSet::default())
+                    .insert(g.p1);
+            }
+        });
+        struct PathFinder {
             horizontal_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
             vertical_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
-        ) -> Self {
-            Self {
-                horizontal_neighbors,
-                vertical_neighbors,
-            }
         }
-        fn find_squares_at_horizontal_first(&self, point: CollisionPoint) -> Vec<[CollisionPoint; 4]> {
-            let mut squares = vec![];
-            for p1 in self.horizontal_neighbors.get(&point).unwrap_or(&HashSet::default()) {
-                for p2 in self.vertical_neighbors.get(p1).unwrap_or(&HashSet::default()) {
-                    for p3 in self.horizontal_neighbors.get(p2).unwrap_or(&HashSet::default()) {
-                        for p4 in self.vertical_neighbors.get(p3).unwrap_or(&HashSet::default()) {
-                            if p4 == &point {
-                                squares.push([*p1, *p2, *p3, *p4]);
+        impl PathFinder {
+            fn new(
+                horizontal_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
+                vertical_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
+            ) -> Self {
+                Self {
+                    horizontal_neighbors,
+                    vertical_neighbors,
+                }
+            }
+            fn horizontal_neighbors(
+                &self,
+                point: &CollisionPoint,
+                whitelist: &impl Fn(&CollisionPoint) -> bool,
+            ) -> HashSet<CollisionPoint> {
+                self.horizontal_neighbors
+                    .get(point)
+                    .unwrap_or(&HashSet::default())
+                    .clone()
+                    .into_iter()
+                    .filter(|p| whitelist(p))
+                    .collect()
+            }
+            fn vertical_neighbors(
+                &self,
+                point: &CollisionPoint,
+                whitelist: &impl Fn(&CollisionPoint) -> bool,
+            ) -> HashSet<CollisionPoint> {
+                self.vertical_neighbors
+                    .get(point)
+                    .unwrap_or(&HashSet::default())
+                    .clone()
+                    .into_iter()
+                    .filter(|p| whitelist(p))
+                    .collect()
+            }
+            fn find_squares_at_horizontal_first(
+                &self,
+                point: &CollisionPoint,
+                whitelist: &impl Fn(&CollisionPoint) -> bool,
+            ) -> Vec<[CollisionPoint; 4]> {
+                let mut squares = vec![];
+                for p1 in self.horizontal_neighbors(point, whitelist) {
+                    for p2 in self.vertical_neighbors(&p1, whitelist) {
+                        for p3 in self.horizontal_neighbors(&p2, whitelist) {
+                            for p4 in self.vertical_neighbors(&p3, whitelist) {
+                                if p4 == *point {
+                                    squares.push([p1, p2, p3, p4]);
+                                }
                             }
                         }
                     }
                 }
+                squares
             }
-            squares
+        }
+
+        let path_finder = PathFinder::new(horizontal_neighbors, vertical_neighbors);
+
+        let mut all_nodes =
+        // count number of nodes that can make squares
+        global_edges.iter().flat_map(|g| [g.p1, g.p2])
+        .filter(|node| path_finder.find_squares_at_horizontal_first(node, &|node| true).len() > 0)
+        .collect::<HashSet<_>>();
+        println!("Number of nodes that can make squares: {}", all_nodes.len());
+
+        {
+            let mut grid_id = 0;
+
+            while (all_nodes.len() > 0) {
+                let mut grid = Grid::new();
+
+                // select initial square
+                let n0 = *all_nodes.iter().next().unwrap();
+                let paths = path_finder.find_squares_at_horizontal_first(&n0, &|node| all_nodes.contains(node));
+                let [n1, n2, n3, n0] = paths.first().unwrap();
+
+                grid.insert((0, 0), *n0);
+                grid.insert((1, 0), *n1);
+                grid.insert((1, 1), *n2);
+                grid.insert((0, 1), *n3);
+
+                let mut queue = VecDeque::from([(*n0, (0, 0)), (*n1, (1, 0)), (*n2, (1, 1)), (*n3, (0, 1))]);
+
+                /*
+                // start with one square:
+                // 1000,1000 h5275_v7449
+                // 1001,1000 h5275_v761
+                // 1000,1001 h4881_v7449
+                // 1001,1001 h4881_v761
+                let n1 = CollisionPoint::new(5275, 7449);
+                let n2 = CollisionPoint::new(5275, 761);
+                let n3 = CollisionPoint::new(4881, 7449);
+                let n4 = CollisionPoint::new(4881, 761);
+
+                let mut edges: HashSet<Edge<CollisionPoint>> = HashSet::default();
+                grid.insert((0, 0), n1);
+                grid.insert((1, 0), n2);
+                grid.insert((0, 1), n3);
+                grid.insert((1, 1), n4);
+
+                let mut queue = VecDeque::from([(n1, (0, 0)), (n2, (1, 0)), (n3, (0, 1)), (n4, (1, 1))]);*/
+                while let Some((current, (x, y))) = queue.pop_front() {
+                    println!("Processing {:?} at {:?}", current, (x, y));
+
+                    let grid_neighbors = [
+                        (x - 1, y),
+                        (x + 1, y),
+                        (x, y - 1),
+                        (x, y + 1),
+                        (x - 1, y - 1),
+                        (x - 1, y + 1),
+                        (x + 1, y - 1),
+                        (x + 1, y + 1),
+                    ];
+                    if grid_neighbors.iter().all(|(x, y)| grid.at_pos((*x, *y)).is_some()) {
+                        println!("Skipping {:?} at {:?}", current, (x, y));
+                        continue; // done for this point as whole neighborhood is already in grid
+                    }
+
+                    for [p1, p2, p3, p4] in
+                        path_finder.find_squares_at_horizontal_first(&current, &|node| all_nodes.contains(node))
+                    {
+                        //println!("Found square {:?}", [p1, p2, p3, p4]);
+                        let dx = if let Some(p1) = grid.get_position(p1) {
+                            p1.0 - x
+                        } else {
+                            // exactly one neighbor must be in the grid already, find out which one, and go in opposite direction
+                            x - [(x - 1, y), (x + 1, y)]
+                                .iter()
+                                .find(|(x, y)| grid.at_pos((*x, *y)).is_some())
+                                .unwrap()
+                                .0
+                        };
+
+                        let dy = if let Some(p3) = grid.get_position(p3) {
+                            p3.1 - y
+                        } else {
+                            y - [(x, y - 1), (x, y + 1)]
+                                .iter()
+                                .find(|(x, y)| grid.at_pos((*x, *y)).is_some())
+                                .unwrap()
+                                .1
+                        };
+
+                        // println!("dx: {}, dy: {}", dx, dy);
+
+                        // p1 -> (x+dx, y)
+                        // p2 -> (x+dx, y+dy)
+                        // p3 -> (x, y+dy)
+                        // p4 -> (x, y)
+                        if !grid.get_position(p1).is_some() {
+                            //println!("Adding p1 to grid at {:?}", (x + dx, y));
+                            grid.insert((x + dx, y), p1);
+                            queue.push_back((p1, (x + dx, y)));
+                        }
+                        if !grid.get_position(p2).is_some() {
+                            //println!("Adding p2 to grid at {:?}", (x + dx, y + dy));
+                            grid.insert((x + dx, y + dy), p2);
+                            queue.push_back((p2, (x + dx, y + dy)));
+                        }
+                        if !grid.get_position(p3).is_some() {
+                            //println!("Adding p3 to grid at {:?}", (x, y + dy));
+                            grid.insert((x, y + dy), p3);
+                            queue.push_back((p3, (x, y + dy)));
+                        }
+                    }
+                }
+                grid.grid.iter().for_each(|(pos, p)| {
+                    println!("{:?}: {:?}", pos, p);
+                });
+
+                let min_grid_x = grid.grid.keys().map(|(x, _)| x).min().unwrap();
+                let min_grid_y = grid.grid.keys().map(|(_, y)| y).min().unwrap();
+
+                let new_grid = grid
+                    .grid
+                    .iter()
+                    .map(|(pos, p)| ((pos.0 - min_grid_x, pos.1 - min_grid_y), *p))
+                    .collect::<HashMap<_, _>>();
+
+                write_obj_from_grid(grid_id, &colls, &new_grid);
+                grid_id += 1;
+
+                let nodes_in_grid = grid.grid.values().cloned().collect::<HashSet<_>>();
+                let old_len = all_nodes.len();
+                all_nodes = all_nodes.into_iter().filter(|n| !nodes_in_grid.contains(n)).collect();
+                all_nodes = all_nodes
+                    .iter()
+                    .filter(|n| {
+                        path_finder
+                            .find_squares_at_horizontal_first(n, &|node| all_nodes.contains(node))
+                            .len()
+                            > 0
+                    })
+                    .cloned()
+                    .collect();
+                println!("{} -> {} (in grid {})", old_len, all_nodes.len(), nodes_in_grid.len());
+            }
         }
     }
-
-    let path_finder = PathFinder::new(horizontal_neighbors, vertical_neighbors);
-
-    while let Some((current, (x, y))) = queue.pop_front() {
-        println!("Processing {:?} at {:?}", current, (x, y));
-
-        let grid_neighbors = [
-            (x - 1, y),
-            (x + 1, y),
-            (x, y - 1),
-            (x, y + 1),
-            (x - 1, y - 1),
-            (x - 1, y + 1),
-            (x + 1, y - 1),
-            (x + 1, y + 1),
-        ];
-        if grid_neighbors.iter().all(|(x, y)| grid.at_pos((*x, *y)).is_some()) {
-            println!("Skipping {:?} at {:?}", current, (x, y));
-            continue; // done for this point as whole neighborhood is already in grid
-        }
-
-        for [p1, p2, p3, p4] in path_finder.find_squares_at_horizontal_first(current) {
-            //println!("Found square {:?}", [p1, p2, p3, p4]);
-            let dx = if let Some(p1) = grid.get_position(p1) {
-                p1.0 - x
-            } else {
-                // exactly one neighbor must be in the grid already, find out which one, and go in opposite direction
-                x - [(x - 1, y), (x + 1, y)]
-                    .iter()
-                    .find(|(x, y)| grid.at_pos((*x, *y)).is_some())
-                    .unwrap()
-                    .0
-            };
-
-            let dy = if let Some(p3) = grid.get_position(p3) {
-                p3.1 - y
-            } else {
-                y - [(x, y - 1), (x, y + 1)]
-                    .iter()
-                    .find(|(x, y)| grid.at_pos((*x, *y)).is_some())
-                    .unwrap()
-                    .1
-            };
-
-            // println!("dx: {}, dy: {}", dx, dy);
-
-            // p1 -> (x+dx, y)
-            // p2 -> (x+dx, y+dy)
-            // p3 -> (x, y+dy)
-            // p4 -> (x, y)
-            if !grid.get_position(p1).is_some() {
-                //println!("Adding p1 to grid at {:?}", (x + dx, y));
-                grid.insert((x + dx, y), p1);
-                queue.push_back((p1, (x + dx, y)));
-            }
-            if !grid.get_position(p2).is_some() {
-                //println!("Adding p2 to grid at {:?}", (x + dx, y + dy));
-                grid.insert((x + dx, y + dy), p2);
-                queue.push_back((p2, (x + dx, y + dy)));
-            }
-            if !grid.get_position(p3).is_some() {
-                //println!("Adding p3 to grid at {:?}", (x, y + dy));
-                grid.insert((x, y + dy), p3);
-                queue.push_back((p3, (x, y + dy)));
-            }
-        }
-    }
-    grid.grid.iter().for_each(|(pos, p)| {
-        println!("{:?}: {:?}", pos, p);
-    });
-
-    write_obj_from_grid(&colls, &grid.grid);
 
     /*let h_whitelist: HashSet<_> = vec![
             3260, 351, 4785, 3036, 4881, 5275, 2970, 5332, 934, 5017, 3158, 3791, 3637, 3177, 3181, 5113, 4685, 1049,
