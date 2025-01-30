@@ -1505,14 +1505,46 @@ fn analyze_collisions() {
     //let h_candidates: HashSet<_> = vec![7317].into_iter().collect();
     //let horizontal_id = 7317;
     let colls: Vec<Collision> = colls.into_iter().map(|x| x.into()).collect::<Vec<_>>();
-    let mut global_edges: Vec<GlobalEdge> = Vec::new();
+
+    let horizontal_neighbors = colls
+        .iter()
+        .sorted_by_key(|x| x.h_id)
+        .chunk_by(|x| x.h_id)
+        .into_iter()
+        .map(|(x, vs)| (x, vs.collect::<HashSet<_>>()))
+        .collect::<Vec<_>>();
+
+    let selected_horizontal_ids = horizontal_neighbors
+        .iter()
+        .filter(|(_, vs)| vs.len() >= 8)
+        .map(|(x, _)| *x)
+        .collect::<HashSet<_>>();
+
+    let vertical_neighbors = colls
+        .iter()
+        .sorted_by_key(|x| x.v_id)
+        .chunk_by(|x| x.v_id)
+        .into_iter()
+        .map(|(x, vs)| (x, vs.collect::<HashSet<_>>()))
+        .collect::<Vec<_>>();
+
+    let selected_vertical_ids = vertical_neighbors
+        .iter()
+        .filter(|(_, vs)| vs.len() >= 8)
+        .map(|(x, _)| *x)
+        .collect::<HashSet<_>>();
+
+    let colls = colls
+        .into_iter()
+        .filter(|c| selected_horizontal_ids.contains(&c.h_id) && selected_vertical_ids.contains(&c.v_id))
+        .collect::<Vec<_>>();
+
+    let horizontal_blacklist: HashSet<u32> = vec![].into_iter().collect();
+    let vertical_blacklist: HashSet<u32> = vec![].into_iter().collect();
     /* global_edges.extend(create_horizontal_graph(7317, &colls));
     global_edges.extend(create_horizontal_graph(672, &colls));
     global_edges.extend(create_vertical_graph(13594, &colls));
     global_edges.extend(create_vertical_graph(10281, &colls)); */
-
-    let horizontal_blacklist: HashSet<_> = vec![345].into_iter().collect();
-    let vertical_blacklist: HashSet<_> = vec![2131, 8168].into_iter().collect();
 
     let all_horizontal_ids = colls
         .iter()
@@ -1531,6 +1563,7 @@ fn analyze_collisions() {
     let num_horizontal_ids = all_horizontal_ids.len();
     let num_vertical_ids = all_vertical_ids.len();
 
+    let mut global_edges: Vec<GlobalEdge> = Vec::new();
     all_horizontal_ids
         .into_par_iter()
         .progress_count(num_horizontal_ids as u64)
