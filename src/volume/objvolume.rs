@@ -303,12 +303,18 @@ impl ObjVolume {
     pub fn load_obj(file_path: &str) -> ObjFile {
         let obj_file = std::fs::read_to_string(file_path).unwrap();
         // filter out material definitions that wavefront_obj does not cope well with
-        let obj_file = obj_file
+        let (not_faces, faces): (Vec<_>, Vec<_>) = obj_file
             .lines()
             .filter(|line| !line.starts_with("mtllib"))
             .filter(|line| !line.starts_with("usemtl"))
+            .partition(|line| !line.starts_with("f"));
+
+        let obj_file = not_faces
+            .into_iter()
+            .chain(faces.into_iter())
             .collect::<Vec<_>>()
             .join("\n");
+
         let obj_set = obj::parse(obj_file).unwrap();
 
         let mut objects = obj_set.objects;
