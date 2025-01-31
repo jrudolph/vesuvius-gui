@@ -1138,6 +1138,9 @@ impl eframe::App for TemplateApp {
             });
 
         self.update_main(ctx, frame);
-        self.collision_panel.draw(ctx);
+        if let Some(new_pos) = self.collision_panel.draw(ctx) {
+            self.coord = new_pos;
+            self.clear_textures();
+        }
     }
 }
