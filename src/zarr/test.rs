@@ -833,7 +833,7 @@ fn analyze_collisions() {
             println!("{}: {}", count, num);
         }); */
 
-    // create new dot file that only contains edges where the vertical has rank 2
+    // create new dot file that only contains edges where the vertical has degree 2
     /* let selected_vertical = colls
     .iter()
     .sorted_by_key(|x| x.1)
@@ -1276,7 +1276,7 @@ fn analyze_collisions() {
             }
         });
 
-        fn remove_high_rank_nodes<D: Direction>(adjacency: &mut Adjacency<D::AcrossId>, keys: &HashSet<D::AcrossId>) {
+        fn remove_high_degree_nodes<D: Direction>(adjacency: &mut Adjacency<D::AcrossId>, keys: &HashSet<D::AcrossId>) {
             for key in keys {
                 let num_neighbors = adjacency.neighbors(&key).len();
                 if num_neighbors > 3 {
@@ -1315,9 +1315,9 @@ fn analyze_collisions() {
             });
 
             for t in triangles {
-                let with_rank_3 = t.iter().filter(|(_, rank)| *rank == 3).collect::<Vec<_>>();
+                let with_degree_3 = t.iter().filter(|(_, degree)| *degree == 3).collect::<Vec<_>>();
 
-                match with_rank_3.len() {
+                match with_degree_3.len() {
                     0 => {
                         // remove the longest edge of the triangle
                         let edges = [
@@ -1331,7 +1331,7 @@ fn analyze_collisions() {
                     1 => {
                         // ballon shape, will happen at every corner of the graph due to its construction
                         // just remove the longer of the two edges leading to the triangle
-                        let single = with_rank_3[0].0;
+                        let single = with_degree_3[0].0;
                         let ns = adjacency.neighbors(&single);
                         let other_nodes = t.iter().filter(|(id, _)| *id != single).collect::<Vec<_>>();
                         let d1 = adjacency.get_distance(&single, &other_nodes[0].0).unwrap();
@@ -1346,20 +1346,20 @@ fn analyze_collisions() {
                         // one extra node, sitting "on the side", two options:
                         //  - remove the extra node (since it has non-linear geometry leading to the triangle)
                         //  - include the extra node in a linear path (<- do this for now)
-                        adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[1].0);
+                        adjacency.remove_edge(&with_degree_3[0].0, &with_degree_3[1].0);
                     }
                     3 => {
                         // remove triangle but keep nodes on their resp linear paths
-                        adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[1].0);
-                        adjacency.remove_edge(&with_rank_3[0].0, &with_rank_3[2].0);
-                        adjacency.remove_edge(&with_rank_3[1].0, &with_rank_3[2].0);
+                        adjacency.remove_edge(&with_degree_3[0].0, &with_degree_3[1].0);
+                        adjacency.remove_edge(&with_degree_3[0].0, &with_degree_3[2].0);
+                        adjacency.remove_edge(&with_degree_3[1].0, &with_degree_3[2].0);
                     }
-                    _ => panic!("Invalid number of nodes with rank 3: {}", with_rank_3.len()),
+                    _ => panic!("Invalid number of nodes with degree 3: {}", with_degree_3.len()),
                 }
             }
         }
 
-        fn remove_rank_3_nodes<D: Direction>(adjacency: &mut Adjacency<D::AcrossId>, keys: &HashSet<D::AcrossId>) {
+        fn remove_degree_3_nodes<D: Direction>(adjacency: &mut Adjacency<D::AcrossId>, keys: &HashSet<D::AcrossId>) {
             for key in keys {
                 let num_neighbors = adjacency.neighbors(&key).len();
                 if num_neighbors >= 3 {
@@ -1375,17 +1375,17 @@ fn analyze_collisions() {
         // steps:
         //  1. prune all nodes with more than 3 neighbors
         //  2. find and resolve all 3-cliques
-        //      - if 1 node has rank 3, remove the edge of the clique that start at that node and is longest
-        //      - if 2 nodes have rank 3, remove this edge between them
-        //      - if all 3 nodes have rank 3 remove whole clique and start from the beginning?
+        //      - if 1 node has degree 3, remove the edge of the clique that start at that node and is longest
+        //      - if 2 nodes have degree 3, remove this edge between them
+        //      - if all 3 nodes have degree 3 remove whole clique and start from the beginning?
         //  3. prune all remaining nodes with 3 neighbors
 
         // step 1
         let mut keys = keys.clone();
 
-        remove_high_rank_nodes::<D>(&mut adjacency, &keys);
+        remove_high_degree_nodes::<D>(&mut adjacency, &keys);
         resolve_triangles::<D>(&mut adjacency, &keys);
-        remove_rank_3_nodes::<D>(&mut adjacency, &keys);
+        remove_degree_3_nodes::<D>(&mut adjacency, &keys);
 
         /* let mut edges = HashSet::default();
         let keys = collisions.iter().map(|x| D::get_across_id(x)).collect::<HashSet<_>>();
@@ -2235,7 +2235,7 @@ impl CollisionPanel {
                 println!("{}: {}", count, num);
             }); */
 
-        // create new dot file that only contains edges where the vertical has rank 2
+        // create new dot file that only contains edges where the vertical has degree 2
         /* let selected_vertical = colls
         .iter()
         .sorted_by_key(|x| x.1)
