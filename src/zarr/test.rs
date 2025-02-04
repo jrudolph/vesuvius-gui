@@ -1608,118 +1608,120 @@ fn analyze_collisions() {
 
     file.write(b"}\n").unwrap();
 
-    let h_whitelist: HashSet<u32> = vec![
-        9874, 3013, 19229, 18866, 5307, 12948, 13617, 19965, 17452, 11056, 13738, 19305, 9999, 16169, 22282,
-    ]
-    .into_iter()
-    .collect();
-    let v_whitelist: HashSet<u32> = vec![29120, 13748, 16829, 12282, 13540, 25453, 24196, 26723, 34189]
+    fn build_graph_manually(global_edges: &[GlobalEdge], colls: &[Collision]) {
+        let h_whitelist: HashSet<u32> = vec![
+            9874, 3013, 19229, 18866, 5307, 12948, 13617, 19965, 17452, 11056, 13738, 19305, 9999, 16169, 22282,
+        ]
         .into_iter()
         .collect();
-    let h_blacklist: HashSet<u32> = vec![].into_iter().collect();
-    let v_blacklist: HashSet<u32> = vec![].into_iter().collect();
-    let ignore_edges: HashSet<((u32, u32), (u32, u32))> = vec![].into_iter().collect();
+        let v_whitelist: HashSet<u32> = vec![29120, 13748, 16829, 12282, 13540, 25453, 24196, 26723, 34189]
+            .into_iter()
+            .collect();
+        let h_blacklist: HashSet<u32> = vec![].into_iter().collect();
+        let v_blacklist: HashSet<u32> = vec![].into_iter().collect();
+        let ignore_edges: HashSet<((u32, u32), (u32, u32))> = vec![].into_iter().collect();
 
-    let mut file = File::create("data/inc.dot").unwrap();
-    file.write(b"graph {\n").unwrap();
-    file.write(b"edge [len=2.0]\n").unwrap();
-    let selected_edges = global_edges
-        .iter()
-        .filter(|g| {
-            h_whitelist.contains(&g.p1.horizontal_id)
-                || h_whitelist.contains(&g.p2.horizontal_id)
-                || v_whitelist.contains(&g.p1.vertical_id)
-                || v_whitelist.contains(&g.p2.vertical_id)
-        })
-        .filter(|g| !v_blacklist.contains(&g.p1.vertical_id) && !v_blacklist.contains(&g.p2.vertical_id))
-        .filter(|g| !h_blacklist.contains(&g.p1.horizontal_id) && !h_blacklist.contains(&g.p2.horizontal_id))
-        .filter(|g| {
-            !ignore_edges.contains(&(
-                (g.p1.horizontal_id, g.p1.vertical_id),
-                (g.p2.horizontal_id, g.p2.vertical_id),
-            ))
-        })
-        .collect::<Vec<_>>();
-
-    selected_edges.iter().for_each(|g| {
-        let is_vertical = g.p1.vertical_id == g.p2.vertical_id;
-        let color = if is_vertical { "red" } else { "blue" };
-        // add label with distance
-        file.write(
-            format!(
-                "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}, color={}];\n",
-                g.p1.horizontal_id,
-                g.p1.vertical_id,
-                g.p2.horizontal_id,
-                g.p2.vertical_id,
-                g.distance,
-                g.distance,
-                color
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-    });
-
-    let selected_nodes = selected_edges.iter().flat_map(|g| [g.p1, g.p2]).collect::<HashSet<_>>();
-    selected_nodes.iter().for_each(|n| {
-        let coll = colls
+        let mut file = File::create("data/inc.dot").unwrap();
+        file.write(b"graph {\n").unwrap();
+        file.write(b"edge [len=2.0]\n").unwrap();
+        let selected_edges = global_edges
             .iter()
-            .find(|c| c.h_id == n.horizontal_id && c.v_id == n.vertical_id)
+            .filter(|g| {
+                h_whitelist.contains(&g.p1.horizontal_id)
+                    || h_whitelist.contains(&g.p2.horizontal_id)
+                    || v_whitelist.contains(&g.p1.vertical_id)
+                    || v_whitelist.contains(&g.p2.vertical_id)
+            })
+            .filter(|g| !v_blacklist.contains(&g.p1.vertical_id) && !v_blacklist.contains(&g.p2.vertical_id))
+            .filter(|g| !h_blacklist.contains(&g.p1.horizontal_id) && !h_blacklist.contains(&g.p2.horizontal_id))
+            .filter(|g| {
+                !ignore_edges.contains(&(
+                    (g.p1.horizontal_id, g.p1.vertical_id),
+                    (g.p2.horizontal_id, g.p2.vertical_id),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        selected_edges.iter().for_each(|g| {
+            let is_vertical = g.p1.vertical_id == g.p2.vertical_id;
+            let color = if is_vertical { "red" } else { "blue" };
+            // add label with distance
+            file.write(
+                format!(
+                    "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}, color={}];\n",
+                    g.p1.horizontal_id,
+                    g.p1.vertical_id,
+                    g.p2.horizontal_id,
+                    g.p2.vertical_id,
+                    g.distance,
+                    g.distance,
+                    color
+                )
+                .as_bytes(),
+            )
             .unwrap();
-        let z = coll.z;
-        file.write(
-            format!(
-                "h{}_v{} [label=\"h{}\\nv{}\"]\n",
-                n.horizontal_id, n.vertical_id, n.horizontal_id, n.vertical_id
+        });
+
+        let selected_nodes = selected_edges.iter().flat_map(|g| [g.p1, g.p2]).collect::<HashSet<_>>();
+        selected_nodes.iter().for_each(|n| {
+            let coll = colls
+                .iter()
+                .find(|c| c.h_id == n.horizontal_id && c.v_id == n.vertical_id)
+                .unwrap();
+            let z = coll.z;
+            file.write(
+                format!(
+                    "h{}_v{} [label=\"h{}\\nv{}\"]\n",
+                    n.horizontal_id, n.vertical_id, n.horizontal_id, n.vertical_id
+                )
+                .as_bytes(),
             )
-            .as_bytes(),
-        )
-        .unwrap();
-    });
+            .unwrap();
+        });
 
-    file.write(b"}\n").unwrap();
+        file.write(b"}\n").unwrap();
 
-    let selected_edges = global_edges
-        .iter()
-        .filter(|g| {
-            h_whitelist.contains(&g.p1.horizontal_id)
-                && h_whitelist.contains(&g.p2.horizontal_id)
-                && v_whitelist.contains(&g.p1.vertical_id)
-                && v_whitelist.contains(&g.p2.vertical_id)
-        })
-        .filter(|g| {
-            !ignore_edges.contains(&(
-                (g.p1.horizontal_id, g.p1.vertical_id),
-                (g.p2.horizontal_id, g.p2.vertical_id),
-            ))
-        })
-        .collect::<Vec<_>>();
+        let selected_edges = global_edges
+            .iter()
+            .filter(|g| {
+                h_whitelist.contains(&g.p1.horizontal_id)
+                    && h_whitelist.contains(&g.p2.horizontal_id)
+                    && v_whitelist.contains(&g.p1.vertical_id)
+                    && v_whitelist.contains(&g.p2.vertical_id)
+            })
+            .filter(|g| {
+                !ignore_edges.contains(&(
+                    (g.p1.horizontal_id, g.p1.vertical_id),
+                    (g.p2.horizontal_id, g.p2.vertical_id),
+                ))
+            })
+            .collect::<Vec<_>>();
 
-    let mut file = File::create("data/excl.dot").unwrap();
-    file.write(b"graph {\n").unwrap();
-    file.write(b"edge [len=2.0]\n").unwrap();
+        let mut file = File::create("data/excl.dot").unwrap();
+        file.write(b"graph {\n").unwrap();
+        file.write(b"edge [len=2.0]\n").unwrap();
 
-    selected_edges.iter().for_each(|&g| {
-        let is_vertical = g.p1.vertical_id == g.p2.vertical_id;
-        let color = if is_vertical { "red" } else { "blue" };
-        // add label with distance
-        file.write(
-            format!(
-                "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}, color={}];\n",
-                g.p1.horizontal_id,
-                g.p1.vertical_id,
-                g.p2.horizontal_id,
-                g.p2.vertical_id,
-                g.distance,
-                g.distance,
-                color
+        selected_edges.iter().for_each(|&g| {
+            let is_vertical = g.p1.vertical_id == g.p2.vertical_id;
+            let color = if is_vertical { "red" } else { "blue" };
+            // add label with distance
+            file.write(
+                format!(
+                    "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}, color={}];\n",
+                    g.p1.horizontal_id,
+                    g.p1.vertical_id,
+                    g.p2.horizontal_id,
+                    g.p2.vertical_id,
+                    g.distance,
+                    g.distance,
+                    color
+                )
+                .as_bytes(),
             )
-            .as_bytes(),
-        )
-        .unwrap();
-    });
-    file.write(b"}\n").unwrap();
+            .unwrap();
+        });
+        file.write(b"}\n").unwrap();
+    }
 
     type GridCoord = (i32, i32);
 
