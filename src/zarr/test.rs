@@ -970,6 +970,7 @@ fn analyze_collisions() {
             }
         }
     }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
     struct GlobalEdge {
         p1: CollisionPoint,
         p2: CollisionPoint,
@@ -1546,10 +1547,6 @@ fn analyze_collisions() {
 
     let horizontal_blacklist: HashSet<u32> = vec![].into_iter().collect();
     let vertical_blacklist: HashSet<u32> = vec![].into_iter().collect();
-    /* global_edges.extend(create_horizontal_graph(7317, &colls));
-    global_edges.extend(create_horizontal_graph(672, &colls));
-    global_edges.extend(create_vertical_graph(13594, &colls));
-    global_edges.extend(create_vertical_graph(10281, &colls)); */
 
     let all_horizontal_ids = colls
         .iter()
@@ -1590,23 +1587,57 @@ fn analyze_collisions() {
             global_edges.extend(edges);
         });
 
-    // create dot file
-    let mut file = File::create("data/global.dot").unwrap();
-    file.write(b"graph {\n").unwrap();
-    file.write(b"edge [len=2.0]\n").unwrap();
-    global_edges.iter().for_each(|g| {
-        // add label with distance
-        file.write(
-            format!(
-                "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}];\n",
-                g.p1.horizontal_id, g.p1.vertical_id, g.p2.horizontal_id, g.p2.vertical_id, g.distance, g.distance
+    fn write_global_dot_file(global_edges: &[GlobalEdge]) {
+        // create dot file
+        let mut file = File::create("data/global.dot").unwrap();
+        file.write(b"graph {\n").unwrap();
+        file.write(b"edge [len=2.0]\n").unwrap();
+        global_edges.iter().for_each(|g| {
+            // add label with distance
+            file.write(
+                format!(
+                    "h{}_v{} -- h{}_v{} [label=\"{}\", weight=-{}];\n",
+                    g.p1.horizontal_id, g.p1.vertical_id, g.p2.horizontal_id, g.p2.vertical_id, g.distance, g.distance
+                )
+                .as_bytes(),
             )
-            .as_bytes(),
-        )
-        .unwrap();
-    });
+            .unwrap();
+        });
 
-    file.write(b"}\n").unwrap();
+        file.write(b"}\n").unwrap();
+    }
+    write_global_dot_file(&global_edges);
+
+    fn analyze_global_edges(global_edges: &[GlobalEdge]) {
+        // find all connected components
+        let mut components: Vec<HashSet<CollisionPoint>> = Vec::default();
+        let mut visited = HashSet::default();
+        for edge in global_edges {
+            if !visited.contains(&edge.p1) {
+                let mut component = HashSet::default();
+                let mut stack: Vec<CollisionPoint> = vec![edge.p1];
+                while let Some(node) = stack.pop() {
+                    if visited.insert(node) {
+                        component.insert(node);
+                        stack.extend(global_edges.iter().filter(|e| e.p1 == node || e.p2 == node).map(|e| {
+                            if e.p1 == node {
+                                e.p2
+                            } else {
+                                e.p1
+                            }
+                        }));
+                    }
+                }
+                components.push(component);
+            }
+        }
+
+        for component in &components {
+            println!("Component: {:?}", component.len());
+        }
+        println!("Found {} components", components.len());
+    }
+    analyze_global_edges(&global_edges);
 
     fn build_graph_manually(global_edges: &[GlobalEdge], colls: &[Collision]) {
         let h_whitelist: HashSet<u32> = vec![
@@ -1922,6 +1953,8 @@ fn analyze_collisions() {
         .collect::<HashSet<_>>();
         println!("Number of nodes that can make squares: {}", all_nodes.len());
 
+        return;
+
         {
             let mut grid_id = 0;
 
@@ -2057,6 +2090,7 @@ fn analyze_collisions() {
             }
         }
     }
+    build_grid_from_squares(&global_edges, &colls);
 
     /*let h_whitelist: HashSet<_> = vec![
             3260, 351, 4785, 3036, 4881, 5275, 2970, 5332, 934, 5017, 3158, 3791, 3637, 3177, 3181, 5113, 4685, 1049,
