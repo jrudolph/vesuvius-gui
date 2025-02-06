@@ -26,12 +26,30 @@ impl Scroll {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct Urls {
-    pub composite_url: String,
+pub struct SegmentUrls {
+    pub base_url: String,
     pub mask_url: String,
     pub meta_url: String,
     pub obj_url: String,
+    pub composite_url: String,
     pub ppm_url: String,
+    pub author_url: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+#[allow(non_snake_case)]
+pub struct VolumeInfo {
+    pub volume: String,
+    pub base_url: String,
+    pub max_x: usize,
+    pub max_y: usize,
+    pub max_z: usize,
+    #[serde(rename = "voxelSizenM")]
+    pub voxel_size_nm: usize,
+
+    #[serde(rename = "energykeV")]
+    pub energy_keV: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -39,16 +57,21 @@ pub struct Urls {
 pub struct Segment {
     pub id: String,
     pub scroll: Scroll,
-    pub volume: Option<String>,
-    pub height: usize,
     pub width: usize,
-    pub urls: Urls,
+    pub height: usize,
+    pub min_z: Option<usize>,
+    pub max_z: Option<usize>,
+    pub volume: Option<VolumeInfo>,
+    pub urls: SegmentUrls,
     pub area_cm2: Option<f64>,
+    pub author: Option<String>,
+    pub layers: Vec<String>,
+    pub labels: Vec<String>,
 }
 
 impl Segment {
     pub fn volume_ref(&self) -> impl VolumeReference {
-        DynamicFullVolumeReference::new(self.scroll.old_id.clone(), self.volume.as_ref().unwrap().clone())
+        DynamicFullVolumeReference::new(self.scroll.old_id.clone(), self.volume.as_ref().unwrap().volume.clone())
     }
 }
 
@@ -97,7 +120,7 @@ impl Catalog {
 }
 
 pub fn load_segments() -> Vec<Segment> {
-    let zst_compressed = include_bytes!("../../vesuvius-segments-2024-11-27.json.zst");
+    let zst_compressed = include_bytes!("../../vesuvius-segments-2025-02-13.json.zst");
     let uncompressed = zstd_decompress(zst_compressed);
     let json = String::from_utf8(uncompressed).unwrap();
     serde_json::from_str(&json).unwrap()
