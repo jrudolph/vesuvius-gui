@@ -10,6 +10,7 @@ use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
 use crate::zarr::test::CollisionPanel;
+use crate::zarr::test::GraphPanel;
 use crate::zarr::ConnectedFullMapVolume2;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
@@ -148,6 +149,8 @@ pub struct TemplateApp {
     catalog_panel_open: bool,
     #[serde(skip)]
     collision_panel: CollisionPanel,
+    #[serde(skip)]
+    graph_panel: GraphPanel,
 }
 
 impl Default for TemplateApp {
@@ -188,6 +191,7 @@ impl Default for TemplateApp {
             overlay2: None,
             catalog_panel_open: true,
             collision_panel: CollisionPanel::new(),
+            graph_panel: GraphPanel::new(),
         }
     }
 }
@@ -1142,5 +1146,6 @@ impl eframe::App for TemplateApp {
             self.coord = new_pos;
             self.clear_textures();
         }
+        self.graph_panel.draw(ctx);
     }
 }

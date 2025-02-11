@@ -4,7 +4,10 @@ use crate::{
     volume::{PaintVolume, VoxelVolume},
     zarr::{blosc::BloscChunk, ZarrArray},
 };
-use egui::{Color32, ColorImage, Image, Label, Sense, TextureHandle, WidgetText};
+use egui::{
+    pos2, vec2, Align2, Color32, ColorImage, FontFamily, FontId, Frame, Image, Label, Pos2, Rect, Sense, TextureHandle,
+    WidgetText,
+};
 use egui_extras::{Column, TableBuilder};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use image::{GenericImage, GenericImageView, Rgb};
@@ -12,6 +15,7 @@ use itertools::Itertools;
 use memmap::MmapOptions;
 use priority_queue::PriorityQueue;
 use rayon::iter::IntoParallelRefIterator;
+use regex::Regex;
 use std::io::BufRead;
 use std::{
     cmp::Reverse,
@@ -820,6 +824,32 @@ impl From<(u32, u32, u16, u16, u16)> for Collision {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct CollisionPoint {
+    horizontal_id: u32,
+    vertical_id: u32,
+}
+impl CollisionPoint {
+    fn new(horizontal_id: u32, vertical_id: u32) -> Self {
+        Self {
+            horizontal_id,
+            vertical_id,
+        }
+    }
+}
+impl Display for CollisionPoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "h{}_v{}", self.horizontal_id, self.vertical_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct GlobalEdge {
+    p1: CollisionPoint,
+    p2: CollisionPoint,
+    distance: u64,
+}
+
 fn load_collisions() -> Vec<Collision> {
     let file = File::open("data/collisions").unwrap();
     use std::io::BufRead;
@@ -844,6 +874,111 @@ fn load_collisions() -> Vec<Collision> {
         });
     }
     colls
+}
+
+type NeighborWithDistance = (CollisionPoint, u64);
+
+struct PathFinder {
+    horizontal_neighbors: HashMap<CollisionPoint, HashSet<NeighborWithDistance>>,
+    vertical_neighbors: HashMap<CollisionPoint, HashSet<NeighborWithDistance>>,
+}
+impl PathFinder {
+    fn new(global_edges: &[GlobalEdge]) -> PathFinder {
+        let mut horizontal_neighbors: HashMap<CollisionPoint, HashSet<NeighborWithDistance>> = HashMap::default();
+        let mut vertical_neighbors: HashMap<CollisionPoint, HashSet<NeighborWithDistance>> = HashMap::default();
+        global_edges.iter().for_each(|g| {
+            let is_horizontal = g.p1.horizontal_id == g.p2.horizontal_id;
+            if is_horizontal {
+                horizontal_neighbors
+                    .entry(g.p1)
+                    .or_insert(HashSet::default())
+                    .insert((g.p2, g.distance));
+                horizontal_neighbors
+                    .entry(g.p2)
+                    .or_insert(HashSet::default())
+                    .insert((g.p1, g.distance));
+            } else {
+                vertical_neighbors
+                    .entry(g.p1)
+                    .or_insert(HashSet::default())
+                    .insert((g.p2, g.distance));
+                vertical_neighbors
+                    .entry(g.p2)
+                    .or_insert(HashSet::default())
+                    .insert((g.p1, g.distance));
+            }
+        });
+
+        Self {
+            horizontal_neighbors,
+            vertical_neighbors,
+        }
+    }
+
+    fn horizontal_neighbors(
+        &self,
+        point: &CollisionPoint,
+        whitelist: &impl Fn(&CollisionPoint) -> bool,
+    ) -> HashSet<CollisionPoint> {
+        self.horizontal_neighbors
+            .get(point)
+            .unwrap_or(&HashSet::default())
+            .clone()
+            .into_iter()
+            .filter(|p| whitelist(&p.0))
+            .map(|(p, _)| p)
+            .collect()
+    }
+
+    fn horizontal_neighbors_with_distance(&self, point: &CollisionPoint) -> HashSet<NeighborWithDistance> {
+        self.horizontal_neighbors
+            .get(point)
+            .unwrap_or(&HashSet::default())
+            .clone()
+            .into_iter()
+            .collect()
+    }
+    fn vertical_neighbors(
+        &self,
+        point: &CollisionPoint,
+        whitelist: &impl Fn(&CollisionPoint) -> bool,
+    ) -> HashSet<CollisionPoint> {
+        self.vertical_neighbors
+            .get(point)
+            .unwrap_or(&HashSet::default())
+            .clone()
+            .into_iter()
+            .filter(|p| whitelist(&p.0))
+            .map(|(p, _)| p)
+            .collect()
+    }
+    fn vertical_neighbors_with_distance(&self, point: &CollisionPoint) -> HashSet<NeighborWithDistance> {
+        self.vertical_neighbors
+            .get(point)
+            .unwrap_or(&HashSet::default())
+            .clone()
+            .into_iter()
+            .collect()
+    }
+    fn find_squares_at_horizontal_first(
+        &self,
+        point: &CollisionPoint,
+        whitelist: &impl Fn(&CollisionPoint) -> bool,
+    ) -> Vec<[CollisionPoint; 4]> {
+        let mut squares = vec![];
+        for p1 in self.horizontal_neighbors(point, whitelist) {
+            for p2 in self.vertical_neighbors(&p1, whitelist) {
+                for p3 in self.horizontal_neighbors(&p2, whitelist) {
+                    for p4 in self.vertical_neighbors(&p3, whitelist) {
+                        if p4 == *point {
+                            squares.push([p1, p2, p3, p4]);
+                        }
+                    }
+                }
+            }
+        }
+        squares
+    }
 }
 
 #[test]
@@ -982,26 +1117,6 @@ fn analyze_collisions() {
             }
         }
         DistanceMap { distances }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-    struct CollisionPoint {
-        horizontal_id: u32,
-        vertical_id: u32,
-    }
-    impl CollisionPoint {
-        fn new(horizontal_id: u32, vertical_id: u32) -> Self {
-            Self {
-                horizontal_id,
-                vertical_id,
-            }
-        }
-    }
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-    struct GlobalEdge {
-        p1: CollisionPoint,
-        p2: CollisionPoint,
-        distance: u64,
     }
 
     trait Direction {
@@ -1549,7 +1664,7 @@ fn analyze_collisions() {
 
     let selected_horizontal_ids = horizontal_neighbors
         .iter()
-        .filter(|(_, vs)| vs.len() >= 8)
+        //.filter(|(_, vs)| vs.len() >= 8) why?
         .map(|(x, _)| *x)
         .collect::<HashSet<_>>();
 
@@ -1563,7 +1678,7 @@ fn analyze_collisions() {
 
     let selected_vertical_ids = vertical_neighbors
         .iter()
-        .filter(|(_, vs)| vs.len() >= 8)
+        //.filter(|(_, vs)| vs.len() >= 8) // why?
         .map(|(x, _)| *x)
         .collect::<HashSet<_>>();
 
@@ -1884,94 +1999,8 @@ fn analyze_collisions() {
                 self.positions.get(&point).cloned()
             }
         }
-        //let mut grid: HashMap<(u32, u32), CollisionPoint> = HashMap::default();
 
-        let mut horizontal_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>> = HashMap::default();
-        let mut vertical_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>> = HashMap::default();
-        global_edges.iter().for_each(|g| {
-            let is_horizontal = g.p1.horizontal_id == g.p2.horizontal_id;
-            if is_horizontal {
-                horizontal_neighbors
-                    .entry(g.p1)
-                    .or_insert(HashSet::default())
-                    .insert(g.p2);
-                horizontal_neighbors
-                    .entry(g.p2)
-                    .or_insert(HashSet::default())
-                    .insert(g.p1);
-            } else {
-                vertical_neighbors
-                    .entry(g.p1)
-                    .or_insert(HashSet::default())
-                    .insert(g.p2);
-                vertical_neighbors
-                    .entry(g.p2)
-                    .or_insert(HashSet::default())
-                    .insert(g.p1);
-            }
-        });
-        struct PathFinder {
-            horizontal_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
-            vertical_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
-        }
-        impl PathFinder {
-            fn new(
-                horizontal_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
-                vertical_neighbors: HashMap<CollisionPoint, HashSet<CollisionPoint>>,
-            ) -> Self {
-                Self {
-                    horizontal_neighbors,
-                    vertical_neighbors,
-                }
-            }
-            fn horizontal_neighbors(
-                &self,
-                point: &CollisionPoint,
-                whitelist: &impl Fn(&CollisionPoint) -> bool,
-            ) -> HashSet<CollisionPoint> {
-                self.horizontal_neighbors
-                    .get(point)
-                    .unwrap_or(&HashSet::default())
-                    .clone()
-                    .into_iter()
-                    .filter(|p| whitelist(p))
-                    .collect()
-            }
-            fn vertical_neighbors(
-                &self,
-                point: &CollisionPoint,
-                whitelist: &impl Fn(&CollisionPoint) -> bool,
-            ) -> HashSet<CollisionPoint> {
-                self.vertical_neighbors
-                    .get(point)
-                    .unwrap_or(&HashSet::default())
-                    .clone()
-                    .into_iter()
-                    .filter(|p| whitelist(p))
-                    .collect()
-            }
-            fn find_squares_at_horizontal_first(
-                &self,
-                point: &CollisionPoint,
-                whitelist: &impl Fn(&CollisionPoint) -> bool,
-            ) -> Vec<[CollisionPoint; 4]> {
-                let mut squares = vec![];
-                for p1 in self.horizontal_neighbors(point, whitelist) {
-                    for p2 in self.vertical_neighbors(&p1, whitelist) {
-                        for p3 in self.horizontal_neighbors(&p2, whitelist) {
-                            for p4 in self.vertical_neighbors(&p3, whitelist) {
-                                if p4 == *point {
-                                    squares.push([p1, p2, p3, p4]);
-                                }
-                            }
-                        }
-                    }
-                }
-                squares
-            }
-        }
-
-        let path_finder = PathFinder::new(horizontal_neighbors, vertical_neighbors);
+        let path_finder = PathFinder::new(&global_edges);
 
         let mut all_nodes =
         // count number of nodes that can make squares
@@ -1979,8 +2008,6 @@ fn analyze_collisions() {
         .filter(|node| path_finder.find_squares_at_horizontal_first(node, &|node| true).len() > 0)
         .collect::<HashSet<_>>();
         println!("Number of nodes that can make squares: {}", all_nodes.len());
-
-        return;
 
         {
             let mut grid_id = 0;
@@ -2229,6 +2256,331 @@ fn analyze_collisions() {
             .map(|(point, (x, y))| ((*x, *y), point))
             .collect::<HashMap<_, _>>();
     } */
+}
+
+struct GraphNode {
+    id: CollisionPoint,
+    x: u16,
+    y: u16,
+    z: u16,
+    u: f32,
+    v: f32,
+    fixed: bool,
+    state: GraphObjectState,
+}
+
+enum GraphObjectState {
+    Proposed,
+    Confirmed,
+    Discarded,
+}
+struct GraphEdge {
+    from: CollisionPoint,
+    to: CollisionPoint,
+    distance: u64,
+    /// rank in the adjacency matrix (lower value is most likely neighbor)
+    ranking: u32,
+    state: GraphObjectState,
+}
+impl GraphEdge {
+    fn is_horizontal(&self) -> bool {
+        self.from.vertical_id == self.to.vertical_id
+    }
+}
+
+pub struct GraphModel {
+    nodes: HashMap<CollisionPoint, GraphNode>,
+    edges: Vec<GraphEdge>,
+}
+impl GraphModel {
+    fn simulation_step(&mut self) {
+        let keys = self.nodes.keys().cloned().collect::<Vec<_>>();
+        for n_id in keys {
+            let n = self.nodes.get(&n_id).unwrap();
+            if n.fixed {
+                continue;
+            }
+            let edges = self.edges.iter().filter(|e| e.from == n.id || e.to == n.id);
+            let mut force_u = 0.0;
+            let mut force_v = 0.0;
+
+            for e in edges {
+                let other = if e.from == n.id {
+                    &self.nodes[&e.to]
+                } else {
+                    &self.nodes[&e.from]
+                };
+                let dx = other.u - n.u;
+                let dy = other.v - n.v;
+                let cur_distance = (dx * dx + dy * dy).sqrt();
+                let distance = e.distance as f32;
+                let d_dist = cur_distance - distance;
+                let force = 0.05 * d_dist;
+
+                force_u += force * dx / cur_distance;
+                force_v += force * dy / cur_distance;
+
+                /* println!(
+                    "Force from {:?} ({},{}) to {:?} ({},{}): dx: {}, dy: {}, cur_distance: {}, distance: {}, d_dist: {}, force: {} ({},{})",
+                    n.id,n.u,n.v, other.id,other.u,other.v, dx, dy, cur_distance, distance, d_dist, force,force_u,force_v
+                ); */
+            }
+
+            let n = self.nodes.get_mut(&n_id).unwrap();
+            n.u += force_u;
+            n.v += force_v;
+        }
+    }
+}
+
+pub(crate) struct GraphPanel {
+    model: GraphModel,
+    collisions: Vec<Collision>,
+    //global_edges: Vec<GlobalEdge>,
+    path_finder: PathFinder,
+    texture: Option<TextureHandle>,
+    drag_node: Option<CollisionPoint>,
+}
+impl GraphPanel {
+    pub fn new() -> Self {
+        // initial fixed node
+        // h3227 v28983 4156 3555 10610
+
+        let collisions = load_collisions();
+        let edges = Self::load_global_edges();
+        let path_finder = PathFinder::new(&edges);
+
+        let start_node = CollisionPoint::new(3227, 28983);
+        let start_coll = collisions
+            .iter()
+            .find(|c| c.h_id == start_node.horizontal_id && c.v_id == start_node.vertical_id)
+            .unwrap();
+        let start_node = GraphNode {
+            id: start_node,
+            x: start_coll.x,
+            y: start_coll.y,
+            z: start_coll.z,
+            u: 0.0,
+            v: 0.0,
+            fixed: true,
+            state: GraphObjectState::Confirmed,
+        };
+
+        let node_for_point = |point: &CollisionPoint| {
+            let coll = collisions
+                .iter()
+                .find(|c| c.h_id == point.horizontal_id && c.v_id == point.vertical_id)
+                .unwrap();
+            GraphNode {
+                id: *point,
+                x: coll.x,
+                y: coll.y,
+                z: coll.z,
+                u: coll.x as f32 - start_node.x as f32,
+                v: coll.y as f32 - start_node.y as f32,
+                fixed: false,
+                state: GraphObjectState::Proposed,
+            }
+        };
+
+        let mut all_nodes: HashMap<CollisionPoint, GraphNode> = HashMap::default();
+
+        if let Some(square) = path_finder
+            .find_squares_at_horizontal_first(&start_node.id, &|node| true)
+            .iter()
+            .next()
+        {
+            let nodes = square.iter().map(|n| node_for_point(n)).collect::<Vec<_>>();
+            all_nodes.extend(nodes.into_iter().map(|n| (n.id, n)).collect::<Vec<_>>());
+        }
+
+        let all_edges = edges
+            .iter()
+            .filter(|e| all_nodes.contains_key(&e.p1) && all_nodes.contains_key(&e.p2))
+            .map(|e| GraphEdge {
+                from: e.p1,
+                to: e.p2,
+                distance: e.distance,
+                ranking: 0,
+                state: GraphObjectState::Proposed,
+            })
+            .collect::<Vec<_>>();
+
+        //let neighbors = path_finder.horizontal_neighbors_with_distance(&start_node.id);
+
+        /* for (neighbor, distance) in neighbors.iter() {
+            let edge = GraphEdge {
+                from: start_node.id,
+                to: neighbor.clone(),
+                distance: *distance,
+                ranking: 0,
+                state: GraphObjectState::Proposed,
+            };
+            edges.push(edge);
+        }
+
+        let neighbor_nodes = neighbors.iter().map(|n| node_for_point(&n.0)).collect::<Vec<_>>();
+
+        let all_nodes = vec![(start_node.id, start_node)]
+            .into_iter()
+            .chain(neighbor_nodes.into_iter().map(|n| (n.id, n)))
+            .collect(); */
+
+        let mut model = GraphModel {
+            nodes: all_nodes,
+            edges: all_edges,
+        };
+
+        Self {
+            model,
+            collisions,
+            path_finder,
+            texture: None,
+            drag_node: None,
+        }
+    }
+    fn load_global_edges() -> Vec<GlobalEdge> {
+        let file = File::open("data/global.dot").unwrap();
+        let reader = BufReader::new(file);
+        let mut edges = vec![];
+
+        let pattern = Regex::new(r#"h(\d+)_v(\d+) -- h(\d+)_v(\d+) \[label="(\d+)".*"#).unwrap();
+
+        for line in reader.lines() {
+            let line = line.unwrap();
+            if let Some(captures) = pattern.captures(&line) {
+                let p1 = CollisionPoint {
+                    horizontal_id: captures[1].parse().unwrap(),
+                    vertical_id: captures[2].parse().unwrap(),
+                };
+                let p2 = CollisionPoint {
+                    horizontal_id: captures[3].parse().unwrap(),
+                    vertical_id: captures[4].parse().unwrap(),
+                };
+                let distance = captures[5].parse().unwrap();
+                edges.push(GlobalEdge { p1, p2, distance });
+            }
+        }
+        edges
+    }
+
+    pub fn draw(&mut self, ctx: &egui::Context) -> Option<[i32; 3]> {
+        egui::Window::new("Graph")
+            .show(ctx, |ui| {
+                Frame::canvas(ui.style()).show(ui, |ui| {
+                    ui.ctx().request_repaint();
+                    self.model.simulation_step();
+
+                    let (mut response, painter) =
+                        ui.allocate_painter(ui.available_size_before_wrap(), Sense::click_and_drag());
+
+                    let min_u = self.model.nodes.values().map(|n| n.u).min_by(f32::total_cmp).unwrap() - 10.0;
+                    let max_u = self.model.nodes.values().map(|n| n.u).max_by(f32::total_cmp).unwrap() + 10.0;
+
+                    let min_v = self.model.nodes.values().map(|n| n.v).min_by(f32::total_cmp).unwrap() - 10.0;
+                    let max_v = self.model.nodes.values().map(|n| n.v).max_by(f32::total_cmp).unwrap() + 10.0;
+
+                    let to_frame = emath::RectTransform::from_to(
+                        Rect::from_min_max(pos2(min_u, min_v), pos2(max_u, max_v)),
+                        Rect::from_min_size(Pos2::ZERO, response.rect.size()),
+                    );
+                    let from_frame = to_frame.inverse();
+
+                    let to_screen = emath::RectTransform::from_to(
+                        Rect::from_min_size(Pos2::ZERO, response.rect.size()),
+                        response.rect,
+                    );
+                    let from_screen = to_screen.inverse();
+
+                    let hover_node = if response.hovered() {
+                        let pos = response.hover_pos().unwrap();
+                        self.model
+                            .nodes
+                            .iter()
+                            .find(|n| {
+                                let n_pos = to_screen * (to_frame * pos2(n.1.u, n.1.v));
+                                n_pos.distance(pos) < 10.0
+                            })
+                            .map(|n| n.0.clone())
+                    } else {
+                        self.drag_node = None;
+                        None
+                    };
+
+                    if let Some(hover_node) = hover_node {
+                        if response.drag_started() {
+                            self.drag_node = Some(hover_node.clone());
+                        }
+                        if response.drag_stopped() {
+                            self.drag_node = None;
+                        }
+                    }
+                    if let Some(drag_node) = self.drag_node {
+                        if let Some(pos) = response.hover_pos() {
+                            let node = self.model.nodes.get_mut(&drag_node).unwrap();
+                            let new_pos = from_frame * (from_screen * pos);
+                            node.u = new_pos.x;
+                            node.v = new_pos.y;
+                        }
+                    }
+
+                    let width = response.rect.width() as usize;
+                    let height = response.rect.height() as usize;
+
+                    let x_scale = width as f32 / (max_u - min_u);
+                    let y_scale = height as f32 / (max_v - min_v);
+
+                    let font_id = FontId::new(20.0, FontFamily::Proportional);
+
+                    for edge in self.model.edges.iter() {
+                        let from = self.model.nodes.get(&edge.from).unwrap();
+                        let to = self.model.nodes.get(&edge.to).unwrap();
+                        let from = to_frame * pos2(from.u, from.v);
+                        let to = to_frame * pos2(to.u, to.v);
+                        let color = if edge.is_horizontal() {
+                            Color32::BLUE
+                        } else {
+                            Color32::RED
+                        };
+
+                        painter.line_segment([to_screen * from, to_screen * to], (2.0, color));
+                    }
+
+                    for node in self.model.nodes.iter() {
+                        let x = ((node.1.u - min_u) * x_scale);
+                        let y = ((node.1.v - min_v) * y_scale);
+                        let center = pos2(x, y);
+
+                        let color = if node.1.fixed { Color32::GREEN } else { Color32::WHITE };
+                        let color = if let Some(hover_node) = hover_node {
+                            if hover_node == *node.0 {
+                                Color32::YELLOW
+                            } else {
+                                color
+                            }
+                        } else {
+                            color
+                        };
+
+                        painter.circle_filled(to_screen * center, 10.0, color);
+
+                        // add label right to the node
+                        painter.text(
+                            to_screen * (center + vec2(15.0, 0.0)),
+                            Align2::LEFT_CENTER,
+                            format!("{}", node.0),
+                            font_id.clone(),
+                            Color32::RED,
+                        );
+                    }
+                });
+
+                None
+            })
+            .map(|x| x.inner)
+            .flatten()
+            .flatten()
+    }
 }
 
 struct PaintableImage {
