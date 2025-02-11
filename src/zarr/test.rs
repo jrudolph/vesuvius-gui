@@ -12,6 +12,7 @@ use itertools::Itertools;
 use memmap::MmapOptions;
 use priority_queue::PriorityQueue;
 use rayon::iter::IntoParallelRefIterator;
+use std::io::BufRead;
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, VecDeque},
@@ -799,8 +800,27 @@ fn analyze_fibers() {
     file.write(b"}\n").unwrap();
 }
 
-#[test]
-fn analyze_collisions() {
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct Collision {
+    h_id: u32,
+    v_id: u32,
+    x: u16,
+    y: u16,
+    z: u16,
+}
+impl From<(u32, u32, u16, u16, u16)> for Collision {
+    fn from(x: (u32, u32, u16, u16, u16)) -> Self {
+        Self {
+            h_id: x.0,
+            v_id: x.1,
+            x: x.2,
+            y: x.3,
+            z: x.4,
+        }
+    }
+}
+
+fn load_collisions() -> Vec<Collision> {
     let file = File::open("data/collisions").unwrap();
     use std::io::BufRead;
     let mut reader = BufReader::new(file);
@@ -815,8 +835,35 @@ fn analyze_collisions() {
         let y = parts[3].parse::<u16>().unwrap();
         let z = parts[4].parse::<u16>().unwrap();
 
-        colls.push((id1, id2, x, y, z));
+        colls.push(Collision {
+            h_id: id1,
+            v_id: id2,
+            x,
+            y,
+            z,
+        });
     }
+    colls
+}
+
+#[test]
+fn analyze_collisions() {
+    /*  let file = File::open("data/collisions").unwrap();
+    use std::io::BufRead;
+    let mut reader = BufReader::new(file);
+    let mut lines = reader.lines();
+    let mut colls = vec![];
+    while let Some(Ok(line)) = lines.next() {
+        let mut parts = line.split_whitespace().collect::<Vec<_>>();
+        // h<id1> v<id2> <x> <y> <z>
+        let id1 = parts[0][1..].parse::<u32>().unwrap();
+        let id2 = parts[1][1..].parse::<u32>().unwrap();
+        let x = parts[2].parse::<u16>().unwrap();
+        let y = parts[3].parse::<u16>().unwrap();
+        let z = parts[4].parse::<u16>().unwrap();
+
+        colls.push((id1, id2, x, y, z));
+    } */
 
     /* // group by id2 and count
     colls
@@ -862,26 +909,6 @@ fn analyze_collisions() {
         neighbor_map_h.entry(*id1).or_insert(vec![]).push(*id2);
         neighbor_map_v.entry(*id2).or_insert(vec![]).push(*id1);
     }); */
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-    struct Collision {
-        h_id: u32,
-        v_id: u32,
-        x: u16,
-        y: u16,
-        z: u16,
-    }
-    impl From<(u32, u32, u16, u16, u16)> for Collision {
-        fn from(x: (u32, u32, u16, u16, u16)) -> Self {
-            Self {
-                h_id: x.0,
-                v_id: x.1,
-                x: x.2,
-                y: x.3,
-                z: x.4,
-            }
-        }
-    }
 
     const DOWNSCALE: i32 = 2;
 
@@ -1510,7 +1537,7 @@ fn analyze_collisions() {
 
     //let h_candidates: HashSet<_> = vec![7317].into_iter().collect();
     //let horizontal_id = 7317;
-    let colls: Vec<Collision> = colls.into_iter().map(|x| x.into()).collect::<Vec<_>>();
+    let colls: Vec<Collision> = load_collisions();
 
     let horizontal_neighbors = colls
         .iter()
