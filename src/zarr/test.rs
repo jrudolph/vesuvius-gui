@@ -2515,7 +2515,6 @@ impl GraphPanel {
             .show(ctx, |ui| {
                 Frame::canvas(ui.style()).show(ui, |ui| {
                     ui.ctx().request_repaint();
-                    self.model.simulation_step();
 
                     let (mut response, painter) =
                         ui.allocate_painter(ui.available_size_before_wrap(), Sense::click_and_drag());
@@ -2665,18 +2664,27 @@ impl GraphPanel {
                         let y = ((pos.1 - min_v) * y_scale);
                         let center = pos2(x, y);
 
-                        let color = if data.fixed { Color32::GREEN } else { Color32::WHITE };
-                        let color = if let Some(hover_node) = hover_node {
+                        let fill_color = match data.state {
+                            GraphObjectState::Hidden => Color32::BLACK,
+                            GraphObjectState::Proposed => Color32::GRAY,
+                            GraphObjectState::Confirmed => Color32::WHITE,
+                            GraphObjectState::Discarded => Color32::BLACK,
+                        };
+                        let fill_color = if self.drag_node == Some(*node) {
+                            Color32::BLUE
+                        } else if let Some(hover_node) = hover_node {
                             if hover_node == *node {
                                 Color32::YELLOW
                             } else {
-                                color
+                                fill_color
                             }
                         } else {
-                            color
+                            fill_color
                         };
 
-                        painter.circle_filled(to_screen * center, NODE_RADIUS, color);
+                        let ring_color = if data.fixed { Color32::GREEN } else { fill_color };
+
+                        painter.circle(to_screen * center, NODE_RADIUS, fill_color, (2.0, ring_color));
 
                         // add label right to the node
                         painter.text(
@@ -2687,6 +2695,8 @@ impl GraphPanel {
                             Color32::RED,
                         );
                     }
+
+                    self.model.simulation_step();
                 });
 
                 None
