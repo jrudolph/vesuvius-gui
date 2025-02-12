@@ -18,7 +18,6 @@ use priority_queue::PriorityQueue;
 use rayon::iter::IntoParallelRefIterator;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::io::BufRead;
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, VecDeque},
@@ -33,6 +32,7 @@ use std::{
         Mutex,
     },
 };
+use std::{f32::consts::E, io::BufRead};
 
 type HashMap<K, V> = FxHashMap<K, V>;
 type HashSet<K> = FxHashSet<K>;
@@ -2320,11 +2320,15 @@ impl GraphModel {
             if !self.is_shown(&n) || self.node_data(&n).fixed {
                 continue;
             }
-            let edges = self.edges.iter().filter(|e| e.p1 == n || e.p2 == n);
+            let edges = self
+                .edges
+                .iter()
+                .filter(|e| (e.p1 == n || e.p2 == n) && self.is_shown(&e.p1) && self.is_shown(&e.p2))
+                .collect::<Vec<_>>();
             let mut force_u = 0.0;
             let mut force_v = 0.0;
 
-            for e in edges {
+            for e in &edges {
                 let other = if e.p1 == n { &e.p2 } else { &e.p1 };
                 let this_pos = self.node_pos(&n);
                 let other_pos = self.node_pos(other);
@@ -2342,6 +2346,89 @@ impl GraphModel {
                     "Force from {:?} ({},{}) to {:?} ({},{}): dx: {}, dy: {}, cur_distance: {}, distance: {}, d_dist: {}, force: {} ({},{})",
                     n.id,n.u,n.v, other.id,other.u,other.v, dx, dy, cur_distance, distance, d_dist, force,force_u,force_v
                 ); */
+            }
+
+            fn angle_force(
+                this_pos: (f32, f32),
+                other1_pos: (f32, f32),
+                other2_pos: (f32, f32),
+                print: bool,
+            ) -> Option<(f32, f32)> {
+                let dx1 = other1_pos.0 - this_pos.0;
+                let dy1 = other1_pos.1 - this_pos.1;
+                let dx2 = other2_pos.0 - this_pos.0;
+                let dy2 = other2_pos.1 - this_pos.1;
+
+                /* let angle = (dx1 * dx2 + dy1 * dy2) / ((dx1 * dx1 + dy1 * dy1).sqrt() * (dx2 * dx2 + dy2 * dy2).sqrt());
+                let angle = angle.acos();
+
+                let target_angle = std::f32::consts::PI;
+                let angle_diff = angle - target_angle;
+                let force = 0.05 * angle_diff; */
+
+                /* force_u += force * (dy1 + dy2) / (dx1 + dx2 + 0.00001);
+                force_v += force * (dx1 + dx2) / (dy1 + dy2 + 0.00001); */
+                let to1_len = (dx1 * dx1 + dy1 * dy1).sqrt();
+                let to2_len = (dx2 * dx2 + dy2 * dy2).sqrt();
+
+                if (to1_len < 0.001 || to2_len < 0.001) {
+                    return None;
+                }
+
+                let dx = (dx1 / to1_len + dx2 / to2_len) / 2.0;
+                let dy = (dy1 / to1_len + dy2 / to2_len) / 2.0;
+
+                /* let cur_len = (dx * dx + dy * dy).sqrt();
+                let d_len = cur_len - 1.0;
+                let force = 0.05 * d_len; */
+
+                let du = dx * 0.1;
+                let dv = dy * 0.1;
+                if print {
+                    println!(
+                        "Force dx1: {}, dy1: {}, dx2: {}, dy2: {}, dx/dy {}/{} du/dv {}/{}",
+                        dx1, dy1, dx2, dy2, dx, dy, du, dv
+                    );
+                }
+                Some((du, dv))
+            }
+
+            // if we have exactly two horizontal edges, try to spread the angle to 180 degrees
+            let horizontal_edges = edges.iter().filter(|e| e.is_horizontal()).collect::<Vec<_>>();
+            if horizontal_edges.len() == 2 {
+                let e1 = horizontal_edges[0];
+                let e2 = horizontal_edges[1];
+
+                let other1 = if e1.p1 == n { &e1.p2 } else { &e1.p1 };
+                let other2 = if e2.p1 == n { &e2.p2 } else { &e2.p1 };
+
+                let this_pos = self.node_pos(&n);
+                let other1_pos = self.node_pos(other1);
+                let other2_pos = self.node_pos(other2);
+
+                let print = false; //n.horizontal_id == 13477 && n.vertical_id == 28983;
+
+                if let Some((du, dv)) = angle_force(this_pos, other1_pos, other2_pos, print) {
+                    force_u += du;
+                    force_v += dv;
+                }
+            }
+            let vertical_edges = edges.iter().filter(|e| !e.is_horizontal()).collect::<Vec<_>>();
+            if vertical_edges.len() == 2 {
+                let e1 = vertical_edges[0];
+                let e2 = vertical_edges[1];
+
+                let other1 = if e1.p1 == n { &e1.p2 } else { &e1.p1 };
+                let other2 = if e2.p1 == n { &e2.p2 } else { &e2.p1 };
+
+                let this_pos = self.node_pos(&n);
+                let other1_pos = self.node_pos(other1);
+                let other2_pos = self.node_pos(other2);
+
+                if let Some((du, dv)) = angle_force(this_pos, other1_pos, other2_pos, false) {
+                    force_u += du;
+                    force_v += dv;
+                }
             }
 
             let pos = self.node_pos_mut(&n);
