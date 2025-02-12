@@ -4,6 +4,7 @@ use crate::{
     volume::{PaintVolume, VoxelVolume},
     zarr::{blosc::BloscChunk, ZarrArray},
 };
+use eframe::glow::TESS_CONTROL_SHADER;
 use egui::{
     pos2, vec2, Align2, Color32, ColorImage, FontFamily, FontId, Frame, Image, Label, Pos2, Rect, Sense, TextureHandle,
     WidgetText,
@@ -2744,17 +2745,36 @@ impl GraphPanel {
                             continue;
                         }
 
-                        let from = self.model.node_pos(&edge.p1);
-                        let to = self.model.node_pos(&edge.p2);
-                        let from = to_frame * pos2(from.0, from.1);
-                        let to = to_frame * pos2(to.0, to.1);
+                        let from: Pos2 = self.model.node_pos(&edge.p1).into();
+                        let to = self.model.node_pos(&edge.p2).into();
+
+                        let dist = from.distance(to);
+                        let tension = (dist / edge.distance as f32).log2();
+
+                        let from = to_frame * from;
+                        let to = to_frame * to;
+
+                        let sgn = tension.signum();
+                        let tension = (tension.abs().clamp(0.0, 1.0) * 255.0) as u8;
+
                         let color = if edge.is_horizontal() {
-                            Color32::BLUE
+                            let (r, g) = if sgn > 0.0 { (tension, 0) } else { (0, tension) };
+                            Color32::from_rgb(r, g, 255)
                         } else {
-                            Color32::RED
+                            let (g, b) = if sgn > 0.0 { (tension, 0) } else { (0, tension) };
+                            Color32::from_rgb(255, g, b)
                         };
 
                         painter.line_segment([to_screen * from, to_screen * to], (2.0, color));
+
+                        let mid_point = from.lerp(to, 0.5);
+                        painter.text(
+                            to_screen * mid_point,
+                            Align2::CENTER_CENTER,
+                            format!("{} / {} = {}", dist, edge.distance, tension),
+                            small_font_id.clone(),
+                            Color32::WHITE,
+                        );
                     }
 
                     for node in self.model.nodes.iter() {
