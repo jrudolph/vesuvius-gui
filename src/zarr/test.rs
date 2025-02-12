@@ -16,6 +16,7 @@ use memmap::MmapOptions;
 use priority_queue::PriorityQueue;
 use rayon::iter::IntoParallelRefIterator;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use std::{
     cmp::Reverse,
@@ -824,7 +825,7 @@ impl From<(u32, u32, u16, u16, u16)> for Collision {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct CollisionPoint {
     horizontal_id: u32,
     vertical_id: u32,
@@ -843,7 +844,7 @@ impl Display for CollisionPoint {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct GlobalEdge {
     p1: CollisionPoint,
     p2: CollisionPoint,
@@ -2263,14 +2264,14 @@ fn analyze_collisions() {
     } */
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 enum GraphObjectState {
     Hidden,
     Proposed,
     Confirmed,
     Discarded,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeData {
     fixed: bool,
     state: GraphObjectState,
@@ -2284,6 +2285,7 @@ impl Default for NodeData {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EdgeData {
     state: GraphObjectState,
 }
@@ -2348,6 +2350,13 @@ impl GraphModel {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct PersistedGraph {
+    node_positions: Vec<(CollisionPoint, (f32, f32))>,
+    node_data: Vec<(CollisionPoint, NodeData)>,
+    edge_data: Vec<(GlobalEdge, EdgeData)>,
+}
+
 pub(crate) struct GraphPanel {
     model: GraphModel,
     collisions: Vec<Collision>,
@@ -2358,6 +2367,9 @@ pub(crate) struct GraphPanel {
 }
 impl GraphPanel {
     pub fn new() -> Self {
+        Self::load_from("data/graph.json").unwrap_or_else(|| Self::initialize_empty())
+    }
+    fn initialize_empty() -> Self {
         // initial fixed node
         // h3227 v28983 4156 3555 10610
 
@@ -2481,6 +2493,43 @@ impl GraphPanel {
         res.confirm_node(start_node);
         res
     }
+    fn save_to(&self, file_name: &str) {
+        let persisted = PersistedGraph {
+            node_positions: self.model.node_positions.clone().into_iter().collect(),
+            node_data: self.model.node_data.clone().into_iter().collect(),
+            edge_data: self.model.edge_data.clone().into_iter().collect(),
+        };
+        let file = File::create(file_name).unwrap();
+        serde_json::to_writer(file, &persisted).unwrap();
+    }
+    fn load_from(file_name: &str) -> Option<Self> {
+        let file = File::open(file_name).ok()?;
+        let persisted: PersistedGraph = serde_json::from_reader(file).ok()?;
+
+        let collisions = load_collisions();
+        let edges = Self::load_global_edges();
+        let path_finder = PathFinder::new(&edges);
+        let mut nodes = HashSet::default();
+        collisions.iter().for_each(|c| {
+            nodes.insert(CollisionPoint::new(c.h_id, c.v_id));
+        });
+
+        let model = GraphModel {
+            node_positions: persisted.node_positions.into_iter().collect(),
+            node_data: persisted.node_data.into_iter().collect(),
+            edge_data: persisted.edge_data.into_iter().collect(),
+            nodes,
+            edges,
+        };
+
+        Some(Self {
+            model,
+            collisions,
+            path_finder,
+            texture: None,
+            drag_node: None,
+        })
+    }
     fn confirm_node(&mut self, n: CollisionPoint) {
         self.set_node_state(n, GraphObjectState::Confirmed);
         let pos = self.model.node_pos(&n);
@@ -2552,6 +2601,14 @@ impl GraphPanel {
                 Frame::canvas(ui.style()).show(ui, |ui| {
                     ui.ctx().request_repaint();
 
+                    ui.ctx().input(|i| {
+                        if i.key_pressed(egui::Key::S) {
+                            self.save_to("data/graph.json");
+                        }
+                    });
+
+                    const BORDER: f32 = 20.0;
+
                     let (mut response, painter) =
                         ui.allocate_painter(ui.available_size_before_wrap(), Sense::click_and_drag());
 
@@ -2562,7 +2619,7 @@ impl GraphPanel {
                         .map(|n| n.0)
                         .min_by(f32::total_cmp)
                         .unwrap()
-                        - 10.0;
+                        - BORDER;
                     let max_u = self
                         .model
                         .node_positions
@@ -2570,7 +2627,7 @@ impl GraphPanel {
                         .map(|n| n.0)
                         .max_by(f32::total_cmp)
                         .unwrap()
-                        + 10.0;
+                        + BORDER;
 
                     let min_v = self
                         .model
@@ -2579,7 +2636,7 @@ impl GraphPanel {
                         .map(|n| n.1)
                         .min_by(f32::total_cmp)
                         .unwrap()
-                        - 10.0;
+                        - BORDER;
                     let max_v = self
                         .model
                         .node_positions
@@ -2587,7 +2644,7 @@ impl GraphPanel {
                         .map(|n| n.1)
                         .max_by(f32::total_cmp)
                         .unwrap()
-                        + 10.0;
+                        + BORDER;
 
                     let to_frame = emath::RectTransform::from_to(
                         Rect::from_min_max(pos2(min_u, min_v), pos2(max_u, max_v)),
