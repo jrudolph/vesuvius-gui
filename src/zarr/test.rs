@@ -7,7 +7,7 @@ use crate::{
 use eframe::glow::TESS_CONTROL_SHADER;
 use egui::{
     pos2, vec2, Align2, Color32, ColorImage, FontFamily, FontId, Frame, Image, Label, Pos2, Rect, Sense, TextureHandle,
-    WidgetText,
+    Ui, WidgetText,
 };
 use egui_extras::{Column, TableBuilder};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -2298,6 +2298,21 @@ pub struct GraphModel {
     node_data: HashMap<CollisionPoint, NodeData>,
     edge_data: HashMap<GlobalEdge, EdgeData>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SimulationParams {
+    spring_constant: f32,
+    angle_constant: f32,
+}
+impl Default for SimulationParams {
+    fn default() -> Self {
+        Self {
+            spring_constant: 0.05,
+            angle_constant: 0.1,
+        }
+    }
+}
+
 impl GraphModel {
     fn node_data(&self, node: &CollisionPoint) -> NodeData {
         self.node_data.get(node).cloned().unwrap_or_default()
@@ -2314,7 +2329,7 @@ impl GraphModel {
     fn is_shown(&self, node: &CollisionPoint) -> bool {
         self.node_data(node).state != GraphObjectState::Hidden
     }
-    fn simulation_step(&mut self) {
+    fn simulation_step(&mut self, params: &SimulationParams) {
         let keys = self.nodes.clone();
         for n in keys {
             if !self.is_shown(&n) || self.node_data(&n).fixed {
@@ -2324,6 +2339,7 @@ impl GraphModel {
                 .edges
                 .iter()
                 .filter(|e| (e.p1 == n || e.p2 == n) && self.is_shown(&e.p1) && self.is_shown(&e.p2))
+                .cloned()
                 .collect::<Vec<_>>();
             let mut force_u = 0.0;
             let mut force_v = 0.0;
@@ -2337,7 +2353,7 @@ impl GraphModel {
                 let cur_distance = (dx * dx + dy * dy).sqrt();
                 let distance = e.distance as f32;
                 let d_dist = cur_distance - distance;
-                let force = 0.05 * d_dist;
+                let force = params.spring_constant * d_dist;
 
                 force_u += force * dx / (cur_distance + 0.00001);
                 force_v += force * dy / (cur_distance + 0.00001);
@@ -2352,6 +2368,7 @@ impl GraphModel {
                 this_pos: (f32, f32),
                 other1_pos: (f32, f32),
                 other2_pos: (f32, f32),
+                params: &SimulationParams,
                 print: bool,
             ) -> Option<(f32, f32)> {
                 let dx1 = other1_pos.0 - this_pos.0;
@@ -2382,8 +2399,8 @@ impl GraphModel {
                 let d_len = cur_len - 1.0;
                 let force = 0.05 * d_len; */
 
-                let du = dx * 0.1;
-                let dv = dy * 0.1;
+                let du = dx * params.angle_constant;
+                let dv = dy * params.angle_constant;
                 if print {
                     println!(
                         "Force dx1: {}, dy1: {}, dx2: {}, dy2: {}, dx/dy {}/{} du/dv {}/{}",
@@ -2394,7 +2411,7 @@ impl GraphModel {
             }
 
             // if we have exactly two horizontal edges, try to spread the angle to 180 degrees
-            let horizontal_edges = edges.iter().filter(|e| e.is_horizontal()).collect::<Vec<_>>();
+            let horizontal_edges = edges.iter().filter(|e| e.is_horizontal()).cloned().collect::<Vec<_>>();
             if horizontal_edges.len() == 2 {
                 let e1 = horizontal_edges[0];
                 let e2 = horizontal_edges[1];
@@ -2408,12 +2425,19 @@ impl GraphModel {
 
                 let print = false; //n.horizontal_id == 13477 && n.vertical_id == 28983;
 
-                if let Some((du, dv)) = angle_force(this_pos, other1_pos, other2_pos, print) {
+                if let Some((du, dv)) = angle_force(this_pos, other1_pos, other2_pos, params, print) {
                     force_u += du;
                     force_v += dv;
+                    /* let other1_pos = self.node_pos_mut(other1);
+                    other1_pos.0 -= du;
+                    other1_pos.1 -= dv;
+
+                    let other2_pos = self.node_pos_mut(other2);
+                    other2_pos.0 -= du;
+                    other2_pos.1 -= dv; */
                 }
             }
-            let vertical_edges = edges.iter().filter(|e| !e.is_horizontal()).collect::<Vec<_>>();
+            let vertical_edges = edges.iter().filter(|e| !e.is_horizontal()).cloned().collect::<Vec<_>>();
             if vertical_edges.len() == 2 {
                 let e1 = vertical_edges[0];
                 let e2 = vertical_edges[1];
@@ -2425,9 +2449,16 @@ impl GraphModel {
                 let other1_pos = self.node_pos(other1);
                 let other2_pos = self.node_pos(other2);
 
-                if let Some((du, dv)) = angle_force(this_pos, other1_pos, other2_pos, false) {
+                if let Some((du, dv)) = angle_force(this_pos, other1_pos, other2_pos, params, false) {
                     force_u += du;
                     force_v += dv;
+                    /* let other1_pos = self.node_pos_mut(other1);
+                    other1_pos.0 -= du;
+                    other1_pos.1 -= dv;
+
+                    let other2_pos = self.node_pos_mut(other2);
+                    other2_pos.0 -= du;
+                    other2_pos.1 -= dv; */
                 }
             }
 
@@ -2452,6 +2483,7 @@ pub(crate) struct GraphPanel {
     path_finder: PathFinder,
     texture: Option<TextureHandle>,
     drag_node: Option<CollisionPoint>,
+    simulation_params: SimulationParams,
 }
 impl GraphPanel {
     pub fn new() -> Self {
@@ -2576,6 +2608,7 @@ impl GraphPanel {
             path_finder,
             texture: None,
             drag_node: None,
+            simulation_params: SimulationParams::default(),
         };
         res.fix_node(start_node);
         res.confirm_node(start_node);
@@ -2616,6 +2649,7 @@ impl GraphPanel {
             path_finder,
             texture: None,
             drag_node: None,
+            simulation_params: SimulationParams::default(),
         })
     }
     fn confirm_node(&mut self, n: CollisionPoint) {
@@ -2625,18 +2659,29 @@ impl GraphPanel {
         for (neigh, _) in self.path_finder.horizontal_neighbors_with_distance(&n) {
             self.propose_if_hidden(neigh);
             let d = self.model.node_data(&neigh);
-            if !d.fixed {
-                *self.model.node_pos_mut(&neigh) = pos;
+            if d.state == GraphObjectState::Proposed && !d.fixed {
+                let p = self.model.node_pos_mut(&neigh);
+                if *p == (0.0, 0.0) {
+                    *p = pos;
+                }
             }
         }
 
         for (neigh, _) in self.path_finder.vertical_neighbors_with_distance(&n) {
             self.propose_if_hidden(neigh);
             let d = self.model.node_data(&neigh);
-            if !d.fixed {
-                *self.model.node_pos_mut(&neigh) = pos;
+            if d.state == GraphObjectState::Proposed && !d.fixed {
+                let p = self.model.node_pos_mut(&neigh);
+                if *p == (0.0, 0.0) {
+                    *p = pos;
+                }
             }
         }
+    }
+    fn hide_node(&mut self, n: CollisionPoint) {
+        self.set_node_state(n, GraphObjectState::Hidden);
+        self.model.node_data_mut(&n).fixed = false;
+        *self.model.node_pos_mut(&n) = (0.0, 0.0);
     }
     fn propose_if_hidden(&mut self, n: CollisionPoint) {
         let mut d = self.model.node_data_mut(&n);
@@ -2683,235 +2728,234 @@ impl GraphPanel {
         edges
     }
 
+    fn show_canvas(&mut self, ui: &mut Ui) -> Option<[i32; 3]> {
+        Frame::canvas(ui.style()).show(ui, |ui| {
+            ui.ctx().request_repaint();
+
+            ui.ctx().input(|i| {
+                if i.key_pressed(egui::Key::S) {
+                    self.save_to("data/graph.json");
+                }
+            });
+
+            const BORDER: f32 = 20.0;
+
+            let (mut response, painter) = ui.allocate_painter(ui.available_size_before_wrap(), Sense::click_and_drag());
+
+            let min_u = self
+                .model
+                .node_positions
+                .values()
+                .map(|n| n.0)
+                .min_by(f32::total_cmp)
+                .unwrap()
+                - BORDER;
+            let max_u = self
+                .model
+                .node_positions
+                .values()
+                .map(|n| n.0)
+                .max_by(f32::total_cmp)
+                .unwrap()
+                + BORDER;
+
+            let min_v = self
+                .model
+                .node_positions
+                .values()
+                .map(|n| n.1)
+                .min_by(f32::total_cmp)
+                .unwrap()
+                - BORDER;
+            let max_v = self
+                .model
+                .node_positions
+                .values()
+                .map(|n| n.1)
+                .max_by(f32::total_cmp)
+                .unwrap()
+                + BORDER;
+
+            let to_frame = emath::RectTransform::from_to(
+                Rect::from_min_max(pos2(min_u, min_v), pos2(max_u, max_v)),
+                Rect::from_min_size(Pos2::ZERO, response.rect.size()),
+            );
+            let from_frame = to_frame.inverse();
+
+            let to_screen =
+                emath::RectTransform::from_to(Rect::from_min_size(Pos2::ZERO, response.rect.size()), response.rect);
+            let from_screen = to_screen.inverse();
+
+            const NODE_RADIUS: f32 = 20.0;
+
+            let hover_node = if let Some(pos) = response.hover_pos() {
+                self.model
+                    .node_positions
+                    .iter()
+                    .find(|(n, (u, v))| {
+                        let n_pos = to_screen * (to_frame * pos2(*u, *v));
+                        n_pos.distance(pos) < NODE_RADIUS
+                    })
+                    .map(|n| n.0.clone())
+            } else {
+                //self.drag_node = None;
+                None
+            };
+
+            if let Some(hover_node) = hover_node {
+                if response.drag_started() {
+                    self.drag_node = Some(hover_node.clone());
+                }
+                ui.ctx().input(|i| {
+                    if i.key_pressed(egui::Key::C) {
+                        self.confirm_node(hover_node);
+                    } else if i.key_pressed(egui::Key::F) {
+                        self.fix_node(hover_node);
+                    } else if i.key_pressed(egui::Key::U) {
+                        self.unfix_node(hover_node);
+                    } else if i.key_pressed(egui::Key::H) {
+                        self.hide_node(hover_node);
+                    }
+                });
+            }
+            if response.drag_stopped() {
+                self.drag_node = None;
+            }
+            if let Some(drag_node) = self.drag_node {
+                if let Some(pos) = response.hover_pos() {
+                    let node = self.model.node_pos_mut(&drag_node);
+                    let new_pos = from_frame * (from_screen * pos);
+                    node.0 = new_pos.x;
+                    node.1 = new_pos.y;
+                }
+            }
+
+            let width = response.rect.width() as usize;
+            let height = response.rect.height() as usize;
+
+            let x_scale = width as f32 / (max_u - min_u);
+            let y_scale = height as f32 / (max_v - min_v);
+
+            let small_font_id = FontId::new(12.0, FontFamily::Proportional);
+            let font_id = FontId::new(20.0, FontFamily::Proportional);
+
+            painter.text(
+                to_screen * pos2(5.0, 10.0),
+                Align2::LEFT_CENTER,
+                format!("hover_node: {:?}", hover_node),
+                small_font_id.clone(),
+                Color32::WHITE,
+            );
+            painter.text(
+                to_screen * pos2(5.0, 25.0),
+                Align2::LEFT_CENTER,
+                format!("drag_node: {:?}", self.drag_node),
+                small_font_id.clone(),
+                Color32::WHITE,
+            );
+            painter.text(
+                to_screen * pos2(5.0, 40.0),
+                Align2::LEFT_CENTER,
+                format!(
+                    "hovered {} dragged {} drag_started {} drag_stopped {}",
+                    response.hovered(),
+                    response.dragged(),
+                    response.drag_started(),
+                    response.drag_stopped()
+                ),
+                small_font_id.clone(),
+                Color32::WHITE,
+            );
+
+            for edge in self.model.edges.iter() {
+                if !self.model.is_shown(&edge.p1) || !self.model.is_shown(&edge.p2) {
+                    continue;
+                }
+
+                let from: Pos2 = self.model.node_pos(&edge.p1).into();
+                let to = self.model.node_pos(&edge.p2).into();
+
+                let dist = from.distance(to);
+                let tension = (dist / edge.distance as f32).log2();
+
+                let from = to_frame * from;
+                let to = to_frame * to;
+
+                let sgn = tension.signum();
+                let tension = (tension.abs().clamp(0.0, 1.0) * 255.0) as u8;
+
+                let color = if edge.is_horizontal() {
+                    let (r, g) = if sgn > 0.0 { (tension, 0) } else { (0, tension) };
+                    Color32::from_rgb(r, g, 255)
+                } else {
+                    let (g, b) = if sgn > 0.0 { (tension, 0) } else { (0, tension) };
+                    Color32::from_rgb(255, g, b)
+                };
+
+                painter.line_segment([to_screen * from, to_screen * to], (2.0, color));
+
+                /* let mid_point = from.lerp(to, 0.5);
+                painter.text(
+                    to_screen * mid_point,
+                    Align2::CENTER_CENTER,
+                    format!("{} / {} = {}", dist, edge.distance, tension),
+                    small_font_id.clone(),
+                    Color32::WHITE,
+                ); */
+            }
+
+            for node in self.model.nodes.iter() {
+                if !self.model.is_shown(node) {
+                    continue;
+                }
+                let pos = self.model.node_pos(node);
+                let data = self.model.node_data(node);
+
+                let x = ((pos.0 - min_u) * x_scale);
+                let y = ((pos.1 - min_v) * y_scale);
+                let center = pos2(x, y);
+
+                let fill_color = match data.state {
+                    GraphObjectState::Hidden => Color32::BLACK,
+                    GraphObjectState::Proposed => Color32::GRAY,
+                    GraphObjectState::Confirmed => Color32::WHITE,
+                    GraphObjectState::Discarded => Color32::BLACK,
+                };
+                let fill_color = if self.drag_node == Some(*node) {
+                    Color32::BLUE
+                } else if let Some(hover_node) = hover_node {
+                    if hover_node == *node {
+                        Color32::YELLOW
+                    } else {
+                        fill_color
+                    }
+                } else {
+                    fill_color
+                };
+
+                let ring_color = if data.fixed { Color32::GREEN } else { fill_color };
+
+                painter.circle(to_screen * center, NODE_RADIUS, fill_color, (2.0, ring_color));
+
+                // add label right to the node
+                painter.text(
+                    to_screen * (center + vec2(NODE_RADIUS + 5.0, 0.0)),
+                    Align2::LEFT_CENTER,
+                    format!("{}", node),
+                    font_id.clone(),
+                    Color32::RED,
+                );
+            }
+
+            self.model.simulation_step(&self.simulation_params);
+        });
+
+        None
+    }
+
     pub fn draw(&mut self, ctx: &egui::Context) -> Option<[i32; 3]> {
         egui::Window::new("Graph")
-            .show(ctx, |ui| {
-                Frame::canvas(ui.style()).show(ui, |ui| {
-                    ui.ctx().request_repaint();
-
-                    ui.ctx().input(|i| {
-                        if i.key_pressed(egui::Key::S) {
-                            self.save_to("data/graph.json");
-                        }
-                    });
-
-                    const BORDER: f32 = 20.0;
-
-                    let (mut response, painter) =
-                        ui.allocate_painter(ui.available_size_before_wrap(), Sense::click_and_drag());
-
-                    let min_u = self
-                        .model
-                        .node_positions
-                        .values()
-                        .map(|n| n.0)
-                        .min_by(f32::total_cmp)
-                        .unwrap()
-                        - BORDER;
-                    let max_u = self
-                        .model
-                        .node_positions
-                        .values()
-                        .map(|n| n.0)
-                        .max_by(f32::total_cmp)
-                        .unwrap()
-                        + BORDER;
-
-                    let min_v = self
-                        .model
-                        .node_positions
-                        .values()
-                        .map(|n| n.1)
-                        .min_by(f32::total_cmp)
-                        .unwrap()
-                        - BORDER;
-                    let max_v = self
-                        .model
-                        .node_positions
-                        .values()
-                        .map(|n| n.1)
-                        .max_by(f32::total_cmp)
-                        .unwrap()
-                        + BORDER;
-
-                    let to_frame = emath::RectTransform::from_to(
-                        Rect::from_min_max(pos2(min_u, min_v), pos2(max_u, max_v)),
-                        Rect::from_min_size(Pos2::ZERO, response.rect.size()),
-                    );
-                    let from_frame = to_frame.inverse();
-
-                    let to_screen = emath::RectTransform::from_to(
-                        Rect::from_min_size(Pos2::ZERO, response.rect.size()),
-                        response.rect,
-                    );
-                    let from_screen = to_screen.inverse();
-
-                    const NODE_RADIUS: f32 = 20.0;
-
-                    let hover_node = if let Some(pos) = response.hover_pos() {
-                        self.model
-                            .node_positions
-                            .iter()
-                            .find(|(n, (u, v))| {
-                                let n_pos = to_screen * (to_frame * pos2(*u, *v));
-                                n_pos.distance(pos) < NODE_RADIUS
-                            })
-                            .map(|n| n.0.clone())
-                    } else {
-                        //self.drag_node = None;
-                        None
-                    };
-
-                    if let Some(hover_node) = hover_node {
-                        if response.drag_started() {
-                            self.drag_node = Some(hover_node.clone());
-                        }
-                        ui.ctx().input(|i| {
-                            if i.key_pressed(egui::Key::C) {
-                                self.confirm_node(hover_node);
-                            }
-                            if i.key_pressed(egui::Key::F) {
-                                self.fix_node(hover_node);
-                            }
-                            if i.key_pressed(egui::Key::U) {
-                                self.unfix_node(hover_node);
-                            }
-                        });
-                    }
-                    if response.drag_stopped() {
-                        self.drag_node = None;
-                    }
-                    if let Some(drag_node) = self.drag_node {
-                        if let Some(pos) = response.hover_pos() {
-                            let node = self.model.node_pos_mut(&drag_node);
-                            let new_pos = from_frame * (from_screen * pos);
-                            node.0 = new_pos.x;
-                            node.1 = new_pos.y;
-                        }
-                    }
-
-                    let width = response.rect.width() as usize;
-                    let height = response.rect.height() as usize;
-
-                    let x_scale = width as f32 / (max_u - min_u);
-                    let y_scale = height as f32 / (max_v - min_v);
-
-                    let small_font_id = FontId::new(12.0, FontFamily::Proportional);
-                    let font_id = FontId::new(20.0, FontFamily::Proportional);
-
-                    painter.text(
-                        to_screen * pos2(5.0, 10.0),
-                        Align2::LEFT_CENTER,
-                        format!("hover_node: {:?}", hover_node),
-                        small_font_id.clone(),
-                        Color32::WHITE,
-                    );
-                    painter.text(
-                        to_screen * pos2(5.0, 25.0),
-                        Align2::LEFT_CENTER,
-                        format!("drag_node: {:?}", self.drag_node),
-                        small_font_id.clone(),
-                        Color32::WHITE,
-                    );
-                    painter.text(
-                        to_screen * pos2(5.0, 40.0),
-                        Align2::LEFT_CENTER,
-                        format!(
-                            "hovered {} dragged {} drag_started {} drag_stopped {}",
-                            response.hovered(),
-                            response.dragged(),
-                            response.drag_started(),
-                            response.drag_stopped()
-                        ),
-                        small_font_id.clone(),
-                        Color32::WHITE,
-                    );
-
-                    for edge in self.model.edges.iter() {
-                        if !self.model.is_shown(&edge.p1) || !self.model.is_shown(&edge.p2) {
-                            continue;
-                        }
-
-                        let from: Pos2 = self.model.node_pos(&edge.p1).into();
-                        let to = self.model.node_pos(&edge.p2).into();
-
-                        let dist = from.distance(to);
-                        let tension = (dist / edge.distance as f32).log2();
-
-                        let from = to_frame * from;
-                        let to = to_frame * to;
-
-                        let sgn = tension.signum();
-                        let tension = (tension.abs().clamp(0.0, 1.0) * 255.0) as u8;
-
-                        let color = if edge.is_horizontal() {
-                            let (r, g) = if sgn > 0.0 { (tension, 0) } else { (0, tension) };
-                            Color32::from_rgb(r, g, 255)
-                        } else {
-                            let (g, b) = if sgn > 0.0 { (tension, 0) } else { (0, tension) };
-                            Color32::from_rgb(255, g, b)
-                        };
-
-                        painter.line_segment([to_screen * from, to_screen * to], (2.0, color));
-
-                        let mid_point = from.lerp(to, 0.5);
-                        painter.text(
-                            to_screen * mid_point,
-                            Align2::CENTER_CENTER,
-                            format!("{} / {} = {}", dist, edge.distance, tension),
-                            small_font_id.clone(),
-                            Color32::WHITE,
-                        );
-                    }
-
-                    for node in self.model.nodes.iter() {
-                        if !self.model.is_shown(node) {
-                            continue;
-                        }
-                        let pos = self.model.node_pos(node);
-                        let data = self.model.node_data(node);
-
-                        let x = ((pos.0 - min_u) * x_scale);
-                        let y = ((pos.1 - min_v) * y_scale);
-                        let center = pos2(x, y);
-
-                        let fill_color = match data.state {
-                            GraphObjectState::Hidden => Color32::BLACK,
-                            GraphObjectState::Proposed => Color32::GRAY,
-                            GraphObjectState::Confirmed => Color32::WHITE,
-                            GraphObjectState::Discarded => Color32::BLACK,
-                        };
-                        let fill_color = if self.drag_node == Some(*node) {
-                            Color32::BLUE
-                        } else if let Some(hover_node) = hover_node {
-                            if hover_node == *node {
-                                Color32::YELLOW
-                            } else {
-                                fill_color
-                            }
-                        } else {
-                            fill_color
-                        };
-
-                        let ring_color = if data.fixed { Color32::GREEN } else { fill_color };
-
-                        painter.circle(to_screen * center, NODE_RADIUS, fill_color, (2.0, ring_color));
-
-                        // add label right to the node
-                        painter.text(
-                            to_screen * (center + vec2(NODE_RADIUS + 5.0, 0.0)),
-                            Align2::LEFT_CENTER,
-                            format!("{}", node),
-                            font_id.clone(),
-                            Color32::RED,
-                        );
-                    }
-
-                    self.model.simulation_step();
-                });
-
-                None
-            })
+            .show(ctx, |ui| self.show_canvas(ui))
             .map(|x| x.inner)
             .flatten()
             .flatten()
