@@ -849,6 +849,11 @@ struct GlobalEdge {
     p2: CollisionPoint,
     distance: u64,
 }
+impl GlobalEdge {
+    fn is_horizontal(&self) -> bool {
+        self.p1.horizontal_id == self.p2.horizontal_id
+    }
+}
 
 fn load_collisions() -> Vec<Collision> {
     let file = File::open("data/collisions").unwrap();
@@ -2258,60 +2263,70 @@ fn analyze_collisions() {
     } */
 }
 
-struct GraphNode {
-    id: CollisionPoint,
-    x: u16,
-    y: u16,
-    z: u16,
-    u: f32,
-    v: f32,
-    fixed: bool,
-    state: GraphObjectState,
-}
-
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum GraphObjectState {
+    Hidden,
     Proposed,
     Confirmed,
     Discarded,
 }
-struct GraphEdge {
-    from: CollisionPoint,
-    to: CollisionPoint,
-    distance: u64,
-    /// rank in the adjacency matrix (lower value is most likely neighbor)
-    ranking: u32,
+#[derive(Debug, Clone)]
+pub struct NodeData {
+    fixed: bool,
     state: GraphObjectState,
 }
-impl GraphEdge {
-    fn is_horizontal(&self) -> bool {
-        self.from.vertical_id == self.to.vertical_id
+impl Default for NodeData {
+    fn default() -> Self {
+        Self {
+            fixed: false,
+            state: GraphObjectState::Hidden,
+        }
     }
 }
 
+pub struct EdgeData {
+    state: GraphObjectState,
+}
+
 pub struct GraphModel {
-    nodes: HashMap<CollisionPoint, GraphNode>,
-    edges: Vec<GraphEdge>,
+    nodes: HashSet<CollisionPoint>,
+    edges: Vec<GlobalEdge>,
+    node_positions: HashMap<CollisionPoint, (f32, f32)>,
+    node_data: HashMap<CollisionPoint, NodeData>,
+    edge_data: HashMap<GlobalEdge, EdgeData>,
 }
 impl GraphModel {
+    fn node_data(&self, node: &CollisionPoint) -> NodeData {
+        self.node_data.get(node).cloned().unwrap_or_default()
+    }
+    fn node_data_mut(&mut self, node: &CollisionPoint) -> &mut NodeData {
+        self.node_data.entry(*node).or_insert(NodeData::default())
+    }
+    fn node_pos(&self, node: &CollisionPoint) -> (f32, f32) {
+        *self.node_positions.get(node).unwrap_or(&(0.0, 0.0))
+    }
+    fn node_pos_mut(&mut self, node: &CollisionPoint) -> &mut (f32, f32) {
+        self.node_positions.entry(*node).or_insert((0.0, 0.0))
+    }
+    fn is_shown(&self, node: &CollisionPoint) -> bool {
+        self.node_data(node).state != GraphObjectState::Hidden
+    }
     fn simulation_step(&mut self) {
-        let keys = self.nodes.keys().cloned().collect::<Vec<_>>();
-        for n_id in keys {
-            let n = self.nodes.get(&n_id).unwrap();
-            if n.fixed {
+        let keys = self.nodes.clone();
+        for n in keys {
+            if !self.is_shown(&n) || self.node_data(&n).fixed {
                 continue;
             }
-            let edges = self.edges.iter().filter(|e| e.from == n.id || e.to == n.id);
+            let edges = self.edges.iter().filter(|e| e.p1 == n || e.p2 == n);
             let mut force_u = 0.0;
             let mut force_v = 0.0;
 
             for e in edges {
-                let other = if e.from == n.id {
-                    &self.nodes[&e.to]
-                } else {
-                    &self.nodes[&e.from]
-                };
-                let dx = other.u - n.u;
-                let dy = other.v - n.v;
+                let other = if e.p1 == n { &e.p2 } else { &e.p1 };
+                let this_pos = self.node_pos(&n);
+                let other_pos = self.node_pos(other);
+                let dx = other_pos.0 - this_pos.0;
+                let dy = other_pos.1 - this_pos.1;
                 let cur_distance = (dx * dx + dy * dy).sqrt();
                 let distance = e.distance as f32;
                 let d_dist = cur_distance - distance;
@@ -2326,9 +2341,9 @@ impl GraphModel {
                 ); */
             }
 
-            let n = self.nodes.get_mut(&n_id).unwrap();
-            n.u += force_u;
-            n.v += force_v;
+            let pos = self.node_pos_mut(&n);
+            pos.0 += force_u;
+            pos.1 += force_v;
         }
     }
 }
@@ -2355,7 +2370,7 @@ impl GraphPanel {
             .iter()
             .find(|c| c.h_id == start_node.horizontal_id && c.v_id == start_node.vertical_id)
             .unwrap();
-        let start_node = GraphNode {
+        /* let start_node = GraphNode {
             id: start_node,
             x: start_coll.x,
             y: start_coll.y,
@@ -2381,30 +2396,58 @@ impl GraphPanel {
                 fixed: false,
                 state: GraphObjectState::Proposed,
             }
-        };
+        }; */
 
-        let mut all_nodes: HashMap<CollisionPoint, GraphNode> = HashMap::default();
+        let mut all_nodes = HashSet::default();
+        let mut node_positions = HashMap::default();
+        collisions.iter().for_each(|c| {
+            all_nodes.insert(CollisionPoint::new(c.h_id, c.v_id));
+        });
 
+        let mut node_data = HashMap::default();
         if let Some(square) = path_finder
-            .find_squares_at_horizontal_first(&start_node.id, &|node| true)
+            .find_squares_at_horizontal_first(&start_node, &|node| true)
             .iter()
             .next()
         {
-            let nodes = square.iter().map(|n| node_for_point(n)).collect::<Vec<_>>();
-            all_nodes.extend(nodes.into_iter().map(|n| (n.id, n)).collect::<Vec<_>>());
+            for node in square.iter() {
+                node_data.insert(
+                    *node,
+                    NodeData {
+                        fixed: false,
+                        state: GraphObjectState::Proposed,
+                    },
+                );
+                let c = collisions
+                    .iter()
+                    .find(|c| c.h_id == node.horizontal_id && c.v_id == node.vertical_id)
+                    .unwrap();
+                node_positions.insert(
+                    CollisionPoint::new(c.h_id, c.v_id),
+                    (c.x as f32 - start_coll.x as f32, c.y as f32 - start_coll.y as f32),
+                );
+            }
         }
+        node_positions.insert(start_node, (0.0, 0.0));
+        node_data.insert(
+            start_node,
+            NodeData {
+                fixed: true,
+                state: GraphObjectState::Confirmed,
+            },
+        );
 
-        let all_edges = edges
-            .iter()
-            .filter(|e| all_nodes.contains_key(&e.p1) && all_nodes.contains_key(&e.p2))
-            .map(|e| GraphEdge {
-                from: e.p1,
-                to: e.p2,
-                distance: e.distance,
-                ranking: 0,
-                state: GraphObjectState::Proposed,
-            })
-            .collect::<Vec<_>>();
+        /* let all_edges = edges
+        .iter()
+        .filter(|e| all_nodes.contains_key(&e.p1) && all_nodes.contains_key(&e.p2))
+        .map(|e| GraphEdge {
+            from: e.p1,
+            to: e.p2,
+            distance: e.distance,
+            ranking: 0,
+            state: GraphObjectState::Proposed,
+        })
+        .collect::<Vec<_>>(); */
 
         //let neighbors = path_finder.horizontal_neighbors_with_distance(&start_node.id);
 
@@ -2428,7 +2471,10 @@ impl GraphPanel {
 
         let mut model = GraphModel {
             nodes: all_nodes,
-            edges: all_edges,
+            edges,
+            node_positions,
+            node_data,
+            edge_data: HashMap::default(),
         };
 
         Self {
@@ -2474,11 +2520,39 @@ impl GraphPanel {
                     let (mut response, painter) =
                         ui.allocate_painter(ui.available_size_before_wrap(), Sense::click_and_drag());
 
-                    let min_u = self.model.nodes.values().map(|n| n.u).min_by(f32::total_cmp).unwrap() - 10.0;
-                    let max_u = self.model.nodes.values().map(|n| n.u).max_by(f32::total_cmp).unwrap() + 10.0;
+                    let min_u = self
+                        .model
+                        .node_positions
+                        .values()
+                        .map(|n| n.0)
+                        .min_by(f32::total_cmp)
+                        .unwrap()
+                        - 10.0;
+                    let max_u = self
+                        .model
+                        .node_positions
+                        .values()
+                        .map(|n| n.0)
+                        .max_by(f32::total_cmp)
+                        .unwrap()
+                        + 10.0;
 
-                    let min_v = self.model.nodes.values().map(|n| n.v).min_by(f32::total_cmp).unwrap() - 10.0;
-                    let max_v = self.model.nodes.values().map(|n| n.v).max_by(f32::total_cmp).unwrap() + 10.0;
+                    let min_v = self
+                        .model
+                        .node_positions
+                        .values()
+                        .map(|n| n.1)
+                        .min_by(f32::total_cmp)
+                        .unwrap()
+                        - 10.0;
+                    let max_v = self
+                        .model
+                        .node_positions
+                        .values()
+                        .map(|n| n.1)
+                        .max_by(f32::total_cmp)
+                        .unwrap()
+                        + 10.0;
 
                     let to_frame = emath::RectTransform::from_to(
                         Rect::from_min_max(pos2(min_u, min_v), pos2(max_u, max_v)),
@@ -2492,18 +2566,19 @@ impl GraphPanel {
                     );
                     let from_screen = to_screen.inverse();
 
-                    let hover_node = if response.hovered() {
-                        let pos = response.hover_pos().unwrap();
+                    const NODE_RADIUS: f32 = 20.0;
+
+                    let hover_node = if let Some(pos) = response.hover_pos() {
                         self.model
-                            .nodes
+                            .node_positions
                             .iter()
-                            .find(|n| {
-                                let n_pos = to_screen * (to_frame * pos2(n.1.u, n.1.v));
-                                n_pos.distance(pos) < 10.0
+                            .find(|(n, (u, v))| {
+                                let n_pos = to_screen * (to_frame * pos2(*u, *v));
+                                n_pos.distance(pos) < NODE_RADIUS
                             })
                             .map(|n| n.0.clone())
                     } else {
-                        self.drag_node = None;
+                        //self.drag_node = None;
                         None
                     };
 
@@ -2511,16 +2586,16 @@ impl GraphPanel {
                         if response.drag_started() {
                             self.drag_node = Some(hover_node.clone());
                         }
-                        if response.drag_stopped() {
-                            self.drag_node = None;
-                        }
+                    }
+                    if response.drag_stopped() {
+                        self.drag_node = None;
                     }
                     if let Some(drag_node) = self.drag_node {
                         if let Some(pos) = response.hover_pos() {
-                            let node = self.model.nodes.get_mut(&drag_node).unwrap();
+                            let node = self.model.node_pos_mut(&drag_node);
                             let new_pos = from_frame * (from_screen * pos);
-                            node.u = new_pos.x;
-                            node.v = new_pos.y;
+                            node.0 = new_pos.x;
+                            node.1 = new_pos.y;
                         }
                     }
 
@@ -2530,13 +2605,46 @@ impl GraphPanel {
                     let x_scale = width as f32 / (max_u - min_u);
                     let y_scale = height as f32 / (max_v - min_v);
 
+                    let small_font_id = FontId::new(12.0, FontFamily::Proportional);
                     let font_id = FontId::new(20.0, FontFamily::Proportional);
 
+                    painter.text(
+                        to_screen * pos2(5.0, 10.0),
+                        Align2::LEFT_CENTER,
+                        format!("hover_node: {:?}", hover_node),
+                        small_font_id.clone(),
+                        Color32::WHITE,
+                    );
+                    painter.text(
+                        to_screen * pos2(5.0, 25.0),
+                        Align2::LEFT_CENTER,
+                        format!("drag_node: {:?}", self.drag_node),
+                        small_font_id.clone(),
+                        Color32::WHITE,
+                    );
+                    painter.text(
+                        to_screen * pos2(5.0, 40.0),
+                        Align2::LEFT_CENTER,
+                        format!(
+                            "hovered {} dragged {} drag_started {} drag_stopped {}",
+                            response.hovered(),
+                            response.dragged(),
+                            response.drag_started(),
+                            response.drag_stopped()
+                        ),
+                        small_font_id.clone(),
+                        Color32::WHITE,
+                    );
+
                     for edge in self.model.edges.iter() {
-                        let from = self.model.nodes.get(&edge.from).unwrap();
-                        let to = self.model.nodes.get(&edge.to).unwrap();
-                        let from = to_frame * pos2(from.u, from.v);
-                        let to = to_frame * pos2(to.u, to.v);
+                        if !self.model.is_shown(&edge.p1) || !self.model.is_shown(&edge.p2) {
+                            continue;
+                        }
+
+                        let from = self.model.node_pos(&edge.p1);
+                        let to = self.model.node_pos(&edge.p2);
+                        let from = to_frame * pos2(from.0, from.1);
+                        let to = to_frame * pos2(to.0, to.1);
                         let color = if edge.is_horizontal() {
                             Color32::BLUE
                         } else {
@@ -2547,13 +2655,19 @@ impl GraphPanel {
                     }
 
                     for node in self.model.nodes.iter() {
-                        let x = ((node.1.u - min_u) * x_scale);
-                        let y = ((node.1.v - min_v) * y_scale);
+                        if !self.model.is_shown(node) {
+                            continue;
+                        }
+                        let pos = self.model.node_pos(node);
+                        let data = self.model.node_data(node);
+
+                        let x = ((pos.0 - min_u) * x_scale);
+                        let y = ((pos.1 - min_v) * y_scale);
                         let center = pos2(x, y);
 
-                        let color = if node.1.fixed { Color32::GREEN } else { Color32::WHITE };
+                        let color = if data.fixed { Color32::GREEN } else { Color32::WHITE };
                         let color = if let Some(hover_node) = hover_node {
-                            if hover_node == *node.0 {
+                            if hover_node == *node {
                                 Color32::YELLOW
                             } else {
                                 color
@@ -2562,13 +2676,13 @@ impl GraphPanel {
                             color
                         };
 
-                        painter.circle_filled(to_screen * center, 10.0, color);
+                        painter.circle_filled(to_screen * center, NODE_RADIUS, color);
 
                         // add label right to the node
                         painter.text(
-                            to_screen * (center + vec2(15.0, 0.0)),
+                            to_screen * (center + vec2(NODE_RADIUS + 5.0, 0.0)),
                             Align2::LEFT_CENTER,
-                            format!("{}", node.0),
+                            format!("{}", node),
                             font_id.clone(),
                             Color32::RED,
                         );
