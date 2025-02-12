@@ -2332,8 +2332,8 @@ impl GraphModel {
                 let d_dist = cur_distance - distance;
                 let force = 0.05 * d_dist;
 
-                force_u += force * dx / cur_distance;
-                force_v += force * dy / cur_distance;
+                force_u += force * dx / (cur_distance + 0.00001);
+                force_v += force * dy / (cur_distance + 0.00001);
 
                 /* println!(
                     "Force from {:?} ({},{}) to {:?} ({},{}): dx: {}, dy: {}, cur_distance: {}, distance: {}, d_dist: {}, force: {} ({},{})",
@@ -2429,13 +2429,6 @@ impl GraphPanel {
             }
         }
         node_positions.insert(start_node, (0.0, 0.0));
-        node_data.insert(
-            start_node,
-            NodeData {
-                fixed: true,
-                state: GraphObjectState::Confirmed,
-            },
-        );
 
         /* let all_edges = edges
         .iter()
@@ -2477,13 +2470,56 @@ impl GraphPanel {
             edge_data: HashMap::default(),
         };
 
-        Self {
+        let mut res = Self {
             model,
             collisions,
             path_finder,
             texture: None,
             drag_node: None,
+        };
+        res.fix_node(start_node);
+        res.confirm_node(start_node);
+        res
+    }
+    fn confirm_node(&mut self, n: CollisionPoint) {
+        self.set_node_state(n, GraphObjectState::Confirmed);
+        let pos = self.model.node_pos(&n);
+
+        for (neigh, _) in self.path_finder.horizontal_neighbors_with_distance(&n) {
+            self.propose_if_hidden(neigh);
+            let d = self.model.node_data(&neigh);
+            if !d.fixed {
+                *self.model.node_pos_mut(&neigh) = pos;
+            }
         }
+
+        for (neigh, _) in self.path_finder.vertical_neighbors_with_distance(&n) {
+            self.propose_if_hidden(neigh);
+            let d = self.model.node_data(&neigh);
+            if !d.fixed {
+                *self.model.node_pos_mut(&neigh) = pos;
+            }
+        }
+    }
+    fn propose_if_hidden(&mut self, n: CollisionPoint) {
+        let mut d = self.model.node_data_mut(&n);
+        if d.state == GraphObjectState::Hidden {
+            d.state = GraphObjectState::Proposed;
+        };
+    }
+    fn set_node_state(&mut self, n: CollisionPoint, state: GraphObjectState) {
+        let data = self.model.node_data_mut(&n);
+        data.state = state;
+    }
+    fn fix_node(&mut self, n: CollisionPoint) {
+        self.set_node_fixed(n, true);
+    }
+    fn unfix_node(&mut self, n: CollisionPoint) {
+        self.set_node_fixed(n, false);
+    }
+    fn set_node_fixed(&mut self, n: CollisionPoint, fixed: bool) {
+        let data = self.model.node_data_mut(&n);
+        data.fixed = fixed;
     }
     fn load_global_edges() -> Vec<GlobalEdge> {
         let file = File::open("data/global.dot").unwrap();
@@ -2585,6 +2621,17 @@ impl GraphPanel {
                         if response.drag_started() {
                             self.drag_node = Some(hover_node.clone());
                         }
+                        ui.ctx().input(|i| {
+                            if i.key_pressed(egui::Key::C) {
+                                self.confirm_node(hover_node);
+                            }
+                            if i.key_pressed(egui::Key::F) {
+                                self.fix_node(hover_node);
+                            }
+                            if i.key_pressed(egui::Key::U) {
+                                self.unfix_node(hover_node);
+                            }
+                        });
                     }
                     if response.drag_stopped() {
                         self.drag_node = None;
