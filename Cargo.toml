@@ -39,6 +39,7 @@ ruzstd          = { version = "0.8" }
 serde           = { version = "1", features = ["derive"] }
 serde_json      = { version = "1" }
 sha2            = { version = "0.10" }
+spade = "2.12.1"
 tiff            = { version = "0.9" }
 tokio           = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync" ]}
 wavefront_obj   = { version = "11.0" }

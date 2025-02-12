@@ -6,8 +6,8 @@ use crate::{
 };
 use eframe::glow::TESS_CONTROL_SHADER;
 use egui::{
-    pos2, vec2, Align2, Color32, ColorImage, FontFamily, FontId, Frame, Image, Label, Pos2, Rect, Sense, TextureHandle,
-    Ui, WidgetText,
+    pos2, vec2, Align2, Color32, ColorImage, FontFamily, FontId, Frame, Image, Label, Mesh, Pos2, Rect, Response,
+    Sense, SliderClamping, TextureHandle, Ui, WidgetText,
 };
 use egui_extras::{Column, TableBuilder};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -33,6 +33,7 @@ use std::{
     },
 };
 use std::{f32::consts::E, io::BufRead};
+use std::{ops::RangeInclusive, sync::Arc};
 
 type HashMap<K, V> = FxHashMap<K, V>;
 type HashSet<K> = FxHashSet<K>;
@@ -2462,9 +2463,11 @@ impl GraphModel {
                 }
             }
 
-            let pos = self.node_pos_mut(&n);
-            pos.0 += force_u;
-            pos.1 += force_v;
+            if force_u.is_finite() && force_v.is_finite() {
+                let pos = self.node_pos_mut(&n);
+                pos.0 += force_u;
+                pos.1 += force_v;
+            }
         }
     }
 }
@@ -2496,8 +2499,7 @@ impl GraphPanel {
         let collisions = load_collisions();
         let edges = Self::load_global_edges();
         let path_finder = PathFinder::new(&edges);
-
-        let start_node = CollisionPoint::new(3227, 28983);
+        let start_node = CollisionPoint::new(1916, 26379);
         let start_coll = collisions
             .iter()
             .find(|c| c.h_id == start_node.horizontal_id && c.v_id == start_node.vertical_id)
@@ -2623,6 +2625,112 @@ impl GraphPanel {
         let file = File::create(file_name).unwrap();
         serde_json::to_writer(file, &persisted).unwrap();
     }
+    fn save_obj(&self, file_name: &str) {
+        use spade::{ConstrainedDelaunayTriangulation, DelaunayTriangulation, Point2, Triangulation};
+
+        struct MeshVertex {
+            h_id: u32,
+            v_id: u32,
+            x: u16,
+            y: u16,
+            z: u16,
+            u: f32,
+            v: f32,
+        }
+        impl spade::HasPosition for MeshVertex {
+            type Scalar = f32;
+            fn position(&self) -> Point2<Self::Scalar> {
+                Point2::new(self.u, self.v)
+            }
+        }
+
+        let mut cdt: DelaunayTriangulation<MeshVertex> = DelaunayTriangulation::<MeshVertex>::new();
+        for e in &self.model.edges {
+            let p1 = self.model.node_pos(&e.p1);
+            let p2 = self.model.node_pos(&e.p2);
+
+            let d1 = self.model.node_data(&e.p1);
+            let d2 = self.model.node_data(&e.p2);
+
+            if d1.state == GraphObjectState::Confirmed && d2.state == GraphObjectState::Confirmed {
+                let p1c = self
+                    .collisions
+                    .iter()
+                    .find(|c| c.h_id == e.p1.horizontal_id && c.v_id == e.p1.vertical_id)
+                    .unwrap();
+                let p1 = MeshVertex {
+                    h_id: e.p1.horizontal_id,
+                    v_id: e.p1.vertical_id,
+                    x: p1c.x,
+                    y: p1c.y,
+                    z: p1c.z,
+                    u: p1.0,
+                    v: p1.1,
+                };
+                let p2c = self
+                    .collisions
+                    .iter()
+                    .find(|c| c.h_id == e.p2.horizontal_id && c.v_id == e.p2.vertical_id)
+                    .unwrap();
+                let p2 = MeshVertex {
+                    h_id: e.p2.horizontal_id,
+                    v_id: e.p2.vertical_id,
+                    x: p2c.x,
+                    y: p2c.y,
+                    z: p2c.z,
+                    u: p2.0,
+                    v: p2.1,
+                };
+                cdt.insert(p1).unwrap();
+                cdt.insert(p2).unwrap();
+                //cdt.add_constraint_edge(p1, p2).unwrap();
+            }
+        }
+
+        let min_u = cdt
+            .vertices()
+            .map(|v| v.data().u)
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        let min_v = cdt
+            .vertices()
+            .map(|v| v.data().v)
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        let max_u = cdt
+            .vertices()
+            .map(|v| v.data().u)
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        let max_v = cdt
+            .vertices()
+            .map(|v| v.data().v)
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+
+        let span_u = max_u - min_u;
+        let span_v = max_v - min_v;
+
+        let mut file = File::create(file_name).unwrap();
+        let mut vertex_indices = HashMap::default();
+        for (i, v) in cdt.vertices().enumerate() {
+            vertex_indices.insert(v.index(), i + 1);
+            let d = v.data();
+            let u = (d.u - min_u) / span_u;
+            let v = (d.v - min_v) / span_v;
+            writeln!(file, "v {} {} {}", d.x, d.y, d.z).unwrap();
+            writeln!(file, "vt {} {}", u, v).unwrap();
+            writeln!(file, "vn 0 0 0").unwrap();
+        }
+
+        for f in cdt.inner_faces() {
+            let vs = f.vertices();
+            let v1 = vertex_indices[&vs[0].index()];
+            let v2 = vertex_indices[&vs[1].index()];
+            let v3 = vertex_indices[&vs[2].index()];
+            writeln!(file, "f {}/{}/{} {}/{}/{} {}/{}/{}", v1, v1, v1, v2, v2, v2, v3, v3, v3).unwrap();
+        }
+    }
     fn load_from(file_name: &str) -> Option<Self> {
         let file = File::open(file_name).ok()?;
         let persisted: PersistedGraph = serde_json::from_reader(file).ok()?;
@@ -2735,6 +2843,8 @@ impl GraphPanel {
             ui.ctx().input(|i| {
                 if i.key_pressed(egui::Key::S) {
                     self.save_to("data/graph.json");
+                } else if i.key_pressed(egui::Key::O) {
+                    self.save_obj("data/graph.obj");
                 }
             });
 
@@ -2947,7 +3057,9 @@ impl GraphPanel {
                 );
             }
 
-            self.model.simulation_step(&self.simulation_params);
+            if self.drag_node.is_none() {
+                self.model.simulation_step(&self.simulation_params);
+            }
         });
 
         None
@@ -2955,7 +3067,49 @@ impl GraphPanel {
 
     pub fn draw(&mut self, ctx: &egui::Context) -> Option<[i32; 3]> {
         egui::Window::new("Graph")
-            .show(ctx, |ui| self.show_canvas(ui))
+            .show(ctx, |ui| {
+                fn slider<T: emath::Numeric>(
+                    ui: &mut Ui,
+                    label: &str,
+                    value: &mut T,
+                    range: RangeInclusive<T>,
+                    logarithmic: bool,
+                    enabled: bool,
+                ) -> Response {
+                    ui.label(label);
+                    let slider = egui::Slider::new(value, range).clamping(SliderClamping::Always);
+                    let slider = if logarithmic { slider.logarithmic(true) } else { slider };
+                    let sl = ui.add_enabled(enabled, slider);
+                    ui.end_row();
+                    sl
+                }
+
+                ui.vertical(|ui| {
+                    egui::Grid::new("settings")
+                        .num_columns(2)
+                        .spacing([40.0, 4.0])
+                        .show(ui, |ui| {
+                            slider(
+                                ui,
+                                "Spring constant",
+                                &mut self.simulation_params.spring_constant,
+                                0.0..=0.6,
+                                false,
+                                true,
+                            );
+                            slider(
+                                ui,
+                                "Angle constant",
+                                &mut self.simulation_params.angle_constant,
+                                0.0..=3.0,
+                                false,
+                                true,
+                            );
+                        });
+                    self.show_canvas(ui)
+                })
+                .inner
+            })
             .map(|x| x.inner)
             .flatten()
             .flatten()
