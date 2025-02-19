@@ -17,7 +17,7 @@ pub trait VolumeReference: Send + Sync {
     fn url_path_base(&self) -> String;
 }
 impl dyn VolumeReference {
-    pub const VOLUMES: [&'static dyn VolumeReference; 22] = [
+    pub const VOLUMES: [&'static dyn VolumeReference; 25] = [
         &FullVolumeReference::SCROLL1,
         &FullVolumeReference::SCROLL1B,
         &FullVolumeReference::SCROLL2,
@@ -28,7 +28,10 @@ impl dyn VolumeReference {
         &FullVolumeReference::SCROLL1667,
         &FullVolumeReference::SCROLL1667_7_91_UM,
         &FullVolumeReference::SCROLL172,
-        &FullVolumeReference::FRAGMENT_PHerc0051Cr04Fr08,
+        &FullVolumeReference::FRAGMENT_PHerc0051Cr04Fr08_3_24_UM_53keV,
+        &FullVolumeReference::FRAGMENT_PHerc0051Cr04Fr08_3_24_UM_70keV,
+        &FullVolumeReference::FRAGMENT_PHerc0051Cr04Fr08_3_24_UM_88keV,
+        &FullVolumeReference::FRAGMENT_PHerc0051Cr04Fr08_7_91_UM_53keV,
         &FullVolumeReference::FRAGMENT_PHerc1667Cr01Fr03,
         &FullVolumeReference::FRAGMENT_1_54keV,
         &FullVolumeReference::FRAGMENT_1_88keV,
@@ -123,9 +126,21 @@ impl FullVolumeReference {
         scroll_id: "172",
         volume: "20241024131838",
     };
-    pub const FRAGMENT_PHerc0051Cr04Fr08: FullVolumeReference = FullVolumeReference {
+    pub const FRAGMENT_PHerc0051Cr04Fr08_3_24_UM_53keV: FullVolumeReference = FullVolumeReference {
         scroll_id: "PHerc0051Cr04Fr08",
         volume: "20231121152933",
+    };
+    pub const FRAGMENT_PHerc0051Cr04Fr08_3_24_UM_70keV: FullVolumeReference = FullVolumeReference {
+        scroll_id: "PHerc0051Cr04Fr08",
+        volume: "20231201120546",
+    };
+    pub const FRAGMENT_PHerc0051Cr04Fr08_3_24_UM_88keV: FullVolumeReference = FullVolumeReference {
+        scroll_id: "PHerc0051Cr04Fr08",
+        volume: "20231201112849",
+    };
+    pub const FRAGMENT_PHerc0051Cr04Fr08_7_91_UM_53keV: FullVolumeReference = FullVolumeReference {
+        scroll_id: "PHerc0051Cr04Fr08",
+        volume: "20231130112027",
     };
     pub const FRAGMENT_PHerc1667Cr01Fr03: FullVolumeReference = FullVolumeReference {
         scroll_id: "PHerc1667Cr01Fr03",
