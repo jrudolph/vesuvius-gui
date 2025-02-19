@@ -9,6 +9,8 @@ use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
 use crate::volume;
+use crate::zarr::FourColors;
+use crate::zarr::OmeZarrContext;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
 use egui::Color32;
@@ -185,9 +187,6 @@ impl Default for TemplateApp {
 }
 
 impl TemplateApp {
-    const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
-    //const TILE_SERVER: &'static str = "http://localhost:8095";
-
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>, catalog: Catalog, config: VesuviusConfig) -> Self {
         // This is also where you can customize the look and feel of egui using
@@ -235,7 +234,8 @@ impl TemplateApp {
             app.mode = Mode::Layers;
             app.load_from_layers();
         } else {
-            app.select_volume(app.volume_id);
+            //app.select_volume(app.volume_id);
+            app.world = RGBVolume::new_for_frag6().into_volume();
         }
 
         if let Some(ObjFileConfig {
@@ -252,15 +252,15 @@ impl TemplateApp {
                 app.overlay = Some({
                     if segment_file.starts_with("http") {
                         println!("Loading zarr from url: {}", segment_file);
-                        Box::new(
+                        /* Box::new(
                             ZarrArray::from_url_to_default_cache_dir(&segment_file)
                                 .into_ctx()
                                 .into_ctx(),
-                        )
+                        ) */
                         // TODO: autodetect or allow to choose whether to use ome-zarr or zarr
-                        /* Box::new(OmeZarrContext::<FourColors>::from_url_to_default_cache_dir(
+                        Box::new(OmeZarrContext::<FourColors>::from_url_to_default_cache_dir(
                             &segment_file,
-                        )) */
+                        ))
                     } else {
                         Box::new(ZarrArray::from_path(&segment_file).into_ctx().into_ctx())
                     }
@@ -343,11 +343,10 @@ impl TemplateApp {
             let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
             self.world = Arc::new(RefCell::new(v)); */
         } */
-
         self.world = {
             let downloader = Box::new(SimpleDownloader::new(
                 &volume_dir,
-                Self::TILE_SERVER,
+                SimpleDownloader::TILE_SERVER,
                 volume,
                 None,
                 sender,
@@ -638,7 +637,7 @@ impl TemplateApp {
                                         println!("Selected volume: {}", self.volume_id);
                                         self.clear_textures();
                                         self.select_volume(self.volume_id);
-                                        self.zoom = 0.25;
+                                        //self.zoom = 0.25;
                                     }
                                 }
                             });
@@ -1068,7 +1067,7 @@ impl TemplateApp {
                 });
                 if let Some(segment) = clicked {
                     if let Some(obj_file) = self.obj_repository.get(&segment) {
-                        self.load_data(&segment.volume_ref());
+                        //self.load_data(&segment.volume_ref());
                         self.setup_segment(&obj_file.to_str().unwrap().to_string(), segment.width, segment.height);
                         self.clear_textures();
                         self.selected_segment = Some(segment);

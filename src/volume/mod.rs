@@ -4,6 +4,7 @@ mod grid500;
 mod layers;
 mod objvolume;
 mod ppmvolume;
+mod rgb;
 mod volume64x4;
 
 use egui::{Color32, ColorImage};
@@ -14,6 +15,7 @@ pub use layers::LayersMappedVolume;
 use libm::modf;
 pub use objvolume::{ObjFile, ObjVolume};
 pub use ppmvolume::PPMVolume;
+pub use rgb::RGBVolume;
 use std::rc::Rc;
 pub use volume64x4::VolumeGrid64x4Mapped;
 
@@ -70,6 +72,16 @@ pub trait VoxelVolume {
 
     fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
         self.get_interpolated_slow(xyz, downsampling)
+    }
+
+    fn get_color(&self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        let value = self.get(xyz, downsampling);
+        Color32::from_gray(value)
+    }
+
+    fn get_color_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        let value = self.get_interpolated(xyz, downsampling);
+        Color32::from_gray(value)
     }
 
     fn get_interpolated_slow(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
@@ -222,5 +234,11 @@ impl VoxelVolume for Volume {
     }
     fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
         self.volume.get_interpolated(xyz, downsampling)
+    }
+    fn get_color(&self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        self.volume.get_color(xyz, downsampling)
+    }
+    fn get_color_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        self.volume.get_color_interpolated(xyz, downsampling)
     }
 }

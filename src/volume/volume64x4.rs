@@ -1,7 +1,8 @@
 use super::{DrawingConfig, Image, VoxelVolume};
 use crate::downloader::*;
-use crate::model::Quality;
+use crate::model::{Quality, VolumeReference};
 use crate::volume::PaintVolume;
+use directories::BaseDirs;
 use libm::modf;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -124,6 +125,26 @@ impl VolumeGrid64x4Mapped {
 
     pub(crate) fn try_loading_tile(&self, x: usize, y: usize, z: usize, quality: Quality) -> Rc<TileState> {
         self.state.borrow_mut().try_loading_tile(&self, x, y, z, quality)
+    }
+    pub fn for_volume(volume: &'static dyn VolumeReference) -> VolumeGrid64x4Mapped {
+        let cache_dir = BaseDirs::new()
+            .unwrap()
+            .cache_dir()
+            .join("vesuvius-gui")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let volume_dir = volume.sub_dir(&cache_dir);
+        let (sender, _receiver) = std::sync::mpsc::channel::<(usize, usize, usize, Quality)>();
+        let downloader = Box::new(SimpleDownloader::new(
+            &volume_dir,
+            SimpleDownloader::TILE_SERVER,
+            volume,
+            None,
+            sender,
+            false,
+        ));
+        Self::from_data_dir(&volume_dir, downloader)
     }
 
     pub fn from_data_dir(data_dir: &str, downloader: Box<dyn Downloader>) -> VolumeGrid64x4Mapped {

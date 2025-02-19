@@ -52,6 +52,9 @@ impl Downloader for SimpleDownloader {
     }
 }
 impl SimpleDownloader {
+    pub const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
+    //const TILE_SERVER: &'static str = "http://localhost:8095";
+
     pub fn new(
         dir: &str,
         tile_server_base: &'static str,
