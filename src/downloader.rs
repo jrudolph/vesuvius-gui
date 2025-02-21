@@ -77,7 +77,7 @@ impl SimpleDownloader {
                     DownloadMessage::Position(x, y, z, width, height) => _pos = (x, y, z, width, height),
                     DownloadMessage::Download((state, x, y, z, quality)) => {
                         let cur = count.load(Ordering::Acquire);
-                        if cur >= 32 {
+                        if cur >= 6 {
                             *state.lock().unwrap() = DownloadState::Pruned;
                             continue;
                         }
