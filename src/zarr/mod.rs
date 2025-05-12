@@ -7,6 +7,7 @@ use crate::volume::{PaintVolume, VoxelVolume};
 use blosc::BloscChunk;
 use derive_more::Debug;
 use ehttp::Request;
+use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use libm::modf;
 pub use ome::OmeZarrContext;
 pub use ome::{ColorScheme, FourColors, GrayScale};
@@ -17,10 +18,12 @@ use sha2::Sha256;
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 use std::{
-    collections::{HashMap, HashSet},
     ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
 };
+
+type HashMap<K, V> = FxHashMap<K, V>;
+type HashSet<K> = FxHashSet<K>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum ZarrDataType {
@@ -137,7 +140,7 @@ impl SimpleDownloader {
     fn new() -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
         std::thread::spawn(move || {
-            let mut ongoing: HashSet<String> = HashSet::new();
+            let mut ongoing: HashSet<String> = HashSet::default();
             let downloading = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             for (from, to) in rx {
                 if ongoing.contains(&from.to_string()) {
@@ -239,7 +242,7 @@ impl BlockingRemoteZarrDirectory {
         Self {
             url: url.to_string(),
             local_cache_dir: local_cache_dir.to_string(),
-            downloading: Arc::new(Mutex::new(HashMap::new())),
+            downloading: Arc::new(Mutex::new(HashMap::default())),
             client,
         }
     }
@@ -461,7 +464,7 @@ struct ZarrContextCache<const N: usize> {
 impl<const N: usize> ZarrContextCache<N> {
     fn new(def: &ZarrArrayDef) -> Self {
         ZarrContextCache {
-            cache: HashMap::new(),
+            cache: HashMap::default(),
             access_counter: 0,
             non_empty_entries: 0,
             max_entries: 2000000000 / def.chunks.iter().product::<usize>(), // FIXME: make configurable
