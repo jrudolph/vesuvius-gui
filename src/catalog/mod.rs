@@ -120,7 +120,7 @@ impl Catalog {
 }
 
 pub fn load_segments() -> Vec<Segment> {
-    let zst_compressed = include_bytes!("../../vesuvius-segments-2025-02-13.json.zst");
+    let zst_compressed = include_bytes!("../../vesuvius-segments-2025-06-03.json.zst");
     let uncompressed = zstd_decompress(zst_compressed);
     let json = String::from_utf8(uncompressed).unwrap();
     serde_json::from_str(&json).unwrap()
