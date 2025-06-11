@@ -268,7 +268,7 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
                     .collect::<Vec<_>>()
                     .join(array_def.dimension_separator.as_deref().unwrap_or("."))
             );
-            println!("Downloading chunk from {}", target_url);
+            //println!("Downloading chunk from {}", target_url);
             let response = ehttp::fetch_blocking(&Request::get(&target_url)).unwrap();
             if response.status != 200 {
                 println!(
@@ -313,6 +313,9 @@ impl<const N: usize> ZarrArray<N, u8> {
             local_cache_dir: local_cache_dir.to_string(),
         }))
     }
+    pub fn from_url_to_default_cache_dir_blocking(url: &str) -> Self {
+        Self::from_url_blocking(url, Self::default_cache_dir(&url).as_str())
+    }
     pub fn from_url(url: &str, local_cache_dir: &str) -> Self {
         println!("Loading ZarrArray from url: {} to: {} ", url, local_cache_dir);
         Self::from_access(Arc::new(RemoteZarrDirectory {
@@ -322,10 +325,17 @@ impl<const N: usize> ZarrArray<N, u8> {
         }))
     }
     pub fn from_url_to_default_cache_dir(url: &str) -> Self {
+        Self::from_url(url, &Self::default_cache_dir(url))
+    }
+    fn default_cache_dir(url: &str) -> String {
         let canonical_url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
         let sha256 = format!("{:x}", Sha256::digest(canonical_url.as_bytes()));
-        let local_cache_dir = std::env::temp_dir().join("vesuvius-gui").join(sha256);
-        Self::from_url(url, local_cache_dir.to_str().unwrap())
+        std::env::temp_dir()
+            .join("vesuvius-gui")
+            .join(sha256)
+            .to_str()
+            .unwrap()
+            .to_string()
     }
     fn from_access(access: Arc<dyn ZarrFileAccess>) -> Self {
         let def = access.load_array_def();
