@@ -231,10 +231,48 @@ pub struct ObjFile {
 }
 impl ObjFile {
     pub fn new(mut object: Object) -> Self {
+        let affine = [
+            // in zyx
+            [
+                1.9456902236958669,
+                -0.0008420232712460689,
+                -0.0007076835158667412,
+                -825.2485325705372,
+            ],
+            [
+                0.001048892079971684,
+                1.944786034654561,
+                -0.0015225576143318245,
+                -56.30291292624925,
+            ],
+            [
+                0.00025149574047681833,
+                0.005012565883601536,
+                1.9465935022425906,
+                -86.32824402486736,
+            ],
+        ];
+
         object.vertices.iter_mut().for_each(|v| {
             v.x += 1500.0;
             v.y += 3500.0;
             v.z += 1900.0;
+
+            let x = affine[2][2] * v.x + affine[2][1] * v.y + affine[2][0] * v.z + affine[2][3];
+            let y = affine[1][2] * v.x + affine[1][1] * v.y + affine[1][0] * v.z + affine[1][3];
+            let z = affine[0][2] * v.x + affine[0][1] * v.y + affine[0][0] * v.z + affine[0][3];
+            v.x = x;
+            v.y = y;
+            v.z = z;
+        });
+        object.normals.iter_mut().for_each(|n| {
+            let nx = affine[2][2] * n.x + affine[2][1] * n.y + affine[2][0] * n.z;
+            let ny = affine[1][2] * n.x + affine[1][1] * n.y + affine[1][0] * n.z;
+            let nz = affine[0][2] * n.x + affine[0][1] * n.y + affine[0][0] * n.z;
+            let norm = sqrt(nx * nx + ny * ny + nz * nz);
+            n.x = nx / norm;
+            n.y = ny / norm;
+            n.z = nz / norm;
         });
 
         let has_inverted_uv_tris = Self::has_inverted_uv_tris(object.clone());
