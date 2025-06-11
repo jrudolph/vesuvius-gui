@@ -7,6 +7,7 @@ use crate::volume::{PaintVolume, VoxelVolume};
 use blosc::BloscChunk;
 use derive_more::Debug;
 use ehttp::Request;
+use libm::modf;
 pub use ome::OmeZarrContext;
 pub use ome::{ColorScheme, FourColors, GrayScale};
 use reqwest::blocking::Client;
@@ -549,6 +550,110 @@ impl ZarrContext<3> {
             self.get_from_cache(chunk_no, idx)
         }
     }
+    /// Get interpolated value at index
+    fn get_interpolated(&self, xyz: [f64; 3]) -> Option<u8> {
+        /* if xyz[0] > self.array.def.shape[0] as f64
+            || xyz[1] > self.array.def.shape[1] as f64
+            || xyz[2] > self.array.def.shape[2] as f64
+        {
+            return None; // FIXME: or just return 0?
+        } */
+
+        let (dx, x0) = modf(xyz[0]);
+        let x0 = x0 as usize;
+        let x1 = x0 + 1;
+        let (dy, y0) = modf(xyz[1]);
+        let y0 = y0 as usize;
+        let y1 = y0 + 1;
+        let (dz, z0) = modf(xyz[2]);
+        let z0 = z0 as usize;
+        let z1 = z0 + 1;
+
+        let cx = self.array.def.chunks[0];
+        let cy = self.array.def.chunks[1];
+        let cz = self.array.def.chunks[2];
+
+        // fast-path: if all coordinates are in the same chunk, i.e. they are not on the upper chunk boundary
+        let chunk_offset = [x0 % cx, y0 % cy, z0 % cz];
+
+        let fast_path = chunk_offset[0] != cx - 1 && chunk_offset[1] != cy - 1 && chunk_offset[2] != cz - 1;
+
+        let (p000, p100, p010, p110, p001, p101, p011, p111) = if fast_path {
+            let chunk_no = [x0 / cx, y0 / cy, z0 / cz];
+
+            let idx = ((chunk_offset[0] * cy) + chunk_offset[1]) * cz + chunk_offset[2];
+
+            let idx_dx = cy * cz;
+            let idx_dy = cz;
+            let idx_dz = 1;
+
+            // fast path
+            let last_chunk_no = self.state.borrow().last_chunk_no;
+            if chunk_no != last_chunk_no {
+                // slow path goes through mutex
+                self.get_from_cache(chunk_no, idx); // prime last cache
+            }
+            let mut state = self.state.borrow_mut();
+            match state.last_context {
+                Some(None) | None => return None,
+                _ => {}
+            }
+
+            let last = state.last_context.as_mut().unwrap().as_mut().unwrap();
+
+            if let ChunkContext::Raw(raw) = last {
+                let p000 = raw.get(idx);
+                let p100 = raw.get(idx + idx_dx);
+                let p010 = raw.get(idx + idx_dy);
+                let p110 = raw.get(idx + idx_dx + idx_dy);
+                let p001 = raw.get(idx + idx_dz);
+                let p101 = raw.get(idx + idx_dx + idx_dz);
+                let p011 = raw.get(idx + idx_dy + idx_dz);
+                let p111 = raw.get(idx + idx_dx + idx_dy + idx_dz);
+                (p000, p100, p010, p110, p001, p101, p011, p111)
+            } else {
+                let p000 = last.get(idx);
+                let p100 = last.get(idx + idx_dx);
+                let p010 = last.get(idx + idx_dy);
+                let p110 = last.get(idx + idx_dx + idx_dy);
+                let p001 = last.get(idx + idx_dz);
+                let p101 = last.get(idx + idx_dx + idx_dz);
+                let p011 = last.get(idx + idx_dy + idx_dz);
+                let p111 = last.get(idx + idx_dx + idx_dy + idx_dz);
+                (p000, p100, p010, p110, p001, p101, p011, p111)
+            }
+        } else {
+            let p000 = self.get([x0, y0, z0]);
+            let p100 = self.get([x1, y0, z0]);
+            let p010 = self.get([x0, y1, z0]);
+            let p110 = self.get([x1, y1, z0]);
+            let p001 = self.get([x0, y0, z1]);
+            let p101 = self.get([x1, y0, z1]);
+            let p011 = self.get([x0, y1, z1]);
+            let p111 = self.get([x1, y1, z1]);
+
+            if let (Some(p000), Some(p100), Some(p010), Some(p110), Some(p001), Some(p101), Some(p011), Some(p111)) =
+                (p000, p100, p010, p110, p001, p101, p011, p111)
+            {
+                (p000, p100, p010, p110, p001, p101, p011, p111)
+            } else {
+                return None;
+            }
+        };
+
+        let c00 = p000 as f64 * (1.0 - dx) + p100 as f64 * dx;
+        let c10 = p010 as f64 * (1.0 - dx) + p110 as f64 * dx;
+        let c01 = p001 as f64 * (1.0 - dx) + p101 as f64 * dx;
+        let c11 = p011 as f64 * (1.0 - dx) + p111 as f64 * dx;
+
+        let c0 = c00 * (1.0 - dy) + c10 * dy;
+        let c1 = c01 * (1.0 - dy) + c11 * dy;
+
+        let c = c0 * (1.0 - dz) + c1 * dz;
+
+        Some(c as u8)
+    }
+
     fn get_from_cache(&self, chunk_no: [usize; 3], idx: usize) -> Option<u8> {
         let mut access = self.cache.lock().unwrap();
         let state = &mut *self.state.borrow_mut();

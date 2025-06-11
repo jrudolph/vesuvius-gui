@@ -172,6 +172,21 @@ impl<C: ColorScheme> OmeZarrContext<C> {
         }
         0
     }
+    fn get_interpolated(&self, xyz: [f64; 3], scale: u8) -> u8 {
+        let max = self.zarr_contexts.len() as u8 - 1;
+        for s in scale.min(max)..=max {
+            let scaled_xyz = xyz.iter().map(|&x| x / (1 << s) as f64).collect::<Vec<f64>>();
+            //println!("xyz: {:?} scaled_xyz: {:?}", xyz, scaled_xyz);
+            let v = self.zarr_contexts[s as usize].get_interpolated(scaled_xyz.try_into().unwrap());
+            if let Some(v) = v {
+                //if (xyz[0] % 100 == 0) && (xyz[1] % 100 == 0) && (xyz[2] % 100 == 0) {
+                //println!("found value {} at scale {} when scale was {}", v, s, scale);
+                //}
+                return v;
+            }
+        }
+        0
+    }
 }
 
 impl<C: ColorScheme> PaintVolume for OmeZarrContext<C> {
@@ -231,6 +246,17 @@ impl<C: ColorScheme> VoxelVolume for OmeZarrContext<C> {
                 (xyz[2] * downsampling as f64) as usize,
                 (xyz[1] * downsampling as f64) as usize,
                 (xyz[0] * downsampling as f64) as usize,
+            ],
+            scale,
+        )
+    }
+    fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        let scale = downsampling.trailing_zeros() as u8;
+        self.get_interpolated(
+            [
+                (xyz[2] * downsampling as f64),
+                (xyz[1] * downsampling as f64),
+                (xyz[0] * downsampling as f64),
             ],
             scale,
         )
