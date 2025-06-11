@@ -5,6 +5,7 @@ use directories::BaseDirs;
 use futures::{stream, StreamExt};
 use image::Luma;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use reqwest::blocking::Client;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ops::RangeInclusive;
@@ -221,6 +222,7 @@ struct Rendering {
     params: RenderParams,
     obj: Arc<ObjFile>,
     download_state: Arc<Mutex<DownloadState>>,
+    client: Client,
     //downloader: Arc<AsyncDownloader>,
 }
 
@@ -234,6 +236,10 @@ impl Rendering {
             params,
             obj,
             download_state: Arc::new(Mutex::new(DownloadState::new())),
+            client: Client::builder()
+                .pool_max_idle_per_host(16 /* FIXME  */)
+                .build()
+                .unwrap(),
             /* downloader: Arc::new(AsyncDownloader {
                 semaphore: tokio::sync::Semaphore::new(download_settings.concurrent_downloads),
                 settings: download_settings,
@@ -492,7 +498,7 @@ impl Rendering {
         let dir = self.downloader.settings.cache_dir.clone();
         volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {})).into_volume() */
 
-        ZarrArray::from_url_to_default_cache_dir_blocking(&self.params.volume.clone().unwrap())
+        ZarrArray::from_url_to_default_cache_dir_blocking(&self.params.volume.clone().unwrap(), self.client.clone())
             .into_ctx()
             .into_ctx()
             .into_volume()

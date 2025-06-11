@@ -11,6 +11,7 @@ use blosc::{BloscChunk, BloscContext};
 use derive_more::Debug;
 use egui::Color32;
 use ehttp::Request;
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
@@ -232,6 +233,18 @@ impl ZarrFileAccess for RemoteZarrDirectory {
 struct BlockingRemoteZarrDirectory {
     url: String,
     local_cache_dir: String,
+    downloading: Arc<Mutex<HashMap<String, Arc<Mutex<Option<String>>>>>>,
+    client: Client,
+}
+impl BlockingRemoteZarrDirectory {
+    fn new(url: &str, local_cache_dir: &str, client: Client) -> Self {
+        Self {
+            url: url.to_string(),
+            local_cache_dir: local_cache_dir.to_string(),
+            downloading: Arc::new(Mutex::new(HashMap::new())),
+            client,
+        }
+    }
 }
 impl ZarrFileAccess for BlockingRemoteZarrDirectory {
     fn load_array_def(&self) -> ZarrArrayDef {
@@ -259,30 +272,54 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
         if std::path::Path::new(&target_file).exists() {
             Some(target_file)
         } else {
-            let target_url = format!(
-                "{}/{}",
-                self.url,
-                chunk_no
-                    .iter()
-                    .map(|i| i.to_string())
-                    .collect::<Vec<_>>()
-                    .join(array_def.dimension_separator.as_deref().unwrap_or("."))
-            );
+            let chunk_str = chunk_no
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(array_def.dimension_separator.as_deref().unwrap_or("."));
+
+            let entry = {
+                let mut downloading = self.downloading.lock().unwrap();
+                if downloading.contains_key(&chunk_str) {
+                    let entry = downloading.get(&chunk_str).unwrap().clone();
+                    return entry.lock().unwrap().clone();
+                } else {
+                    let entry = Arc::new(Mutex::new(None));
+                    downloading.insert(chunk_str.clone(), entry.clone());
+                    entry
+                }
+            };
+            let mut entry = entry.lock().unwrap();
+
+            let target_url = format!("{}/{}", self.url, chunk_str);
             //println!("Downloading chunk from {}", target_url);
-            let response = ehttp::fetch_blocking(&Request::get(&target_url)).unwrap();
-            if response.status != 200 {
+            // run request with reqwest blocking
+            let response = self.client.get(&target_url).send().unwrap();
+            if response.status() != 200 {
                 /* println!(
                     "Failed to download chunk from {}, status {}",
                     target_url, response.status
                 ); */
                 return None;
             }
-            let data = response.bytes.to_vec();
-            std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
-            let tmp = format!("{}.tmp", target_file);
+            let data = response.bytes().unwrap().to_vec();
+            let parent_dir = std::path::Path::new(&target_file).parent().unwrap();
+            std::fs::create_dir_all(parent_dir).unwrap();
+            use tempfile::Builder;
+
+            let tmp = Builder::new().tempfile_in(parent_dir).unwrap();
             std::fs::write(&tmp, &data).unwrap();
             std::fs::rename(&tmp, &target_file).unwrap();
-            Some(target_file)
+            let res = Some(target_file);
+
+            *entry = res.clone();
+            {
+                self.downloading.lock().unwrap().remove(&chunk_str);
+            }
+
+            res
+
+            // release lock
         }
     }
     fn cache_missing(&self) -> bool {
@@ -306,15 +343,12 @@ impl<const N: usize> ZarrArray<N, u8> {
         //println!("Loading ZarrArray from path: {}", path);
         Self::from_access(Arc::new(ZarrDirectory { path: path.to_string() }))
     }
-    pub fn from_url_blocking(url: &str, local_cache_dir: &str) -> Self {
+    pub fn from_url_blocking(url: &str, local_cache_dir: &str, client: Client) -> Self {
         //println!("Loading ZarrArray from url: {}", url);
-        Self::from_access(Arc::new(BlockingRemoteZarrDirectory {
-            url: url.to_string(),
-            local_cache_dir: local_cache_dir.to_string(),
-        }))
+        Self::from_access(Arc::new(BlockingRemoteZarrDirectory::new(url, local_cache_dir, client)))
     }
-    pub fn from_url_to_default_cache_dir_blocking(url: &str) -> Self {
-        Self::from_url_blocking(url, Self::default_cache_dir(&url).as_str())
+    pub fn from_url_to_default_cache_dir_blocking(url: &str, client: Client) -> Self {
+        Self::from_url_blocking(url, Self::default_cache_dir(&url).as_str(), client)
     }
     pub fn from_url(url: &str, local_cache_dir: &str) -> Self {
         //println!("Loading ZarrArray from url: {} to: {} ", url, local_cache_dir);
