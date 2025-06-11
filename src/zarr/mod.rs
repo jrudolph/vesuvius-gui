@@ -271,10 +271,10 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
             //println!("Downloading chunk from {}", target_url);
             let response = ehttp::fetch_blocking(&Request::get(&target_url)).unwrap();
             if response.status != 200 {
-                println!(
+                /* println!(
                     "Failed to download chunk from {}, status {}",
                     target_url, response.status
-                );
+                ); */
                 return None;
             }
             let data = response.bytes.to_vec();
@@ -303,11 +303,11 @@ impl<const N: usize> ZarrArray<N, u8> {
             })
     }
     pub fn from_path(path: &str) -> Self {
-        println!("Loading ZarrArray from path: {}", path);
+        //println!("Loading ZarrArray from path: {}", path);
         Self::from_access(Arc::new(ZarrDirectory { path: path.to_string() }))
     }
     pub fn from_url_blocking(url: &str, local_cache_dir: &str) -> Self {
-        println!("Loading ZarrArray from url: {}", url);
+        //println!("Loading ZarrArray from url: {}", url);
         Self::from_access(Arc::new(BlockingRemoteZarrDirectory {
             url: url.to_string(),
             local_cache_dir: local_cache_dir.to_string(),
@@ -317,7 +317,7 @@ impl<const N: usize> ZarrArray<N, u8> {
         Self::from_url_blocking(url, Self::default_cache_dir(&url).as_str())
     }
     pub fn from_url(url: &str, local_cache_dir: &str) -> Self {
-        println!("Loading ZarrArray from url: {} to: {} ", url, local_cache_dir);
+        //println!("Loading ZarrArray from url: {} to: {} ", url, local_cache_dir);
         Self::from_access(Arc::new(RemoteZarrDirectory {
             url: url.to_string(),
             local_cache_dir: local_cache_dir.to_string(),
@@ -459,10 +459,10 @@ impl<const N: usize> ZarrContextCache<N> {
                     self.non_empty_entries -= 1;
                 }
             }
-            println!(
+            /* println!(
                 "Purged {} entries {} from {} (sorted: {})",
                 n, self.non_empty_entries, before, sorted_entries_len
-            );
+            ); */
         }
     }
     fn purge_missing(&mut self) {
