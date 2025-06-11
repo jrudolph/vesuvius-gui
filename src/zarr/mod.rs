@@ -6,7 +6,7 @@ mod test;
 pub use ome::OmeZarrContext;
 pub use ome::{ColorScheme, FourColors, GrayScale};
 
-use crate::volume::PaintVolume;
+use crate::volume::{PaintVolume, VoxelVolume};
 use blosc::{BloscChunk, BloscContext};
 use derive_more::Debug;
 use egui::Color32;
@@ -597,15 +597,26 @@ impl PaintVolume for ZarrContext<3> {
                 let v = self.get([z as usize, y as usize, x as usize]).unwrap_or(0);
                 if v != 0 {
                     //println!("painting at {} {} {} {}", x, y, z, v);
-                    let color = match v {
+                    /* let color = match v {
                         1 => Color32::RED,
                         2 => Color32::GREEN,
                         3 => Color32::YELLOW,
                         _ => Color32::BLUE,
                     };
-                    buffer.set(im_u, im_v, color);
+                    buffer.set(im_u, im_v, color); */
+                    buffer.set_gray(im_u, im_v, v);
                 }
             }
         }
+    }
+}
+impl VoxelVolume for ZarrContext<3> {
+    fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        self.get([
+            (xyz[2] * downsampling as f64) as usize,
+            (xyz[1] * downsampling as f64) as usize,
+            (xyz[0] * downsampling as f64) as usize,
+        ])
+        .unwrap_or(0)
     }
 }
