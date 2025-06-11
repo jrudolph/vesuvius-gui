@@ -230,7 +230,13 @@ pub struct ObjFile {
     xyz_index: XYZIndex,
 }
 impl ObjFile {
-    pub fn new(object: Object) -> Self {
+    pub fn new(mut object: Object) -> Self {
+        object.vertices.iter_mut().for_each(|v| {
+            v.x += 1500.0;
+            v.y += 3500.0;
+            v.z += 1900.0;
+        });
+
         let has_inverted_uv_tris = Self::has_inverted_uv_tris(object.clone());
         let target_cell_num = 100.;
         let num_tris = object.geometry[0].shapes.len() as f64;
