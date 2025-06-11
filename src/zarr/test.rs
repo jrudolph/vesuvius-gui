@@ -575,22 +575,3 @@ b4 02 69 00 cbytes = 0x6902b4 = 6881972
 
 
 */
-
-#[test]
-fn test_scroll1_zarr() {
-    let file = "/tmp/25";
-    let mut chunk = BloscChunk::<u8>::load(file).into_ctx();
-    println!("Chunk: {:?}", chunk.chunk.header);
-    let v0 = chunk.get(1000);
-    println!("Value at 1000: {:?}", v0);
-
-    let mut buf = vec![0; 131072];
-    for i in 0..131072 {
-        buf[i] = chunk.get(i);
-    }
-    // write to file
-    let file = "/tmp/25-block0.raw";
-    let file = File::create(file).unwrap();
-    let mut writer = std::io::BufWriter::new(file);
-    writer.write(&buf).unwrap();
-}

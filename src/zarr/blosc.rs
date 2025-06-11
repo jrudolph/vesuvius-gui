@@ -1,7 +1,7 @@
 use crate::zstd_decompress;
 use derive_more::Debug;
 use memmap::MmapOptions;
-use std::{collections::HashMap, fs::File};
+use std::fs::File;
 
 #[derive(Debug, Clone)]
 pub enum BloscShuffle {
@@ -83,57 +83,6 @@ pub struct BloscChunk<T> {
     phantom_t: std::marker::PhantomData<T>,
 }
 
-#[allow(dead_code)]
-struct BloscBlock {
-    id: u16, // FIXME
-    data: Vec<u8>,
-}
-
-pub struct BloscContext {
-    pub(crate) chunk: BloscChunk<u8>,
-    cache: HashMap<usize, BloscBlock>,
-    last_block_idx: usize,
-    last_entry: Option<BloscBlock>,
-}
-impl BloscContext {
-    pub fn get(&mut self, index: usize) -> u8 {
-        let block_idx = index * self.chunk.header.typesize as usize / self.chunk.header.blocksize as usize;
-        let idx = (index * self.chunk.header.typesize as usize) % self.chunk.header.blocksize as usize;
-
-        /* println!(
-            "get {} from {}, block_idx: {}, idx: {}",
-            index, self.chunk.file_name, block_idx, idx
-        ); */
-
-        if block_idx == self.last_block_idx {
-            self.last_entry.as_ref().unwrap().data[idx]
-        } else if self.cache.contains_key(&block_idx) {
-            let block = self.cache.remove(&block_idx).unwrap();
-            if let Some(last_block) = self.last_entry.take() {
-                self.cache.insert(self.last_block_idx, last_block);
-            }
-            let res = block.data[idx];
-            self.last_block_idx = block_idx;
-            self.last_entry = Some(block);
-            res
-        } else {
-            if self.cache.len() > 1000 {
-                self.cache.clear();
-            }
-
-            let uncompressed = self.chunk.decompress(block_idx);
-            let res = uncompressed[idx];
-            let block = BloscBlock {
-                id: block_idx as u16,
-                data: uncompressed,
-            };
-            self.cache.insert(block_idx, block);
-
-            res
-        }
-    }
-}
-
 impl BloscChunk<u8> {
     pub fn load(filename: &str) -> Self {
         let file = File::open(filename).unwrap();
@@ -160,20 +109,19 @@ impl BloscChunk<u8> {
             phantom_t: std::marker::PhantomData,
         }
     }
-    pub fn into_ctx(self) -> BloscContext {
-        BloscContext {
-            chunk: self,
-            cache: HashMap::new(),
-            last_block_idx: usize::MAX,
-            last_entry: None,
-        }
-    }
-    #[allow(dead_code)]
-    pub fn get(&self, index: usize) -> u8 {
-        let block_idx = index * self.header.typesize as usize / self.header.blocksize as usize;
-        let idx = (index * self.header.typesize as usize) % self.header.blocksize as usize;
 
-        self.decompress(block_idx)[idx]
+    pub fn load_data(filename: &str) -> Vec<u8> {
+        let chunk = Self::load(filename);
+        let mut data = vec![];
+        for i in 0..chunk.header.num_blocks() {
+            let block = chunk.load_block(i);
+            data.extend(block);
+        }
+        data
+    }
+    fn load_block(&self, block_idx: usize) -> Vec<u8> {
+        self.decompress(block_idx)
+        // FIXME: add deshuffling
     }
     fn decompress(&self, block_idx: usize) -> Vec<u8> {
         /* if block_idx >= self.num_blocks {

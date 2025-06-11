@@ -3,14 +3,12 @@ mod ome;
 #[cfg(test)]
 mod test;
 
+use crate::volume::{PaintVolume, VoxelVolume};
+use blosc::BloscChunk;
+use derive_more::Debug;
+use ehttp::Request;
 pub use ome::OmeZarrContext;
 pub use ome::{ColorScheme, FourColors, GrayScale};
-
-use crate::volume::{PaintVolume, VoxelVolume};
-use blosc::{BloscChunk, BloscContext};
-use derive_more::Debug;
-use egui::Color32;
-use ehttp::Request;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -91,7 +89,6 @@ pub struct ZarrArray<const N: usize, T> {
 
 trait ZarrFileAccess: Send + Sync + Debug {
     fn load_array_def(&self) -> ZarrArrayDef;
-    //fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<BloscChunk<u8>>;
     fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String>;
     fn cache_missing(&self) -> bool;
 }
@@ -333,7 +330,7 @@ impl<const N: usize> ZarrArray<N, u8> {
             .chunk_file_for(&self.def, &chunk_no)
             .map(|chunk_file| match &self.def.compressor {
                 Some(compressor) => match compressor.id.as_str() {
-                    "blosc" => ChunkContext::Blosc(BloscChunk::load(&chunk_file).into_ctx()),
+                    "blosc" => ChunkContext::Heap(BloscChunk::load_data(&chunk_file)),
                     _ => panic!("Unsupported compressor: {}", compressor.id),
                 },
                 _ => ChunkContext::Raw(RawContext::load(&chunk_file)),
@@ -426,13 +423,13 @@ impl RawContext {
 }
 
 enum ChunkContext {
-    Blosc(BloscContext),
+    Heap(Vec<u8>),
     Raw(RawContext),
 }
 impl ChunkContext {
     fn get(&mut self, idx: usize) -> u8 {
         match self {
-            ChunkContext::Blosc(ctx) => ctx.get(idx),
+            ChunkContext::Heap(data) => data[idx],
             ChunkContext::Raw(raw) => raw.get(idx),
         }
     }
@@ -466,7 +463,7 @@ impl<const N: usize> ZarrContextCache<N> {
             cache: HashMap::new(),
             access_counter: 0,
             non_empty_entries: 0,
-            max_entries: 200000000 / def.chunks.iter().product::<usize>(), // FIXME: make configurable
+            max_entries: 2000000000 / def.chunks.iter().product::<usize>(), // FIXME: make configurable
         }
     }
     fn entry(&self, ctx: Option<ChunkContext>) -> Option<ZarrContextCacheEntry> {
@@ -494,8 +491,8 @@ impl<const N: usize> ZarrContextCache<N> {
                 }
             }
             /* println!(
-                "Purged {} entries {} from {} (sorted: {})",
-                n, self.non_empty_entries, before, sorted_entries_len
+                "Purged {} entries {}/{} from {} (sorted: {})",
+                n, self.non_empty_entries, self.max_entries, before, sorted_entries_len
             ); */
         }
     }
