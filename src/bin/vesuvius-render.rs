@@ -447,18 +447,9 @@ impl Rendering {
         let paint_width = self.params.tile_size;
         let paint_height = self.params.tile_size;
 
-        struct PanicDownloader {}
-        impl Downloader for PanicDownloader {
-            fn queue(&self, task: (Arc<Mutex<DS>>, usize, usize, usize, Quality)) {
-                panic!("All files should be downloaded already but got {:?}", task);
-            }
-        }
-        let dir = self.downloader.settings.cache_dir.clone();
-
-        let vol = volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {}));
         let world = ObjVolume::new(
             self.obj.clone(),
-            vol.into_volume(),
+            self.base_volume(),
             self.params.width,
             self.params.height,
         )
@@ -484,6 +475,17 @@ impl Rendering {
             &mut image,
         );
         Ok(image)
+    }
+
+    fn base_volume(&self) -> Volume {
+        struct PanicDownloader {}
+        impl Downloader for PanicDownloader {
+            fn queue(&self, task: (Arc<Mutex<DS>>, usize, usize, usize, Quality)) {
+                panic!("All files should be downloaded already but got {:?}", task);
+            }
+        }
+        let dir = self.downloader.settings.cache_dir.clone();
+        volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {})).into_volume()
     }
 }
 
