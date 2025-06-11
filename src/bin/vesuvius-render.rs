@@ -16,6 +16,7 @@ use vesuvius_gui::model::{FullVolumeReference, VolumeReference};
 use vesuvius_gui::volume::{
     self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, Volume, VoxelPaintVolume, VoxelVolume,
 };
+use vesuvius_gui::zarr::ZarrArray;
 
 #[derive(Clone, Debug)]
 pub struct Crop {
@@ -154,6 +155,7 @@ async fn main_run(args: Args) -> Result<()> {
 #[derive(Clone)]
 struct RenderParams {
     obj_file: String,
+    volume: Option<String>,
     width: usize,
     height: usize,
     tile_size: usize,
@@ -182,6 +184,7 @@ impl From<&Args> for RenderParams {
     fn from(args: &Args) -> Self {
         Self {
             obj_file: args.obj.clone(),
+            volume: args.volume.clone(),
             width: args.width as usize,
             height: args.height as usize,
             tile_size: args.tile_size.unwrap_or(1024) as usize,
@@ -218,7 +221,7 @@ struct Rendering {
     params: RenderParams,
     obj: Arc<ObjFile>,
     download_state: Arc<Mutex<DownloadState>>,
-    downloader: Arc<AsyncDownloader>,
+    //downloader: Arc<AsyncDownloader>,
 }
 
 const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
@@ -231,10 +234,10 @@ impl Rendering {
             params,
             obj,
             download_state: Arc::new(Mutex::new(DownloadState::new())),
-            downloader: Arc::new(AsyncDownloader {
+            /* downloader: Arc::new(AsyncDownloader {
                 semaphore: tokio::sync::Semaphore::new(download_settings.concurrent_downloads),
                 settings: download_settings,
-            }),
+            }), */
         }
     }
     async fn run(&self, multi: &MultiProgress) -> Result<()> {
@@ -349,7 +352,7 @@ impl Rendering {
         res
     }
     fn chunks_for(&self, UVTile { u, v, w }: &UVTile) -> BTreeSet<VolumeChunk> {
-        let dummy = Rc::new(TileCollectingVolume::new());
+        /* let dummy = Rc::new(TileCollectingVolume::new());
         let width = self.params.width;
         let height = self.params.height;
         let tile_width = self.params.tile_size;
@@ -367,10 +370,12 @@ impl Rendering {
         world.paint(xyz, 0, 1, 2, tile_width, tile_height, 1, 1, &config, &mut image);
         let res = dummy.state.replace(Default::default()).requested_tiles;
         //println!("Tile: {},{} [{:?}]-> {:?}", u, v, xyz, res.len());
-        res.into_iter().map(Into::into).collect()
+        res.into_iter().map(Into::into).collect() */
+
+        BTreeSet::new()
     }
     async fn download_all_chunks(&self, mut chunks: BTreeSet<VolumeChunk>, bar: ProgressBar) -> Result<()> {
-        let dir = self.downloader.settings.cache_dir.clone();
+        /* let dir = self.downloader.settings.cache_dir.clone();
         // FIXME: proper base path missing
 
         let filtered = {
@@ -403,7 +408,7 @@ impl Rendering {
             })
             .buffered(32)
             .collect::<Vec<_>>()
-            .await;
+            .await; */
 
         Ok(())
     }
@@ -478,14 +483,19 @@ impl Rendering {
     }
 
     fn base_volume(&self) -> Volume {
-        struct PanicDownloader {}
+        /* struct PanicDownloader {}
         impl Downloader for PanicDownloader {
             fn queue(&self, task: (Arc<Mutex<DS>>, usize, usize, usize, Quality)) {
                 panic!("All files should be downloaded already but got {:?}", task);
             }
         }
         let dir = self.downloader.settings.cache_dir.clone();
-        volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {})).into_volume()
+        volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {})).into_volume() */
+
+        ZarrArray::from_url_to_default_cache_dir_blocking(&self.params.volume.clone().unwrap())
+            .into_ctx()
+            .into_ctx()
+            .into_volume()
     }
 }
 
@@ -598,14 +608,14 @@ impl DownloadState {
 struct DownloadSettings {
     tile_server_base: String,
     volume_base_path: String,
-    cache_dir: String,
+    //cache_dir: String,
     retries: u8,
     concurrent_downloads: usize,
 }
 impl TryFrom<&Args> for DownloadSettings {
     type Error = anyhow::Error;
     fn try_from(args: &Args) -> std::result::Result<Self, Self::Error> {
-        let vol: &'static dyn VolumeReference = if let Some(vol_id) = args.volume.clone() {
+        /* let vol: &'static dyn VolumeReference = if let Some(vol_id) = args.volume.clone() {
             vol_id.try_into().map_err(|e| anyhow!("Cannot find volume: {}", e))?
         } else {
             &FullVolumeReference::SCROLL1
@@ -622,19 +632,19 @@ impl TryFrom<&Args> for DownloadSettings {
                 .unwrap()
                 .to_string()
         };
-        let download_dir = vol.sub_dir(&cache_dir);
+        let download_dir = vol.sub_dir(&cache_dir); */
 
         Ok(Self {
             tile_server_base: TILE_SERVER.to_string(),
-            volume_base_path: vol.url_path_base(),
-            cache_dir: download_dir,
+            volume_base_path: args.volume.clone().unwrap(),
+            //cache_dir: "/tmp/gwoieghewogi".to_string(), //download_dir,
             retries: args.retries.unwrap_or(20),
             concurrent_downloads: args.concurrent_downloads.unwrap_or(32) as usize,
         })
     }
 }
 
-struct AsyncDownloader {
+/* struct AsyncDownloader {
     semaphore: tokio::sync::Semaphore,
     settings: DownloadSettings,
 }
@@ -691,3 +701,4 @@ impl AsyncDownloader {
         )
     }
 }
+ */
