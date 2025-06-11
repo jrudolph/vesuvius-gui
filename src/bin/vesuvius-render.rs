@@ -5,6 +5,7 @@ use directories::BaseDirs;
 use futures::{stream, StreamExt};
 use image::Luma;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use reqwest::blocking::Client;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ops::RangeInclusive;

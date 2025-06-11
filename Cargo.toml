@@ -32,10 +32,12 @@ lz4-compression = { version = "0.7" }
 num_cpus        = { version = "1" }
 rayon           = { version = "1" }
 regex           = { version = "1", default-features=false, features = ["unicode-perl"] }
+reqwest         = { version = "0.12", features = ["blocking"] }
 ruzstd          = { version = "0.8" }
 serde           = { version = "1", features = ["derive"] }
 serde_json      = { version = "1" }
 sha2            = { version = "0.10" }
+tempfile        = { version = "3" }
 tiff            = { version = "0.9" }
 tokio           = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync" ]}
 wavefront_obj   = { version = "11.0" }
