@@ -1,8 +1,8 @@
 use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
+use crate::gui::{VolumePane, PaneType};
 use crate::model::*;
-use crate::volume;
 use crate::volume::*;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
@@ -13,7 +13,7 @@ use egui::SliderClamping;
 use egui::Stroke;
 use egui::Vec2;
 use egui::WidgetText;
-use egui::{ColorImage, Image, PointerButton, Response, Ui, Widget};
+use egui::{Response, Ui, Widget};
 use egui_extras::Column;
 use egui_extras::TableBuilder;
 use std::ops::RangeInclusive;
@@ -40,7 +40,7 @@ pub struct SegmentMode {
     #[serde(skip)]
     surface_volume: Rc<dyn SurfaceVolume>,
     #[serde(skip)]
-    texture_uv: Option<egui::TextureHandle>,
+    uv_pane: VolumePane,
     #[serde(skip)]
     convert_to_world_coords: Box<dyn Fn([i32; 3]) -> [i32; 3]>,
 }
@@ -56,7 +56,7 @@ impl Default for SegmentMode {
             ranges: [0..=1000, 0..=1000, -40..=40],
             world: EmptyVolume {}.into_volume(),
             surface_volume: Rc::new(EmptyVolume {}),
-            texture_uv: None,
+            uv_pane: VolumePane::new(PaneType::UV, true),
             convert_to_world_coords: Box::new(|x| x),
         }
     }
@@ -91,11 +91,11 @@ pub struct TemplateApp {
     frame_height: usize,
     data_dir: String,
     #[serde(skip)]
-    texture_xy: Option<egui::TextureHandle>,
+    xy_pane: VolumePane,
     #[serde(skip)]
-    texture_xz: Option<egui::TextureHandle>,
+    xz_pane: VolumePane,
     #[serde(skip)]
-    texture_yz: Option<egui::TextureHandle>,
+    yz_pane: VolumePane,
     #[serde(skip)]
     world: Volume,
     #[serde(skip)]
@@ -147,9 +147,9 @@ impl Default for TemplateApp {
             frame_width: 1000,
             frame_height: 1000,
             data_dir: ".".to_string(),
-            texture_xy: None,
-            texture_xz: None,
-            texture_yz: None,
+            xy_pane: VolumePane::new(PaneType::XY, false),
+            xz_pane: VolumePane::new(PaneType::XZ, false),
+            yz_pane: VolumePane::new(PaneType::YZ, false),
             world: EmptyVolume {}.into_volume(),
             last_size: Vec2::ZERO,
             download_notifier: None,
@@ -319,197 +319,16 @@ impl TemplateApp {
     }
 
     pub fn clear_textures(&mut self) {
-        self.texture_xy = None;
-        self.texture_xz = None;
-        self.texture_yz = None;
+        self.xy_pane.clear_texture();
+        self.xz_pane.clear_texture();
+        self.yz_pane.clear_texture();
 
         if let Some(segment_mode) = self.segment_mode.as_mut() {
-            segment_mode.texture_uv = None;
+            segment_mode.uv_pane.clear_texture();
             self.sync_coords();
         }
     }
 
-    fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, coord: usize, segment_pane: bool) {
-        let (coords, ranges) = if segment_pane {
-            let ranges = self.segment_mode.as_ref().unwrap().ranges.clone();
-
-            (&mut self.segment_mode.as_mut().unwrap().coord, ranges)
-        } else {
-            (&mut self.coord, self.ranges.clone())
-        };
-
-        if image.hovered() {
-            let delta = ui.input(|i| i.smooth_scroll_delta);
-            let zoom_delta = ui.input(|i| i.zoom_delta());
-
-            if zoom_delta != 1.0 {
-                self.zoom = (self.zoom * zoom_delta).max(0.1).min(6.0);
-                self.clear_textures();
-            } else if delta.y != 0.0 {
-                let min_level = 1 << ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
-                let delta = delta.y.signum() * min_level as f32;
-                let m = &mut coords[coord];
-                *m = ((*m + delta as i32) / min_level as i32 * min_level as i32)
-                    .clamp(*ranges[coord].start(), *ranges[coord].end());
-                self.clear_textures();
-            }
-        }
-    }
-    fn add_drag_handler(&mut self, image: &Response, ucoord: usize, vcoord: usize, segment_pane: bool) {
-        if !segment_pane && self.should_sync_coords() {
-            return;
-        }
-
-        let (coords, ranges) = if segment_pane {
-            let smode = self.segment_mode.as_mut().unwrap();
-            (&mut smode.coord, &smode.ranges)
-        } else {
-            (&mut self.coord, &self.ranges)
-        };
-
-        if image.dragged_by(PointerButton::Primary) {
-            //let im2 = image.on_hover_cursor(CursorIcon::Grabbing);
-            let delta = -image.drag_delta() / self.zoom;
-
-            coords[ucoord] = (coords[ucoord] + delta.x as i32).clamp(*ranges[ucoord].start(), *ranges[ucoord].end());
-            coords[vcoord] = (coords[vcoord] + delta.y as i32).clamp(*ranges[vcoord].start(), *ranges[vcoord].end());
-            self.clear_textures();
-        }
-    }
-    fn get_or_create_texture(
-        &mut self,
-        ui: &Ui,
-        u_coord: usize,
-        v_coord: usize,
-        d_coord: usize,
-        segment_pane: bool,
-        t: fn(&mut Self) -> &mut Option<egui::TextureHandle>,
-    ) -> egui::TextureHandle {
-        if let Some(texture) = t(self) {
-            texture.clone()
-        } else {
-            let res = self.create_texture(ui, u_coord, v_coord, d_coord, segment_pane);
-            *t(self) = Some(res.clone());
-            res
-        }
-    }
-    fn create_texture(
-        &mut self,
-        ui: &Ui,
-        u_coord: usize,
-        v_coord: usize,
-        d_coord: usize,
-        segment_pane: bool,
-    ) -> egui::TextureHandle {
-        use std::time::Instant;
-        let _start = Instant::now();
-
-        let (scaling, paint_zoom) = if self.zoom >= 1.0 {
-            (self.zoom, 1 as u8)
-        } else {
-            let next_smaller_pow_of_2 = 2.0f32.powf((self.zoom as f32).log2().floor());
-            (
-                self.zoom / next_smaller_pow_of_2,
-                (1.0 / next_smaller_pow_of_2).round() as u8,
-            )
-        };
-        //println!("scaling: {}, paint_zoom: {}", scaling, paint_zoom);
-
-        let width = (self.frame_width as f32 / scaling) as usize;
-        let height = (self.frame_height as f32 / scaling) as usize;
-        let mut image = volume::Image::new(width, height);
-
-        //let q = 1;
-        //let mut printed = false;
-
-        let (coords, world) = if !segment_pane {
-            (self.coord, self.world.clone())
-        } else {
-            (
-                self.segment_mode.as_ref().unwrap().coord,
-                self.segment_mode.as_ref().unwrap().world.clone(),
-            )
-        };
-
-        let mut xyz: [i32; 3] = [0, 0, 0];
-        xyz[d_coord] = coords[d_coord];
-
-        let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
-            .min(4)
-            .max(0);
-        let max_level: u32 = (min_level + self.extra_resolutions).min(4);
-        /* let min_level = 0;
-        let max_level = 0; */
-        for level in (min_level..=max_level).rev() {
-            let sfactor = 1 << level as u8;
-            //println!("level: {} factor: {}", level, sfactor);
-            world.paint(
-                coords,
-                u_coord,
-                v_coord,
-                d_coord,
-                width,
-                height,
-                sfactor,
-                paint_zoom,
-                &self.drawing_config,
-                &mut image,
-            );
-        }
-
-        if !segment_pane && self.show_overlay {
-            if let Some(zarr) = self.overlay.as_mut() {
-                zarr.paint(
-                    coords,
-                    u_coord,
-                    v_coord,
-                    d_coord,
-                    width,
-                    height,
-                    1 << min_level as u8,
-                    paint_zoom,
-                    &self.drawing_config,
-                    &mut image,
-                );
-            }
-        }
-
-        if self.is_segment_mode() && !segment_pane && self.drawing_config.show_segment_outlines {
-            let coords = self.segment_mode.as_ref().unwrap().coord;
-
-            self.segment_mode
-                .as_ref()
-                .unwrap()
-                .surface_volume
-                .paint_plane_intersection(
-                    self.coord,
-                    u_coord,
-                    v_coord,
-                    d_coord,
-                    width,
-                    height,
-                    1,
-                    paint_zoom,
-                    Some(coords),
-                    &self.drawing_config,
-                    &mut image,
-                );
-        }
-
-        let image: ColorImage = image.into();
-        //println!("Time elapsed before loading in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _start.elapsed());
-        // Load the texture only once.
-        let texture_id = ui
-            .ctx()
-            .load_texture(format!("{}{}{}", u_coord, v_coord, d_coord), image, Default::default());
-
-        let _duration = _start.elapsed();
-        /* println!(
-            "Time elapsed in segment: {segment_pane} ({}, {}, {}) is: {:?}",
-            u_coord, v_coord, d_coord, _duration
-        ); */
-        texture_id
-    }
 
     fn sync_coords(&mut self) {
         if let Some(segment_mode) = self.segment_mode.as_ref() {
@@ -670,7 +489,7 @@ impl TemplateApp {
                     has_changed = has_changed || cb(ui, "Sync coordinates ('S')", &mut self.sync_coordinates).changed();
 
                     if cb(ui, "XYZ outline ('X')", &mut self.drawing_config.draw_xyz_outlines).changed() {
-                        segment_mode.texture_uv = None;
+                        segment_mode.uv_pane.clear_texture();
                     }
                 }
 
@@ -827,69 +646,152 @@ impl TemplateApp {
                 self.clear_textures();
             }
 
-            let pane_scaling = if self.zoom >= 1.0 {
-                self.zoom
-            } else {
-                let next_smaller_pow_of_2 = 2.0f32.powf((self.zoom as f32).log2().floor());
-                self.zoom / next_smaller_pow_of_2
-            };
-
             // use remaining space for image
             let size = ui.available_size();
-            {
-                let new_width = size.x as usize / 2 - 10;
-                let new_height = size.y as usize / 2 - 10;
+            let new_width = size.x as usize / 2 - 10;
+            let new_height = size.y as usize / 2 - 10;
 
-                self.frame_width = new_width;
-                self.frame_height = new_height;
+            self.frame_width = new_width;
+            self.frame_height = new_height;
 
-                let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, false, |s| &mut s.texture_xy);
-                let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, false, |s| &mut s.texture_xz);
-                let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, false, |s| &mut s.texture_yz);
+            // Split the rendering logic to avoid borrowing conflicts
+            let mut clear_textures = false;
+            let mut xy_response = None;
+            let mut xz_response = None;
+            let mut yz_response = None;
+            let mut uv_response = None;
 
-                let image = Image::new(texture_xy)
-                    .max_height(self.frame_height as f32)
-                    .max_width(self.frame_width as f32)
-                    .fit_to_original_size(pane_scaling);
+            // First render all panes
+            ui.horizontal(|ui| {
+                // Prepare parameters for volume panes
+                let surface_volume = if self.is_segment_mode() {
+                    Some(&self.segment_mode.as_ref().unwrap().surface_volume)
+                } else {
+                    None
+                };
 
-                let image_xz = Image::new(texture_xz)
-                    .max_height(self.frame_height as f32)
-                    .max_width(self.frame_width as f32)
-                    .fit_to_original_size(pane_scaling);
+                let segment_outlines_coord = if self.is_segment_mode() {
+                    Some(self.segment_mode.as_ref().unwrap().coord)
+                } else {
+                    None
+                };
 
-                let image_yz = Image::new(texture_yz)
-                    .max_height(self.frame_height as f32)
-                    .max_width(self.frame_width as f32)
-                    .fit_to_original_size(pane_scaling);
+                // XY Pane
+                xy_response = Some(self.xy_pane.render(
+                    ui,
+                    self.coord,
+                    &self.world,
+                    surface_volume,
+                    self.zoom,
+                    self.frame_width,
+                    self.frame_height,
+                    &self.drawing_config,
+                    self.extra_resolutions,
+                    segment_outlines_coord,
+                ));
 
-                ui.horizontal(|ui| {
-                    let im_xy = ui.add(image).interact(egui::Sense::drag());
-                    self.add_scroll_handler(&im_xy, ui, 2, false);
-                    self.add_drag_handler(&im_xy, 0, 1, false);
+                // XZ Pane
+                xz_response = Some(self.xz_pane.render(
+                    ui,
+                    self.coord,
+                    &self.world,
+                    surface_volume,
+                    self.zoom,
+                    self.frame_width,
+                    self.frame_height,
+                    &self.drawing_config,
+                    self.extra_resolutions,
+                    segment_outlines_coord,
+                ));
+            });
 
-                    let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
-                    self.add_scroll_handler(&im_xz, ui, 1, false);
-                    self.add_drag_handler(&im_xz, 0, 2, false);
-                });
-                ui.horizontal(|ui| {
-                    let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
-                    self.add_scroll_handler(&im_yz, ui, 0, false);
-                    self.add_drag_handler(&im_yz, 2, 1, false);
+            ui.horizontal(|ui| {
+                // Prepare parameters for volume panes
+                let surface_volume = if self.is_segment_mode() {
+                    Some(&self.segment_mode.as_ref().unwrap().surface_volume)
+                } else {
+                    None
+                };
 
-                    if self.is_segment_mode() {
-                        let texture_uv = &self.get_or_create_texture(ui, 0, 1, 2, true, |s| {
-                            &mut s.segment_mode.as_mut().unwrap().texture_uv
-                        });
-                        let image_uv = Image::new(texture_uv)
-                            .max_height(self.frame_height as f32)
-                            .max_width(self.frame_width as f32)
-                            .fit_to_original_size(pane_scaling);
-                        let im_uv = ui.add(image_uv).interact(egui::Sense::drag());
-                        self.add_scroll_handler(&im_uv, ui, 2, true);
-                        self.add_drag_handler(&im_uv, 0, 1, true);
+                let segment_outlines_coord = if self.is_segment_mode() {
+                    Some(self.segment_mode.as_ref().unwrap().coord)
+                } else {
+                    None
+                };
+
+                // YZ Pane
+                yz_response = Some(self.yz_pane.render(
+                    ui,
+                    self.coord,
+                    &self.world,
+                    surface_volume,
+                    self.zoom,
+                    self.frame_width,
+                    self.frame_height,
+                    &self.drawing_config,
+                    self.extra_resolutions,
+                    segment_outlines_coord,
+                ));
+
+                // UV Pane (segment mode only)
+                if let Some(segment_mode) = self.segment_mode.as_mut() {
+                    uv_response = Some(segment_mode.uv_pane.render(
+                        ui,
+                        segment_mode.coord,
+                        &segment_mode.world,
+                        Some(&segment_mode.surface_volume),
+                        self.zoom,
+                        self.frame_width,
+                        self.frame_height,
+                        &self.drawing_config,
+                        self.extra_resolutions,
+                        None,
+                    ));
+                }
+            });
+
+            // Now handle all interactions
+            if let Some(im_xy) = xy_response {
+                if self.xy_pane.handle_scroll(&im_xy, ui, &mut self.coord, &self.ranges, &mut self.zoom) {
+                    clear_textures = true;
+                }
+                if !self.should_sync_coords() && self.xy_pane.handle_drag(&im_xy, &mut self.coord, &self.ranges, self.zoom) {
+                    clear_textures = true;
+                }
+            }
+
+            if let Some(im_xz) = xz_response {
+                if self.xz_pane.handle_scroll(&im_xz, ui, &mut self.coord, &self.ranges, &mut self.zoom) {
+                    clear_textures = true;
+                }
+                if !self.should_sync_coords() && self.xz_pane.handle_drag(&im_xz, &mut self.coord, &self.ranges, self.zoom) {
+                    clear_textures = true;
+                }
+            }
+
+            if let Some(im_yz) = yz_response {
+                if self.yz_pane.handle_scroll(&im_yz, ui, &mut self.coord, &self.ranges, &mut self.zoom) {
+                    clear_textures = true;
+                }
+                if !self.should_sync_coords() && self.yz_pane.handle_drag(&im_yz, &mut self.coord, &self.ranges, self.zoom) {
+                    clear_textures = true;
+                }
+            }
+
+            if let Some(im_uv) = uv_response {
+                if let Some(segment_mode) = self.segment_mode.as_mut() {
+                    if segment_mode.uv_pane.handle_scroll(&im_uv, ui, &mut segment_mode.coord, &segment_mode.ranges, &mut self.zoom) {
+                        clear_textures = true;
                     }
-                });
-            };
+                    if segment_mode.uv_pane.handle_drag(&im_uv, &mut segment_mode.coord, &segment_mode.ranges, self.zoom) {
+                        clear_textures = true;
+                    }
+                }
+            }
+
+            if clear_textures {
+                self.clear_textures();
+            }
         });
     }
 
