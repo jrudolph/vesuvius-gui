@@ -648,25 +648,18 @@ impl TemplateApp {
             let cell_height = (available_size.y - 2.0) / 2.0; // Account for spacing
             let cell_size = Vec2::new(cell_width, cell_height);
 
+            let segment_outlines_coord = if self.is_segment_mode() {
+                Some(self.segment_mode.as_ref().unwrap().coord)
+            } else {
+                None
+            };
+
+            let should_sync_coords = self.should_sync_coords();
+
             // Use a proper 2x2 grid layout with explicit sizing
             ui.vertical(|ui| {
                 // Top row
                 ui.horizontal(|ui| {
-                    // Prepare parameters for volume panes
-                    let surface_volume = if self.is_segment_mode() {
-                        Some(&self.segment_mode.as_ref().unwrap().surface_volume)
-                    } else {
-                        None
-                    };
-
-                    let segment_outlines_coord = if self.is_segment_mode() {
-                        Some(self.segment_mode.as_ref().unwrap().coord)
-                    } else {
-                        None
-                    };
-
-                    let should_sync_coords = self.should_sync_coords();
-
                     // XY Pane
                     let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
                     let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
@@ -674,7 +667,7 @@ impl TemplateApp {
                         &mut child_ui,
                         &mut self.coord,
                         &self.world,
-                        surface_volume,
+                        self.segment_mode.as_ref().map(|s| &s.surface_volume),
                         &mut self.zoom,
                         &self.drawing_config,
                         self.extra_resolutions,
@@ -694,7 +687,7 @@ impl TemplateApp {
                         &mut child_ui,
                         &mut self.coord,
                         &self.world,
-                        surface_volume,
+                        self.segment_mode.as_ref().map(|s| &s.surface_volume),
                         &mut self.zoom,
                         &self.drawing_config,
                         self.extra_resolutions,
@@ -710,21 +703,6 @@ impl TemplateApp {
 
                 // Bottom row
                 ui.horizontal(|ui| {
-                    // Prepare parameters for volume panes
-                    let surface_volume = if self.is_segment_mode() {
-                        Some(&self.segment_mode.as_ref().unwrap().surface_volume)
-                    } else {
-                        None
-                    };
-
-                    let segment_outlines_coord = if self.is_segment_mode() {
-                        Some(self.segment_mode.as_ref().unwrap().coord)
-                    } else {
-                        None
-                    };
-
-                    let should_sync_coords = self.should_sync_coords();
-
                     // YZ Pane
                     let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
                     let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
@@ -732,7 +710,7 @@ impl TemplateApp {
                         &mut child_ui,
                         &mut self.coord,
                         &self.world,
-                        surface_volume,
+                        self.segment_mode.as_ref().map(|s| &s.surface_volume),
                         &mut self.zoom,
                         &self.drawing_config,
                         self.extra_resolutions,
