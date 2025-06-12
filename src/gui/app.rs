@@ -348,7 +348,7 @@ impl TemplateApp {
             let downloader = Box::new(SimpleDownloader::new(
                 &volume_dir,
                 Self::TILE_SERVER,
-                volume,
+                &volume.url_path_base(),
                 None,
                 sender,
                 false,

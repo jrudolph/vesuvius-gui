@@ -55,7 +55,7 @@ impl SimpleDownloader {
     pub fn new(
         dir: &str,
         tile_server_base: &'static str,
-        volume: &dyn VolumeReference,
+        volume_url_path_base: &str,
         authorization: Option<String>,
         download_notifier: Sender<(usize, usize, usize, Quality)>,
         log_downloads: bool,
@@ -63,7 +63,7 @@ impl SimpleDownloader {
         let (sender, receiver) = std::sync::mpsc::channel::<DownloadMessage>();
 
         let count = Arc::new(AtomicUsize::new(0));
-        let volume_base_path = volume.url_path_base().clone();
+        let volume_base_path = volume_url_path_base.to_string();
 
         std::fs::create_dir_all(dir.to_string()).unwrap();
         let dir = dir.to_string();
