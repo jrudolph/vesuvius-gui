@@ -88,7 +88,7 @@ pub struct VolumePane {
 }
 
 impl VolumePane {
-    pub fn new(pane_type: PaneType, is_segment_pane: bool) -> Self {
+    pub const fn new(pane_type: PaneType, is_segment_pane: bool) -> Self {
         Self {
             pane_type,
             is_segment_pane,
@@ -96,7 +96,7 @@ impl VolumePane {
     }
 
     pub fn render(
-        &mut self,
+        &self,
         ui: &mut Ui,
         coord: &mut [i32; 3],
         world: &Volume,
@@ -160,7 +160,7 @@ impl VolumePane {
     }
 
     pub fn handle_scroll(
-        &mut self,
+        &self,
         response: &Response,
         ui: &Ui,
         coord: &mut [i32; 3],
@@ -191,7 +191,7 @@ impl VolumePane {
     }
 
     pub fn handle_drag(
-        &mut self,
+        &self,
         response: &Response,
         coord: &mut [i32; 3],
         ranges: &[RangeInclusive<i32>; 3],

@@ -87,15 +87,7 @@ pub struct TemplateApp {
     zoom: f32,
     data_dir: String,
     #[serde(skip)]
-    xy_pane: VolumePane,
-    #[serde(skip)]
-    xz_pane: VolumePane,
-    #[serde(skip)]
-    yz_pane: VolumePane,
-    #[serde(skip)]
     world: Volume,
-    #[serde(skip)]
-    last_size: Vec2,
     #[serde(skip)]
     download_notifier: Option<Receiver<(usize, usize, usize, Quality)>>,
     drawing_config: DrawingConfig,
@@ -103,12 +95,6 @@ pub struct TemplateApp {
     show_overlay: bool,
     #[serde(skip)]
     ranges: [RangeInclusive<i32>; 3],
-    /* #[serde(skip)]
-    ppm_file: Option<String>,
-    #[serde(skip)]
-    obj_file: Option<String>, */
-    //#[serde(skip)]
-    //mode: Mode,
     #[serde(skip)]
     extra_resolutions: u32,
     #[serde(skip)]
@@ -141,18 +127,12 @@ impl Default for TemplateApp {
             coord: [2800, 2500, 10852],
             zoom: 1f32,
             data_dir: ".".to_string(),
-            xy_pane: VolumePane::new(PaneType::XY, false),
-            xz_pane: VolumePane::new(PaneType::XZ, false),
-            yz_pane: VolumePane::new(PaneType::YZ, false),
             world: EmptyVolume {}.into_volume(),
-            last_size: Vec2::ZERO,
             download_notifier: None,
             drawing_config: Default::default(),
             sync_coordinates: true,
             show_overlay: true,
-            ranges: [0..=10000, 0..=10000, 0..=21000],
-            //ppm_file: None,
-            //obj_file: None,
+            ranges: [0..=20000, 0..=20000, 0..=30000],
             extra_resolutions: 1,
             segment_mode: None,
             catalog,
@@ -601,105 +581,76 @@ impl TemplateApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let new_size = ui.available_size();
-            if new_size != self.last_size {
-                self.last_size = new_size;
-            }
-
-            // Track if any pane interaction requires coord sync
-            let mut needs_sync = false;
-
-            // Calculate grid dimensions
             let available_size = ui.available_size();
             let cell_width = (available_size.x - 2.0) / 2.0; // Account for spacing
             let cell_height = (available_size.y - 2.0) / 2.0; // Account for spacing
             let cell_size = Vec2::new(cell_width, cell_height);
 
-            let segment_outlines_coord = if self.is_segment_mode() {
-                Some(self.segment_mode.as_ref().unwrap().coord)
-            } else {
-                None
-            };
-
-            // Use a proper 2x2 grid layout with explicit sizing
             ui.vertical(|ui| {
-                // Top row
                 ui.horizontal(|ui| {
-                    // XY Pane
-                    self.xy_pane.render(
-                        ui,
-                        &mut self.coord,
-                        &self.world,
-                        self.segment_mode.as_ref().map(|s| &s.surface_volume),
-                        &mut self.zoom,
-                        &self.drawing_config,
-                        self.extra_resolutions,
-                        segment_outlines_coord,
-                        &self.ranges,
-                        cell_size,
-                    );
+                    self.render_pane(ui, cell_size, Self::XY_PANE);
 
-                    ui.add_space(2.0); // Spacing
+                    ui.add_space(2.0);
 
-                    // XZ Pane
-                    self.xz_pane.render(
-                        ui,
-                        &mut self.coord,
-                        &self.world,
-                        self.segment_mode.as_ref().map(|s| &s.surface_volume),
-                        &mut self.zoom,
-                        &self.drawing_config,
-                        self.extra_resolutions,
-                        segment_outlines_coord,
-                        &self.ranges,
-                        cell_size,
-                    );
+                    self.render_pane(ui, cell_size, Self::XZ_PANE);
                 });
 
-                ui.add_space(2.0); // Spacing
+                ui.add_space(2.0);
 
-                // Bottom row
                 ui.horizontal(|ui| {
-                    // YZ Pane
-                    self.yz_pane.render(
-                        ui,
-                        &mut self.coord,
-                        &self.world,
-                        self.segment_mode.as_ref().map(|s| &s.surface_volume),
-                        &mut self.zoom,
-                        &self.drawing_config,
-                        self.extra_resolutions,
-                        segment_outlines_coord,
-                        &self.ranges,
-                        cell_size,
-                    );
+                    self.render_pane(ui, cell_size, Self::YZ_PANE);
 
-                    ui.add_space(2.0); // Spacing
+                    ui.add_space(2.0);
 
-                    // UV Pane (segment mode only)
-                    if let Some(segment_mode) = self.segment_mode.as_mut() {
-                        if segment_mode.uv_pane.render(
-                            ui,
-                            &mut segment_mode.coord,
-                            &segment_mode.world,
-                            Some(&segment_mode.surface_volume),
-                            &mut self.zoom,
-                            &self.drawing_config,
-                            self.extra_resolutions,
-                            None,
-                            &segment_mode.ranges,
-                            cell_size,
-                        ) {
-                            needs_sync = true;
-                        }
-                    }
+                    self.render_uv_pane(ui, cell_size);
                 });
             });
-
-            if self.should_sync_coords() && needs_sync {
-                self.sync_coords();
-            }
         });
+    }
+
+    const XY_PANE: VolumePane = VolumePane::new(PaneType::XY, false);
+    const XZ_PANE: VolumePane = VolumePane::new(PaneType::XZ, false);
+    const YZ_PANE: VolumePane = VolumePane::new(PaneType::YZ, false);
+    const UV_PANE: VolumePane = VolumePane::new(PaneType::UV, true);
+    fn render_pane(&mut self, ui: &mut Ui, cell_size: Vec2, pane: VolumePane) {
+        let segment_outlines_coord = if self.is_segment_mode() {
+            Some(self.segment_mode.as_ref().unwrap().coord)
+        } else {
+            None
+        };
+
+        pane.render(
+            ui,
+            &mut self.coord,
+            &self.world,
+            self.segment_mode.as_ref().map(|s| &s.surface_volume),
+            &mut self.zoom,
+            &self.drawing_config,
+            self.extra_resolutions,
+            segment_outlines_coord,
+            &self.ranges,
+            cell_size,
+        );
+    }
+    fn render_uv_pane(&mut self, ui: &mut Ui, cell_size: Vec2) {
+        if let Some(segment_mode) = self.segment_mode.as_mut() {
+            if Self::UV_PANE.render(
+                ui,
+                &mut segment_mode.coord,
+                &segment_mode.world,
+                Some(&segment_mode.surface_volume),
+                &mut self.zoom,
+                &self.drawing_config,
+                self.extra_resolutions,
+                None,
+                &segment_mode.ranges,
+                cell_size,
+            ) {
+                if self.should_sync_coords() {
+                    self.sync_coords();
+                }
+            }
+        }
     }
 
     fn catalog_panel(&mut self, ctx: &egui::Context) {
