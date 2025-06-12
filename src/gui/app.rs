@@ -77,6 +77,15 @@ pub struct VesuviusConfig {
     pub volume: Option<NewVolumeReference>,
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+enum GuiLayout {
+    Grid,
+    XY,
+    XZ,
+    YZ,
+    UV,
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TemplateApp {
@@ -114,6 +123,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     overlay: Option<Box<dyn PaintVolume>>,
     catalog_panel_open: bool,
+    layout: GuiLayout,
 }
 
 impl Default for TemplateApp {
@@ -143,6 +153,7 @@ impl Default for TemplateApp {
             notification_receiver,
             overlay: None,
             catalog_panel_open: true,
+            layout: GuiLayout::Grid,
         }
     }
 }
@@ -331,6 +342,9 @@ impl TemplateApp {
                 if self.is_segment_mode() {
                     if ui.button("Unload segment").clicked() {
                         self.segment_mode = None;
+                        if self.layout == GuiLayout::UV {
+                            self.layout = GuiLayout::Grid;
+                        }
                     }
                 } else {
                     ui.add_enabled_ui(!self.is_segment_mode(), |ui| {
@@ -563,6 +577,24 @@ impl TemplateApp {
                     segment_mode.coord[2] = (segment_mode.coord[2] + 1).min(*segment_mode.ranges[2].end());
                     self.sync_coords();
                 }
+                if i.key_pressed(egui::Key::C) {
+                    self.catalog_panel_open = !self.catalog_panel_open;
+                }
+                if i.key_pressed(egui::Key::Num1) {
+                    self.layout = GuiLayout::Grid;
+                }
+                if i.key_pressed(egui::Key::Num2) {
+                    self.layout = GuiLayout::XY;
+                }
+                if i.key_pressed(egui::Key::Num3) {
+                    self.layout = GuiLayout::XZ;
+                }
+                if i.key_pressed(egui::Key::Num4) {
+                    self.layout = GuiLayout::YZ;
+                }
+                if i.key_pressed(egui::Key::Num5) {
+                    self.layout = GuiLayout::UV;
+                }
             }
         });
 
@@ -581,30 +613,50 @@ impl TemplateApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let available_size = ui.available_size();
-            let cell_width = (available_size.x - 2.0) / 2.0; // Account for spacing
-            let cell_height = (available_size.y - 2.0) / 2.0; // Account for spacing
-            let cell_size = Vec2::new(cell_width, cell_height);
+            match self.layout {
+                GuiLayout::Grid => {
+                    let available_size = ui.available_size();
+                    let cell_width = (available_size.x - 2.0) / 2.0; // Account for spacing
+                    let cell_height = (available_size.y - 2.0) / 2.0; // Account for spacing
+                    let cell_size = Vec2::new(cell_width, cell_height);
 
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    self.render_pane(ui, cell_size, Self::XY_PANE);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            self.render_pane(ui, cell_size, Self::XY_PANE);
 
-                    ui.add_space(2.0);
+                            ui.add_space(2.0);
 
-                    self.render_pane(ui, cell_size, Self::XZ_PANE);
-                });
+                            self.render_pane(ui, cell_size, Self::XZ_PANE);
+                        });
 
-                ui.add_space(2.0);
+                        ui.add_space(2.0);
 
-                ui.horizontal(|ui| {
-                    self.render_pane(ui, cell_size, Self::YZ_PANE);
+                        ui.horizontal(|ui| {
+                            self.render_pane(ui, cell_size, Self::YZ_PANE);
 
-                    ui.add_space(2.0);
+                            ui.add_space(2.0);
 
-                    self.render_uv_pane(ui, cell_size);
-                });
-            });
+                            self.render_uv_pane(ui, cell_size);
+                        });
+                    });
+                }
+                GuiLayout::XY => {
+                    self.render_pane(ui, ui.available_size(), Self::XY_PANE);
+                }
+                GuiLayout::XZ => {
+                    self.render_pane(ui, ui.available_size(), Self::XZ_PANE);
+                }
+                GuiLayout::YZ => {
+                    self.render_pane(ui, ui.available_size(), Self::YZ_PANE);
+                }
+                GuiLayout::UV => {
+                    if self.is_segment_mode() {
+                        self.render_uv_pane(ui, ui.available_size());
+                    } else {
+                        ui.label("UV pane is only available in segment mode.");
+                    }
+                }
+            }
         });
     }
 
@@ -780,6 +832,30 @@ impl eframe::App for TemplateApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.visuals_mut().button_frame = false;
                     ui.toggle_value(&mut self.catalog_panel_open, "📜 Catalog");
+
+                    fn layout_button(
+                        ui: &mut Ui,
+                        field: &mut GuiLayout,
+                        target_layout: GuiLayout,
+                        label: &str,
+                    ) -> Response {
+                        let response = ui.selectable_value(field, target_layout, label);
+                        if response.clicked() {
+                            *field = target_layout;
+                        }
+                        response
+                    }
+
+                    ui.separator();
+                    ui.label("Layout");
+
+                    layout_button(ui, &mut self.layout, GuiLayout::Grid, "4x4");
+                    layout_button(ui, &mut self.layout, GuiLayout::XY, "XY");
+                    layout_button(ui, &mut self.layout, GuiLayout::XZ, "XZ");
+                    layout_button(ui, &mut self.layout, GuiLayout::YZ, "YZ");
+                    if self.is_segment_mode() {
+                        layout_button(ui, &mut self.layout, GuiLayout::UV, "UV");
+                    }
                 });
             });
 
