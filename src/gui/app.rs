@@ -661,10 +661,8 @@ impl TemplateApp {
                 // Top row
                 ui.horizontal(|ui| {
                     // XY Pane
-                    let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
-                    let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     if self.xy_pane.render(
-                        &mut child_ui,
+                        ui,
                         &mut self.coord,
                         &self.world,
                         self.segment_mode.as_ref().map(|s| &s.surface_volume),
@@ -674,6 +672,7 @@ impl TemplateApp {
                         segment_outlines_coord,
                         &self.ranges,
                         should_sync_coords,
+                        cell_size,
                     ) {
                         clear_textures = true;
                     }
@@ -681,10 +680,8 @@ impl TemplateApp {
                     ui.add_space(2.0); // Spacing
 
                     // XZ Pane
-                    let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
-                    let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     if self.xz_pane.render(
-                        &mut child_ui,
+                        ui,
                         &mut self.coord,
                         &self.world,
                         self.segment_mode.as_ref().map(|s| &s.surface_volume),
@@ -694,6 +691,7 @@ impl TemplateApp {
                         segment_outlines_coord,
                         &self.ranges,
                         should_sync_coords,
+                        cell_size,
                     ) {
                         clear_textures = true;
                     }
@@ -704,10 +702,8 @@ impl TemplateApp {
                 // Bottom row
                 ui.horizontal(|ui| {
                     // YZ Pane
-                    let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
-                    let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     if self.yz_pane.render(
-                        &mut child_ui,
+                        ui,
                         &mut self.coord,
                         &self.world,
                         self.segment_mode.as_ref().map(|s| &s.surface_volume),
@@ -717,6 +713,7 @@ impl TemplateApp {
                         segment_outlines_coord,
                         &self.ranges,
                         should_sync_coords,
+                        cell_size,
                     ) {
                         clear_textures = true;
                     }
@@ -724,11 +721,9 @@ impl TemplateApp {
                     ui.add_space(2.0); // Spacing
 
                     // UV Pane (segment mode only)
-                    let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
-                    let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     if let Some(segment_mode) = self.segment_mode.as_mut() {
                         if segment_mode.uv_pane.render(
-                            &mut child_ui,
+                            ui,
                             &mut segment_mode.coord,
                             &segment_mode.world,
                             Some(&segment_mode.surface_volume),
@@ -738,6 +733,7 @@ impl TemplateApp {
                             None,
                             &segment_mode.ranges,
                             false, // UV pane should always allow drag
+                            cell_size,
                         ) {
                             clear_textures = true;
                         }

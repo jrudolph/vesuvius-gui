@@ -1,5 +1,5 @@
 use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume};
-use egui::{Image, PointerButton, Response, Ui};
+use egui::{Image, PointerButton, Response, Ui, Vec2};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 
@@ -64,11 +64,14 @@ impl VolumePane {
         segment_outlines_coord: Option<[i32; 3]>,
         ranges: &[RangeInclusive<i32>; 3],
         should_sync_coords: bool,
+        cell_size: Vec2,
     ) -> bool {
-        // Determine available space for this pane
-        let available_size = ui.available_size();
-        let frame_width = available_size.x as usize;
-        let frame_height = available_size.y as usize;
+        // Allocate exact size for this pane
+        let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
+        let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(rect));
+
+        let frame_width = cell_size.x as usize;
+        let frame_height = cell_size.y as usize;
 
         // Get or create texture
         let texture = self.get_or_create_texture(
