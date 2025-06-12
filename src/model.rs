@@ -236,10 +236,15 @@ pub struct VolumeCreationParams {
     pub cache_dir: String,
 }
 
+pub enum VolumeLocation {
+    LocalPath(String),
+    RemoteUrl(String),
+}
+
 pub enum NewVolumeReference {
     Volume64x4(Arc<dyn VolumeReference>),
-    OmeZarr { id: String, url: String },
-    Zarr { id: String, url: String },
+    OmeZarr { id: String, location: VolumeLocation },
+    Zarr { id: String, location: VolumeLocation },
     Cells { id: String, path: String },
     Layers { id: String, path: String },
 }
@@ -282,13 +287,28 @@ impl NewVolumeReference {
                 let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
                 v.into_volume()
             }
-            NewVolumeReference::OmeZarr { url, .. } => {
-                OmeZarrContext::<GrayScale>::from_url_to_default_cache_dir(url).into_volume()
+            NewVolumeReference::OmeZarr { location, .. } => {
+                match location {
+                    VolumeLocation::RemoteUrl(url) => {
+                        OmeZarrContext::<GrayScale>::from_url_to_default_cache_dir(url).into_volume()
+                    }
+                    VolumeLocation::LocalPath(path) => {
+                        OmeZarrContext::<GrayScale>::from_path(path).into_volume()
+                    }
+                }
             }
-            NewVolumeReference::Zarr { url, .. } => ZarrArray::from_url_to_default_cache_dir(url)
-                .into_ctx()
-                .into_ctx()
-                .into_volume(),
+            NewVolumeReference::Zarr { location, .. } => {
+                match location {
+                    VolumeLocation::RemoteUrl(url) => ZarrArray::from_url_to_default_cache_dir(url)
+                        .into_ctx()
+                        .into_ctx()
+                        .into_volume(),
+                    VolumeLocation::LocalPath(path) => ZarrArray::from_path(path)
+                        .into_ctx()
+                        .into_ctx()
+                        .into_volume(),
+                }
+            }
 
             NewVolumeReference::Cells { path, .. } => VolumeGrid500Mapped::from_data_dir(path).into_volume(),
             NewVolumeReference::Layers { path, .. } => LayersMappedVolume::from_data_dir(path).into_volume(),
@@ -322,19 +342,67 @@ impl NewVolumeReference {
 
         // Try OME-Zarr first
         if try_fetch_and_check(&url, ".zattrs", "multiscales").is_some() {
-            return Ok(NewVolumeReference::OmeZarr { id, url });
+            return Ok(NewVolumeReference::OmeZarr { 
+                id, 
+                location: VolumeLocation::RemoteUrl(url) 
+            });
         }
 
         // Try regular Zarr
         if try_fetch_and_check(&url, ".zarray", "zarr_format").is_some()
             || try_fetch_and_check(&url, ".zarray", "chunks").is_some()
         {
-            return Ok(NewVolumeReference::Zarr { id, url });
+            return Ok(NewVolumeReference::Zarr { 
+                id, 
+                location: VolumeLocation::RemoteUrl(url) 
+            });
         }
 
         Err(format!(
             "URL {} is neither a valid OME-Zarr nor Zarr array (no .zattrs or .zarray found)",
             url
+        )
+        .into())
+    }
+
+    pub fn from_path(path: impl Into<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let path = path.into();
+        let path = if path.ends_with('/') {
+            path[..path.len() - 1].to_string()
+        } else {
+            path
+        };
+
+        fn file_exists_and_contains(base_path: &str, file: &str, content_check: &str) -> bool {
+            let file_path = format!("{}/{}", base_path, file);
+            std::fs::read_to_string(file_path)
+                .map(|content| content.contains(content_check))
+                .unwrap_or(false)
+        }
+
+        let id = path.split('/').last().unwrap_or("unknown").to_string();
+
+        // Try OME-Zarr first
+        if file_exists_and_contains(&path, ".zattrs", "multiscales") {
+            return Ok(NewVolumeReference::OmeZarr { 
+                id, 
+                location: VolumeLocation::LocalPath(path) 
+            });
+        }
+
+        // Try regular Zarr
+        if file_exists_and_contains(&path, ".zarray", "zarr_format")
+            || file_exists_and_contains(&path, ".zarray", "chunks")
+        {
+            return Ok(NewVolumeReference::Zarr { 
+                id, 
+                location: VolumeLocation::LocalPath(path) 
+            });
+        }
+
+        Err(format!(
+            "Path {} is neither a valid OME-Zarr nor Zarr array (no .zattrs or .zarray found)",
+            path
         )
         .into())
     }
