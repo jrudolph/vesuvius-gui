@@ -317,92 +317,78 @@ impl NewVolumeReference {
 
     pub fn from_url(url: impl Into<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let url = url.into();
-        let url = if url.ends_with('/') {
+        let normalized_url = if url.ends_with('/') {
             url[..url.len() - 1].to_string()
         } else {
             url
         };
-
-        fn try_fetch_and_check(base_url: &str, file: &str, content_check: &str) -> Option<String> {
-            let file_url = format!("{}/{}", base_url, file);
-            ehttp::fetch_blocking(&ehttp::Request::get(file_url))
-                .ok()
-                .filter(|response| response.status == 200)
-                .and_then(|response| {
-                    let content = String::from_utf8_lossy(&response.bytes);
-                    if content.contains(content_check) {
-                        Some(content.into_owned())
-                    } else {
-                        None
-                    }
-                })
-        }
-
-        let id = url.split('/').last().unwrap_or("unknown").to_string();
-
-        // Try OME-Zarr first
-        if try_fetch_and_check(&url, ".zattrs", "multiscales").is_some() {
-            return Ok(NewVolumeReference::OmeZarr { 
-                id, 
-                location: VolumeLocation::RemoteUrl(url) 
-            });
-        }
-
-        // Try regular Zarr
-        if try_fetch_and_check(&url, ".zarray", "zarr_format").is_some()
-            || try_fetch_and_check(&url, ".zarray", "chunks").is_some()
-        {
-            return Ok(NewVolumeReference::Zarr { 
-                id, 
-                location: VolumeLocation::RemoteUrl(url) 
-            });
-        }
-
-        Err(format!(
-            "URL {} is neither a valid OME-Zarr nor Zarr array (no .zattrs or .zarray found)",
-            url
-        )
-        .into())
+        Self::from_location(VolumeLocation::RemoteUrl(normalized_url))
     }
 
     pub fn from_path(path: impl Into<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let path = path.into();
-        let path = if path.ends_with('/') {
+        let normalized_path = if path.ends_with('/') {
             path[..path.len() - 1].to_string()
         } else {
             path
         };
+        Self::from_location(VolumeLocation::LocalPath(normalized_path))
+    }
 
-        fn file_exists_and_contains(base_path: &str, file: &str, content_check: &str) -> bool {
-            let file_path = format!("{}/{}", base_path, file);
-            std::fs::read_to_string(file_path)
-                .map(|content| content.contains(content_check))
-                .unwrap_or(false)
+    fn from_location(location: VolumeLocation) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        fn check_file_content(location: &VolumeLocation, file: &str, content_check: &str) -> bool {
+            match location {
+                VolumeLocation::RemoteUrl(url) => {
+                    let file_url = format!("{}/{}", url, file);
+                    ehttp::fetch_blocking(&ehttp::Request::get(file_url))
+                        .ok()
+                        .filter(|response| response.status == 200)
+                        .map(|response| {
+                            let content = String::from_utf8_lossy(&response.bytes);
+                            content.contains(content_check)
+                        })
+                        .unwrap_or(false)
+                }
+                VolumeLocation::LocalPath(path) => {
+                    let file_path = format!("{}/{}", path, file);
+                    std::fs::read_to_string(file_path)
+                        .map(|content| content.contains(content_check))
+                        .unwrap_or(false)
+                }
+            }
         }
 
-        let id = path.split('/').last().unwrap_or("unknown").to_string();
+        let (id, location_str) = match &location {
+            VolumeLocation::RemoteUrl(url) => (
+                url.split('/').last().unwrap_or("unknown").to_string(),
+                url.as_str()
+            ),
+            VolumeLocation::LocalPath(path) => (
+                path.split('/').last().unwrap_or("unknown").to_string(),
+                path.as_str()
+            ),
+        };
 
         // Try OME-Zarr first
-        if file_exists_and_contains(&path, ".zattrs", "multiscales") {
-            return Ok(NewVolumeReference::OmeZarr { 
-                id, 
-                location: VolumeLocation::LocalPath(path) 
-            });
+        if check_file_content(&location, ".zattrs", "multiscales") {
+            return Ok(NewVolumeReference::OmeZarr { id, location });
         }
 
         // Try regular Zarr
-        if file_exists_and_contains(&path, ".zarray", "zarr_format")
-            || file_exists_and_contains(&path, ".zarray", "chunks")
+        if check_file_content(&location, ".zarray", "zarr_format")
+            || check_file_content(&location, ".zarray", "chunks")
         {
-            return Ok(NewVolumeReference::Zarr { 
-                id, 
-                location: VolumeLocation::LocalPath(path) 
-            });
+            return Ok(NewVolumeReference::Zarr { id, location });
         }
 
+        let location_type = match location {
+            VolumeLocation::RemoteUrl(_) => "URL",
+            VolumeLocation::LocalPath(_) => "Path",
+        };
+
         Err(format!(
-            "Path {} is neither a valid OME-Zarr nor Zarr array (no .zattrs or .zarray found)",
-            path
+            "{} {} is neither a valid OME-Zarr nor Zarr array (no .zattrs or .zarray found)",
+            location_type, location_str
         )
         .into())
     }
