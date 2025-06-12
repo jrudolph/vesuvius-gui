@@ -639,12 +639,8 @@ impl TemplateApp {
                 self.clear_textures();
             }
 
-            // Split the rendering logic to avoid borrowing conflicts
+            // Track if any pane needs textures cleared
             let mut clear_textures = false;
-            let mut xy_response = None;
-            let mut xz_response = None;
-            let mut yz_response = None;
-            let mut uv_response = None;
 
             // Calculate grid dimensions
             let available_size = ui.available_size();
@@ -669,35 +665,45 @@ impl TemplateApp {
                         None
                     };
 
+                    let should_sync_coords = self.should_sync_coords();
+
                     // XY Pane
                     let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
                     let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-                    xy_response = Some(self.xy_pane.render(
+                    if self.xy_pane.render(
                         &mut child_ui,
-                        self.coord,
+                        &mut self.coord,
                         &self.world,
                         surface_volume,
-                        self.zoom,
+                        &mut self.zoom,
                         &self.drawing_config,
                         self.extra_resolutions,
                         segment_outlines_coord,
-                    ));
+                        &self.ranges,
+                        should_sync_coords,
+                    ) {
+                        clear_textures = true;
+                    }
 
                     ui.add_space(2.0); // Spacing
 
                     // XZ Pane
                     let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
                     let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-                    xz_response = Some(self.xz_pane.render(
+                    if self.xz_pane.render(
                         &mut child_ui,
-                        self.coord,
+                        &mut self.coord,
                         &self.world,
                         surface_volume,
-                        self.zoom,
+                        &mut self.zoom,
                         &self.drawing_config,
                         self.extra_resolutions,
                         segment_outlines_coord,
-                    ));
+                        &self.ranges,
+                        should_sync_coords,
+                    ) {
+                        clear_textures = true;
+                    }
                 });
 
                 ui.add_space(2.0); // Spacing
@@ -717,19 +723,25 @@ impl TemplateApp {
                         None
                     };
 
+                    let should_sync_coords = self.should_sync_coords();
+
                     // YZ Pane
                     let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
                     let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-                    yz_response = Some(self.yz_pane.render(
+                    if self.yz_pane.render(
                         &mut child_ui,
-                        self.coord,
+                        &mut self.coord,
                         &self.world,
                         surface_volume,
-                        self.zoom,
+                        &mut self.zoom,
                         &self.drawing_config,
                         self.extra_resolutions,
                         segment_outlines_coord,
-                    ));
+                        &self.ranges,
+                        should_sync_coords,
+                    ) {
+                        clear_textures = true;
+                    }
 
                     ui.add_space(2.0); // Spacing
 
@@ -737,92 +749,26 @@ impl TemplateApp {
                     let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
                     let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     if let Some(segment_mode) = self.segment_mode.as_mut() {
-                        uv_response = Some(segment_mode.uv_pane.render(
+                        if segment_mode.uv_pane.render(
                             &mut child_ui,
-                            segment_mode.coord,
+                            &mut segment_mode.coord,
                             &segment_mode.world,
                             Some(&segment_mode.surface_volume),
-                            self.zoom,
+                            &mut self.zoom,
                             &self.drawing_config,
                             self.extra_resolutions,
                             None,
-                        ));
+                            &segment_mode.ranges,
+                            false, // UV pane should always allow drag
+                        ) {
+                            clear_textures = true;
+                        }
                     }
                 });
             });
 
-            // Now handle all interactions
-            if let Some(im_xy) = xy_response {
-                if self
-                    .xy_pane
-                    .handle_scroll(&im_xy, ui, &mut self.coord, &self.ranges, &mut self.zoom)
-                {
-                    clear_textures = true;
-                }
-                if !self.should_sync_coords()
-                    && self
-                        .xy_pane
-                        .handle_drag(&im_xy, &mut self.coord, &self.ranges, self.zoom)
-                {
-                    clear_textures = true;
-                }
-            }
-
-            if let Some(im_xz) = xz_response {
-                if self
-                    .xz_pane
-                    .handle_scroll(&im_xz, ui, &mut self.coord, &self.ranges, &mut self.zoom)
-                {
-                    clear_textures = true;
-                }
-                if !self.should_sync_coords()
-                    && self
-                        .xz_pane
-                        .handle_drag(&im_xz, &mut self.coord, &self.ranges, self.zoom)
-                {
-                    clear_textures = true;
-                }
-            }
-
-            if let Some(im_yz) = yz_response {
-                if self
-                    .yz_pane
-                    .handle_scroll(&im_yz, ui, &mut self.coord, &self.ranges, &mut self.zoom)
-                {
-                    clear_textures = true;
-                }
-                if !self.should_sync_coords()
-                    && self
-                        .yz_pane
-                        .handle_drag(&im_yz, &mut self.coord, &self.ranges, self.zoom)
-                {
-                    clear_textures = true;
-                }
-            }
-
-            if let Some(im_uv) = uv_response {
-                if let Some(segment_mode) = self.segment_mode.as_mut() {
-                    if segment_mode.uv_pane.handle_scroll(
-                        &im_uv,
-                        ui,
-                        &mut segment_mode.coord,
-                        &segment_mode.ranges,
-                        &mut self.zoom,
-                    ) {
-                        clear_textures = true;
-                    }
-                    if segment_mode.uv_pane.handle_drag(
-                        &im_uv,
-                        &mut segment_mode.coord,
-                        &segment_mode.ranges,
-                        self.zoom,
-                    ) {
-                        clear_textures = true;
-                    }
-                }
-            }
-
             if clear_textures {
+                self.sync_coords();
                 self.clear_textures();
             }
         });

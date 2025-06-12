@@ -55,14 +55,16 @@ impl VolumePane {
     pub fn render(
         &mut self,
         ui: &mut Ui,
-        coord: [i32; 3],
+        coord: &mut [i32; 3],
         world: &Volume,
         surface_volume: Option<&Rc<dyn SurfaceVolume>>,
-        zoom: f32,
+        zoom: &mut f32,
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
         segment_outlines_coord: Option<[i32; 3]>,
-    ) -> Response {
+        ranges: &[RangeInclusive<i32>; 3],
+        should_sync_coords: bool,
+    ) -> bool {
         // Determine available space for this pane
         let available_size = ui.available_size();
         let frame_width = available_size.x as usize;
@@ -71,10 +73,10 @@ impl VolumePane {
         // Get or create texture
         let texture = self.get_or_create_texture(
             ui,
-            coord,
+            *coord,
             world,
             surface_volume,
-            zoom,
+            *zoom,
             frame_width,
             frame_height,
             drawing_config,
@@ -83,11 +85,11 @@ impl VolumePane {
         );
 
         // Calculate scaling for image display
-        let pane_scaling = if zoom >= 1.0 {
-            zoom
+        let pane_scaling = if *zoom >= 1.0 {
+            *zoom
         } else {
-            let next_smaller_pow_of_2 = 2.0f32.powf((zoom as f32).log2().floor());
-            zoom / next_smaller_pow_of_2
+            let next_smaller_pow_of_2 = 2.0f32.powf((*zoom as f32).log2().floor());
+            *zoom / next_smaller_pow_of_2
         };
 
         // Create and display image using available space but keeping scaling
@@ -96,7 +98,20 @@ impl VolumePane {
             .max_width(frame_width as f32)
             .fit_to_original_size(pane_scaling);
 
-        ui.add(image).interact(egui::Sense::drag())
+        let response = ui.add(image).interact(egui::Sense::drag());
+
+        // Handle interactions and return whether textures need clearing
+        let mut needs_clear = false;
+
+        if self.handle_scroll(&response, ui, coord, ranges, zoom) {
+            needs_clear = true;
+        }
+
+        if !should_sync_coords && self.handle_drag(&response, coord, ranges, *zoom) {
+            needs_clear = true;
+        }
+
+        needs_clear
     }
 
     pub fn handle_scroll(
