@@ -1,11 +1,60 @@
 use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume};
+use egui::cache::FramePublisher;
 use egui::{Image, PointerButton, Response, Ui, Vec2};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 
 const ZOOM_RES_FACTOR: f32 = 1.3;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TextureCacheKey {
+    pane_type: PaneType,
+    coord: [i32; 3],
+    zoom_level: u32, // zoom * 1000 as u32 for discrete levels
+    frame_size: (usize, usize),
+    drawing_config: DrawingConfig,
+    segment_outlines_coord: Option<[i32; 3]>,
+    extra_resolutions: u32,
+    volume_id: usize,
+    surface_volume_id: Option<usize>,
+}
+
+impl TextureCacheKey {
+    fn new(
+        pane_type: PaneType,
+        coord: [i32; 3],
+        zoom: f32,
+        frame_size: (usize, usize),
+        drawing_config: &DrawingConfig,
+        segment_outlines_coord: Option<[i32; 3]>,
+        extra_resolutions: u32,
+        world: &Volume,
+        surface_volume: Option<&Rc<dyn SurfaceVolume>>,
+    ) -> Self {
+        let zoom_level = (zoom * 1000.0) as u32;
+        let volume_id = world as *const Volume as usize;
+        let surface_volume_id = surface_volume.map(|sv| {
+            let ptr: *const dyn SurfaceVolume = sv.as_ref();
+            ptr as *const () as usize
+        });
+
+        Self {
+            pane_type,
+            coord,
+            zoom_level,
+            frame_size,
+            drawing_config: drawing_config.clone(),
+            segment_outlines_coord,
+            extra_resolutions,
+            volume_id,
+            surface_volume_id,
+        }
+    }
+}
+
+type TextureCache = FramePublisher<TextureCacheKey, egui::TextureHandle>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PaneType {
     XY, // u=0, v=1, d=2
     XZ, // u=0, v=2, d=1
@@ -35,7 +84,6 @@ impl PaneType {
 
 pub struct VolumePane {
     pane_type: PaneType,
-    texture: Option<egui::TextureHandle>,
     is_segment_pane: bool,
 }
 
@@ -43,13 +91,8 @@ impl VolumePane {
     pub fn new(pane_type: PaneType, is_segment_pane: bool) -> Self {
         Self {
             pane_type,
-            texture: None,
             is_segment_pane,
         }
-    }
-
-    pub fn clear_texture(&mut self) {
-        self.texture = None;
     }
 
     pub fn render(
@@ -169,7 +212,7 @@ impl VolumePane {
     }
 
     fn get_or_create_texture(
-        &mut self,
+        &self,
         ui: &Ui,
         coord: [i32; 3],
         world: &Volume,
@@ -181,9 +224,28 @@ impl VolumePane {
         extra_resolutions: u32,
         segment_outlines_coord: Option<[i32; 3]>,
     ) -> egui::TextureHandle {
-        if let Some(texture) = &self.texture {
-            texture.clone()
+        let cache_key = TextureCacheKey::new(
+            self.pane_type,
+            coord,
+            zoom,
+            (frame_width, frame_height),
+            drawing_config,
+            segment_outlines_coord,
+            extra_resolutions,
+            world,
+            surface_volume,
+        );
+
+        // Check if texture exists in cache first
+        let cached_texture = ui.memory_mut(|mem| {
+            let cache: &mut TextureCache = mem.caches.cache::<TextureCache>();
+            cache.get(&cache_key).cloned()
+        });
+
+        if let Some(texture) = cached_texture {
+            texture
         } else {
+            // Create texture outside of memory lock to avoid deadlock
             let texture = self.create_texture(
                 ui,
                 coord,
@@ -196,7 +258,13 @@ impl VolumePane {
                 extra_resolutions,
                 segment_outlines_coord,
             );
-            self.texture = Some(texture.clone());
+
+            // Store in cache
+            ui.memory_mut(|mem| {
+                let cache: &mut TextureCache = mem.caches.cache::<TextureCache>();
+                cache.set(cache_key, texture.clone());
+            });
+
             texture
         }
     }

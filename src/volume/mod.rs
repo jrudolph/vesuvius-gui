@@ -17,7 +17,7 @@ pub use ppmvolume::PPMVolume;
 use std::rc::Rc;
 pub use volume64x4::VolumeGrid64x4Mapped;
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct DrawingConfig {
     pub enable_filters: bool,

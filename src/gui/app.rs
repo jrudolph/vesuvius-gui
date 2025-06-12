@@ -312,16 +312,6 @@ impl TemplateApp {
         <dyn VolumeReference>::VOLUMES[self.volume_id]
     }
 
-    pub fn clear_textures(&mut self) {
-        self.xy_pane.clear_texture();
-        self.xz_pane.clear_texture();
-        self.yz_pane.clear_texture();
-
-        if let Some(segment_mode) = self.segment_mode.as_mut() {
-            segment_mode.uv_pane.clear_texture();
-            self.sync_coords();
-        }
-    }
 
     fn sync_coords(&mut self) {
         if let Some(segment_mode) = self.segment_mode.as_ref() {
@@ -362,7 +352,6 @@ impl TemplateApp {
                 if self.is_segment_mode() {
                     if ui.button("Unload segment").clicked() {
                         self.segment_mode = None;
-                        self.clear_textures();
                     }
                 } else {
                     ui.add_enabled_ui(!self.is_segment_mode(), |ui| {
@@ -374,7 +363,6 @@ impl TemplateApp {
                                     let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
                                     if res.changed() {
                                         println!("Selected volume: {}", self.volume_id);
-                                        self.clear_textures();
                                         self.select_volume(self.volume_id);
                                         self.zoom = 0.25;
                                     }
@@ -481,13 +469,11 @@ impl TemplateApp {
 
                     has_changed = has_changed || cb(ui, "Sync coordinates ('S')", &mut self.sync_coordinates).changed();
 
-                    if cb(ui, "XYZ outline ('X')", &mut self.drawing_config.draw_xyz_outlines).changed() {
-                        segment_mode.uv_pane.clear_texture();
-                    }
+                    cb(ui, "XYZ outline ('X')", &mut self.drawing_config.draw_xyz_outlines);
                 }
 
-                if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() || has_changed {
-                    self.clear_textures();
+                if has_changed {
+                    self.sync_coords();
                 }
             });
 
@@ -527,14 +513,8 @@ impl TemplateApp {
                         ui.label(format!("{:08b}", self.drawing_config.bit_mask()));
                         ui.end_row();
 
-                        if min_sl.changed() || max_sl.changed() || bits_sl.changed() || mask_sl.changed() {
-                            self.clear_textures();
-                        }
                     });
             });
-            if enable.changed() {
-                self.clear_textures();
-            }
         });
     }
 
@@ -546,8 +526,6 @@ impl TemplateApp {
         egui_extras::install_image_loaders(ctx);
 
         if self.try_recv_from_download_notifier() {
-            self.clear_textures();
-
             while self.try_recv_from_download_notifier() {} // clear queue
         }
 
@@ -567,7 +545,6 @@ impl TemplateApp {
             self.load_volume_by_ref(&segment.volume_ref());
             self.setup_segment(obj_file.to_str().unwrap(), segment.width, segment.height);
             self.selected_segment = Some(segment);
-            self.clear_textures();
             self.downloading_segment = None;
         }
 
@@ -578,42 +555,35 @@ impl TemplateApp {
         ctx.input(|i| {
             if i.key_pressed(egui::Key::F) {
                 self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
-                self.clear_textures();
             }
             if self.overlay.is_some() && i.key_pressed(egui::Key::L) {
                 self.show_overlay = !self.show_overlay;
-                self.clear_textures();
             }
             if self.is_segment_mode() {
                 if i.key_pressed(egui::Key::I) {
                     self.drawing_config.trilinear_interpolation = !self.drawing_config.trilinear_interpolation;
-                    self.clear_textures();
                 }
                 if i.key_pressed(egui::Key::O) {
                     self.drawing_config.show_segment_outlines = !self.drawing_config.show_segment_outlines;
-                    self.clear_textures();
                 }
                 if i.key_pressed(egui::Key::P) {
                     self.drawing_config.draw_outline_vertices = !self.drawing_config.draw_outline_vertices;
-                    self.clear_textures();
                 }
                 if i.key_pressed(egui::Key::S) {
                     self.sync_coordinates = !self.sync_coordinates;
-                    self.clear_textures();
                 }
                 if i.key_pressed(egui::Key::X) {
                     self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
-                    self.clear_textures();
                 }
                 if i.key_pressed(egui::Key::J) {
                     let segment_mode = self.segment_mode.as_mut().unwrap();
                     segment_mode.coord[2] = (segment_mode.coord[2] - 1).max(*segment_mode.ranges[2].start());
-                    self.clear_textures();
+                    self.sync_coords();
                 }
                 if i.key_pressed(egui::Key::K) {
                     let segment_mode = self.segment_mode.as_mut().unwrap();
                     segment_mode.coord[2] = (segment_mode.coord[2] + 1).min(*segment_mode.ranges[2].end());
-                    self.clear_textures();
+                    self.sync_coords();
                 }
             }
         });
@@ -636,11 +606,10 @@ impl TemplateApp {
             let new_size = ui.available_size();
             if new_size != self.last_size {
                 self.last_size = new_size;
-                self.clear_textures();
             }
 
-            // Track if any pane needs textures cleared
-            let mut clear_textures = false;
+            // Track if any pane interaction requires coord sync
+            let mut needs_sync = false;
 
             // Calculate grid dimensions
             let available_size = ui.available_size();
@@ -674,7 +643,7 @@ impl TemplateApp {
                         should_sync_coords,
                         cell_size,
                     ) {
-                        clear_textures = true;
+                        needs_sync = true;
                     }
 
                     ui.add_space(2.0); // Spacing
@@ -693,7 +662,7 @@ impl TemplateApp {
                         should_sync_coords,
                         cell_size,
                     ) {
-                        clear_textures = true;
+                        needs_sync = true;
                     }
                 });
 
@@ -715,7 +684,7 @@ impl TemplateApp {
                         should_sync_coords,
                         cell_size,
                     ) {
-                        clear_textures = true;
+                        needs_sync = true;
                     }
 
                     ui.add_space(2.0); // Spacing
@@ -735,15 +704,14 @@ impl TemplateApp {
                             false, // UV pane should always allow drag
                             cell_size,
                         ) {
-                            clear_textures = true;
+                            needs_sync = true;
                         }
                     }
                 });
             });
 
-            if clear_textures {
+            if needs_sync {
                 self.sync_coords();
-                self.clear_textures();
             }
         });
     }
@@ -851,7 +819,6 @@ impl TemplateApp {
                     if let Some(obj_file) = self.obj_repository.get(&segment) {
                         self.load_volume_by_ref(&segment.volume_ref());
                         self.setup_segment(&obj_file.to_str().unwrap().to_string(), segment.width, segment.height);
-                        self.clear_textures();
                         self.selected_segment = Some(segment);
                     } else {
                         let sender = self.notification_sender.clone();
