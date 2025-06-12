@@ -23,13 +23,6 @@ use std::sync::mpsc::Sender;
 
 const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
-#[derive(PartialEq, Eq)]
-enum Mode {
-    Blocks,
-    Cells,
-    Layers,
-}
-
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct SegmentMode {
@@ -118,8 +111,8 @@ pub struct TemplateApp {
     ppm_file: Option<String>,
     #[serde(skip)]
     obj_file: Option<String>, */
-    #[serde(skip)]
-    mode: Mode,
+    //#[serde(skip)]
+    //mode: Mode,
     #[serde(skip)]
     extra_resolutions: u32,
     #[serde(skip)]
@@ -166,7 +159,6 @@ impl Default for TemplateApp {
             ranges: [0..=10000, 0..=10000, 0..=21000],
             //ppm_file: None,
             //obj_file: None,
-            mode: Mode::Blocks,
             extra_resolutions: 1,
             segment_mode: None,
             catalog,
@@ -204,29 +196,10 @@ impl TemplateApp {
             std::fs::create_dir_all(&app.data_dir).unwrap();
         }
 
-        let contains_cell_files = std::fs::read_dir(&app.data_dir).unwrap().any(|entry| {
-            let p = entry.unwrap().path();
-            let name = p.file_name().unwrap().to_str().unwrap_or("");
-            name.starts_with("cell_yxz_") && name.ends_with(".tif")
-        });
-        let contains_layer_files = std::fs::read_dir(&app.data_dir).unwrap().any(|entry| {
-            let p = entry.unwrap().path();
-            let name = p.file_name().unwrap().to_str().unwrap_or("");
-            regex::Regex::new(r"(\d{5})\.tif").unwrap().captures(name).is_some()
-        });
-
         if let Some(volume) = config.volume {
             app.load_volume(&volume);
         } else {
             app.select_volume(app.volume_id);
-        }
-
-        if contains_cell_files {
-            app.mode = Mode::Cells;
-            app.load_from_cells();
-        } else if contains_layer_files {
-            app.mode = Mode::Layers;
-            app.load_from_layers();
         }
 
         if let Some(ObjFileConfig {
@@ -332,18 +305,6 @@ impl TemplateApp {
 
     pub fn is_segment_mode(&self) -> bool {
         self.segment_mode.is_some()
-    }
-
-    fn load_from_cells(&mut self) {
-        let v = VolumeGrid500Mapped::from_data_dir(&self.data_dir);
-        self.world = v.into_volume();
-        self.extra_resolutions = 0;
-    }
-
-    fn load_from_layers(&mut self) {
-        let v = LayersMappedVolume::from_data_dir(&self.data_dir);
-        self.world = v.into_volume();
-        self.extra_resolutions = 0;
     }
 
     fn select_volume(&mut self, id: usize) {
@@ -594,10 +555,6 @@ impl TemplateApp {
                         self.segment_mode = None;
                         self.clear_textures();
                     }
-                } else if self.mode == Mode::Cells {
-                    ui.label(format!("Browsing cells in {}", self.data_dir));
-                } else if self.mode == Mode::Layers {
-                    ui.label(format!("Browsing layers in {}", self.data_dir));
                 } else {
                     ui.add_enabled_ui(!self.is_segment_mode(), |ui| {
                         egui::ComboBox::from_id_salt("Volume")

@@ -1,6 +1,6 @@
 use crate::{
     downloader::SimpleDownloader,
-    volume::{Volume, VolumeGrid64x4Mapped, VoxelPaintVolume},
+    volume::{LayersMappedVolume, Volume, VolumeGrid500Mapped, VolumeGrid64x4Mapped, VoxelPaintVolume},
     zarr::{GrayScale, OmeZarrContext, ZarrArray},
 };
 use std::sync::Arc;
@@ -240,6 +240,8 @@ pub enum NewVolumeReference {
     Volume64x4(Arc<dyn VolumeReference>),
     OmeZarr { id: String, url: String },
     Zarr { id: String, url: String },
+    Cells { id: String, path: String },
+    Layers { id: String, path: String },
 }
 impl NewVolumeReference {
     const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
@@ -249,6 +251,8 @@ impl NewVolumeReference {
             NewVolumeReference::Volume64x4(v) => v.id(),
             NewVolumeReference::OmeZarr { id, .. } => id.clone(),
             NewVolumeReference::Zarr { id, .. } => id.clone(),
+            NewVolumeReference::Cells { id, .. } => id.clone(),
+            NewVolumeReference::Layers { id, .. } => id.clone(),
         }
     }
     pub fn label(&self) -> String {
@@ -256,6 +260,8 @@ impl NewVolumeReference {
             NewVolumeReference::Volume64x4(v) => v.label(),
             NewVolumeReference::OmeZarr { id, .. } => id.clone(),
             NewVolumeReference::Zarr { id, .. } => id.clone(),
+            NewVolumeReference::Cells { id, .. } => id.clone(),
+            NewVolumeReference::Layers { id, .. } => id.clone(),
         }
     }
     pub fn volume(&self, params: &VolumeCreationParams) -> Volume {
@@ -283,6 +289,9 @@ impl NewVolumeReference {
                 .into_ctx()
                 .into_ctx()
                 .into_volume(),
+
+            NewVolumeReference::Cells { path, .. } => VolumeGrid500Mapped::from_data_dir(path).into_volume(),
+            NewVolumeReference::Layers { path, .. } => LayersMappedVolume::from_data_dir(path).into_volume(),
         }
     }
 
