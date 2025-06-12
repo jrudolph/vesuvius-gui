@@ -1,14 +1,9 @@
-use std::ops::RangeInclusive;
-use std::sync::mpsc::Receiver;
-
-use crate::downloader::*;
-use crate::model::*;
-use crate::volume::*;
-
 use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
+use crate::model::*;
 use crate::volume;
+use crate::volume::*;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
 use egui::Color32;
@@ -21,7 +16,9 @@ use egui::WidgetText;
 use egui::{ColorImage, Image, PointerButton, Response, Ui, Widget};
 use egui_extras::Column;
 use egui_extras::TableBuilder;
+use std::ops::RangeInclusive;
 use std::rc::Rc;
+use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 
 const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
@@ -86,7 +83,7 @@ pub struct VesuviusConfig {
     pub data_dir: Option<String>,
     pub obj_file: Option<ObjFileConfig>,
     pub overlay_dir: Option<String>,
-    pub volume: Option<&'static dyn VolumeReference>,
+    pub volume: Option<NewVolumeReference>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -185,9 +182,6 @@ impl Default for TemplateApp {
 }
 
 impl TemplateApp {
-    const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
-    //const TILE_SERVER: &'static str = "http://localhost:8095";
-
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>, catalog: Catalog, config: VesuviusConfig) -> Self {
         // This is also where you can customize the look and feel of egui using
@@ -222,10 +216,9 @@ impl TemplateApp {
         });
 
         if let Some(volume) = config.volume {
-            app.volume_id = <dyn VolumeReference>::VOLUMES
-                .iter()
-                .position(|v| v.id() == volume.id())
-                .unwrap();
+            app.load_volume(&volume);
+        } else {
+            app.select_volume(app.volume_id);
         }
 
         if contains_cell_files {
@@ -234,8 +227,6 @@ impl TemplateApp {
         } else if contains_layer_files {
             app.mode = Mode::Layers;
             app.load_from_layers();
-        } else {
-            app.select_volume(app.volume_id);
         }
 
         if let Some(ObjFileConfig {
@@ -324,38 +315,19 @@ impl TemplateApp {
         }
     }
 
-    fn load_data(&mut self, volume: &dyn VolumeReference) {
-        let (sender, receiver) = std::sync::mpsc::channel::<(usize, usize, usize, Quality)>();
-        self.download_notifier = Some(receiver);
-
-        let volume_dir = volume.sub_dir(&self.data_dir);
-
-        // TODO: allow selecting zarr volumes as well (we need an abstraction to create any world)
-        /* if volume.id() == FullVolumeReference::SCROLL1.id() {
-            self.world = Arc::new(RefCell::new(
-            OmeZarrContext::<GrayScale>::from_url(
-                "https://dl.ash2txt.org/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/",
-                &format!("{}/ome-zarr", volume_dir),
-            )));
-            return;
-
-            /* let downloader = Downloader::new(&volume_dir, Self::TILE_SERVER, volume, None, sender);
-            let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
-            self.world = Arc::new(RefCell::new(v)); */
-        } */
-
-        self.world = {
-            let downloader = Box::new(SimpleDownloader::new(
-                &volume_dir,
-                Self::TILE_SERVER,
-                &volume.url_path_base(),
-                None,
-                sender,
-                false,
-            ));
-            let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
-            v.into_volume()
+    fn load_volume(&mut self, volume: &NewVolumeReference) {
+        let params = VolumeCreationParams {
+            cache_dir: self.data_dir.clone(),
         };
+        self.world = volume.volume(&params);
+    }
+
+    fn load_volume_by_ref(&mut self, volume_ref: &dyn VolumeReference) {
+        let new_vol = NewVolumeReference::Volume64x4(std::sync::Arc::new(DynamicFullVolumeReference::new(
+            "unknown".to_string(),
+            volume_ref.id(),
+        )));
+        self.load_volume(&new_vol);
     }
 
     pub fn is_segment_mode(&self) -> bool {
@@ -377,10 +349,10 @@ impl TemplateApp {
     fn select_volume(&mut self, id: usize) {
         if self.is_segment_mode() {
             self.volume_id = 0;
-            self.load_data(&FullVolumeReference::SCROLL1);
+            self.load_volume_by_ref(&FullVolumeReference::SCROLL1);
         } else {
             self.volume_id = id;
-            self.load_data(<dyn VolumeReference>::VOLUMES[id]);
+            self.load_volume_by_ref(<dyn VolumeReference>::VOLUMES[id]);
         }
     }
 
@@ -826,7 +798,7 @@ impl TemplateApp {
             }
         }
         if let Some((segment, obj_file)) = switch_segment {
-            self.load_data(&segment.volume_ref());
+            self.load_volume_by_ref(&segment.volume_ref());
             self.setup_segment(obj_file.to_str().unwrap(), segment.width, segment.height);
             self.selected_segment = Some(segment);
             self.clear_textures();
@@ -1068,7 +1040,7 @@ impl TemplateApp {
                 });
                 if let Some(segment) = clicked {
                     if let Some(obj_file) = self.obj_repository.get(&segment) {
-                        self.load_data(&segment.volume_ref());
+                        self.load_volume_by_ref(&segment.volume_ref());
                         self.setup_segment(&obj_file.to_str().unwrap().to_string(), segment.width, segment.height);
                         self.clear_textures();
                         self.selected_segment = Some(segment);

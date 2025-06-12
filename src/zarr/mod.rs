@@ -484,8 +484,8 @@ impl<const N: usize> ZarrContextCache<N> {
                 .collect::<Vec<_>>();
             entries.sort_by_key(|(_, e)| *e);
             let n = (self.non_empty_entries as f64 * 0.2) as usize; // FIXME: make configurable
-            let before = self.non_empty_entries;
-            let sorted_entries_len = entries.len();
+            let _before = self.non_empty_entries;
+            let _sorted_entries_len = entries.len();
             for (k, _) in entries.into_iter().take(n) {
                 if self.cache.remove(&k).is_some() {
                     self.non_empty_entries -= 1;

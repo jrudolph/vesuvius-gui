@@ -2,7 +2,8 @@ use vesuvius_gui::catalog::load_catalog;
 use vesuvius_gui::gui::{ObjFileConfig, TemplateApp, VesuviusConfig};
 
 use clap::Parser;
-use vesuvius_gui::model::VolumeReference;
+use std::sync::Arc;
+use vesuvius_gui::model::{NewVolumeReference, VolumeReference};
 
 /// Vesuvius GUI, an app to visualize and explore 3D data of the Vesuvius Challenge (https://scrollprize.org)
 #[derive(Parser, Debug)]
@@ -27,7 +28,7 @@ pub struct Args {
     #[clap(short, long)]
     overlay: Option<String>,
 
-    /// The id of a volume to open
+    /// The id of a volume to open, or URL to a zarr/ome-zarr volume
     #[clap(short, long)]
     volume: Option<Option<String>>,
 }
@@ -48,22 +49,31 @@ impl TryFrom<Args> for VesuviusConfig {
             ));
         }
         let v = v.map(|x| x.unwrap());
-        let volume = v
-            .clone()
-            .map(|vol| <dyn VolumeReference>::VOLUMES.iter().find(|v| v.id() == vol).cloned());
-
-        if let Some(None) = volume {
-            return Err(format!(
-                "Error: Volume {} not found. Use one of\n{}",
-                v.unwrap_or_default(),
-                <dyn VolumeReference>::VOLUMES
-                    .iter()
-                    .map(|v| format!("{} -> {}", v.id(), v.label()))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ));
-        }
-
+        let volume = if let Some(vol_str) = v.clone() {
+            // Try to parse as URL first
+            if vol_str.starts_with("http") {
+                Some(NewVolumeReference::from_url(vol_str).map_err(|e| e.to_string())?)
+            } else {
+                // Try to find in static volumes
+                if let Some(static_vol) = <dyn VolumeReference>::VOLUMES.iter().find(|v| v.id() == vol_str) {
+                    Some(NewVolumeReference::Volume64x4(Arc::new(
+                        vesuvius_gui::model::DynamicFullVolumeReference::new("unknown".to_string(), static_vol.id()),
+                    )))
+                } else {
+                    return Err(format!(
+                        "Error: Volume {} not found. Use one of\n{}",
+                        vol_str,
+                        <dyn VolumeReference>::VOLUMES
+                            .iter()
+                            .map(|v| format!("{} -> {}", v.id(), v.label()))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ));
+                }
+            }
+        } else {
+            None
+        };
         let obj_file = if let Some(obj_file) = args.obj {
             if let (Some(width), Some(height)) = (args.width, args.height) {
                 Some(ObjFileConfig {
@@ -82,7 +92,7 @@ impl TryFrom<Args> for VesuviusConfig {
             data_dir: args.data_directory,
             obj_file,
             overlay_dir: args.overlay,
-            volume: volume.map(|x| x.unwrap()),
+            volume,
         })
     }
 }

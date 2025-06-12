@@ -288,10 +288,10 @@ impl NewVolumeReference {
 
     pub fn from_url(url: impl Into<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let url = url.into();
-        let url_trimmed = if url.ends_with('/') {
-            &url[..url.len() - 1]
+        let url = if url.ends_with('/') {
+            url[..url.len() - 1].to_string()
         } else {
-            &url
+            url
         };
 
         fn try_fetch_and_check(base_url: &str, file: &str, content_check: &str) -> Option<String> {
@@ -309,18 +309,18 @@ impl NewVolumeReference {
                 })
         }
 
-        let id = url_trimmed.split('/').last().unwrap_or("unknown").to_string();
+        let id = url.split('/').last().unwrap_or("unknown").to_string();
 
         // Try OME-Zarr first
-        if try_fetch_and_check(url_trimmed, ".zattrs", "multiscales").is_some() {
-            return Ok(NewVolumeReference::OmeZarr { id, url: url.clone() });
+        if try_fetch_and_check(&url, ".zattrs", "multiscales").is_some() {
+            return Ok(NewVolumeReference::OmeZarr { id, url });
         }
 
         // Try regular Zarr
-        if try_fetch_and_check(url_trimmed, ".zarray", "zarr_format").is_some()
-            || try_fetch_and_check(url_trimmed, ".zarray", "chunks").is_some()
+        if try_fetch_and_check(&url, ".zarray", "zarr_format").is_some()
+            || try_fetch_and_check(&url, ".zarray", "chunks").is_some()
         {
-            return Ok(NewVolumeReference::Zarr { id, url: url.clone() });
+            return Ok(NewVolumeReference::Zarr { id, url });
         }
 
         Err(format!(
