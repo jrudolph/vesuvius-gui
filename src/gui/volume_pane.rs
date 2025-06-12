@@ -106,7 +106,6 @@ impl VolumePane {
         extra_resolutions: u32,
         segment_outlines_coord: Option<[i32; 3]>,
         ranges: &[RangeInclusive<i32>; 3],
-        should_sync_coords: bool,
         cell_size: Vec2,
     ) -> bool {
         // Allocate exact size for this pane
@@ -147,17 +146,17 @@ impl VolumePane {
         let response = ui.add(image).interact(egui::Sense::drag());
 
         // Handle interactions and return whether textures need clearing
-        let mut needs_clear = false;
+        let mut interaction_happened = false;
 
         if self.handle_scroll(&response, ui, coord, ranges, zoom) {
-            needs_clear = true;
+            interaction_happened = true;
         }
 
-        if !should_sync_coords && self.handle_drag(&response, coord, ranges, *zoom) {
-            needs_clear = true;
+        if self.handle_drag(&response, coord, ranges, *zoom) {
+            interaction_happened = true;
         }
 
-        needs_clear
+        interaction_happened
     }
 
     pub fn handle_scroll(

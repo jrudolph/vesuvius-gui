@@ -312,7 +312,6 @@ impl TemplateApp {
         <dyn VolumeReference>::VOLUMES[self.volume_id]
     }
 
-
     fn sync_coords(&mut self) {
         if let Some(segment_mode) = self.segment_mode.as_ref() {
             if self.sync_coordinates {
@@ -372,7 +371,7 @@ impl TemplateApp {
                 }
                 ui.end_row();
                 let sync_coordinates = self.should_sync_coords();
-                let x_sl = slider(
+                slider(
                     ui,
                     "x",
                     &mut self.coord[0],
@@ -380,7 +379,7 @@ impl TemplateApp {
                     false,
                     !sync_coordinates,
                 );
-                let y_sl = slider(
+                slider(
                     ui,
                     "y",
                     &mut self.coord[1],
@@ -388,7 +387,7 @@ impl TemplateApp {
                     false,
                     !sync_coordinates,
                 );
-                let z_sl = slider(
+                slider(
                     ui,
                     "z",
                     &mut self.coord[2],
@@ -427,7 +426,7 @@ impl TemplateApp {
                     has_changed = has_changed || u_sl.changed() || v_sl.changed() || w_sl.changed();
                 }
 
-                let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true, true);
+                slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true, true);
 
                 fn cb<T: ToString>(ui: &mut Ui, label: T, value: &mut bool) -> Response {
                     ui.label(label.to_string());
@@ -450,7 +449,7 @@ impl TemplateApp {
                         has_changed = true;
                     }
 
-                    let segment_mode = self.segment_mode.as_mut().unwrap();
+                    self.segment_mode.as_mut().unwrap();
                     has_changed = has_changed
                         || cb(
                             ui,
@@ -478,13 +477,13 @@ impl TemplateApp {
             });
 
         ui.collapsing("Filters", |ui| {
-            let enable = ui.checkbox(&mut self.drawing_config.enable_filters, "Enable ('F')");
+            ui.checkbox(&mut self.drawing_config.enable_filters, "Enable ('F')");
             ui.add_enabled_ui(self.drawing_config.enable_filters, |ui| {
                 egui::Grid::new("my_grid")
                     .num_columns(2)
                     .spacing([40.0, 4.0])
                     .show(ui, |ui| {
-                        let min_sl = slider(
+                        slider(
                             ui,
                             "Min",
                             &mut self.drawing_config.threshold_min,
@@ -492,7 +491,7 @@ impl TemplateApp {
                             false,
                             true,
                         );
-                        let max_sl = slider(
+                        slider(
                             ui,
                             "Max",
                             &mut self.drawing_config.threshold_max,
@@ -500,8 +499,8 @@ impl TemplateApp {
                             false,
                             true,
                         );
-                        let bits_sl = slider(ui, "Mask Bits", &mut self.drawing_config.quant, 1..=8, false, true);
-                        let mask_sl = slider(
+                        slider(ui, "Mask Bits", &mut self.drawing_config.quant, 1..=8, false, true);
+                        slider(
                             ui,
                             "Mask Shift",
                             &mut self.drawing_config.mask_shift,
@@ -512,7 +511,6 @@ impl TemplateApp {
                         ui.label("Mask");
                         ui.label(format!("{:08b}", self.drawing_config.bit_mask()));
                         ui.end_row();
-
                     });
             });
         });
@@ -623,14 +621,12 @@ impl TemplateApp {
                 None
             };
 
-            let should_sync_coords = self.should_sync_coords();
-
             // Use a proper 2x2 grid layout with explicit sizing
             ui.vertical(|ui| {
                 // Top row
                 ui.horizontal(|ui| {
                     // XY Pane
-                    if self.xy_pane.render(
+                    self.xy_pane.render(
                         ui,
                         &mut self.coord,
                         &self.world,
@@ -640,16 +636,13 @@ impl TemplateApp {
                         self.extra_resolutions,
                         segment_outlines_coord,
                         &self.ranges,
-                        should_sync_coords,
                         cell_size,
-                    ) {
-                        needs_sync = true;
-                    }
+                    );
 
                     ui.add_space(2.0); // Spacing
 
                     // XZ Pane
-                    if self.xz_pane.render(
+                    self.xz_pane.render(
                         ui,
                         &mut self.coord,
                         &self.world,
@@ -659,11 +652,8 @@ impl TemplateApp {
                         self.extra_resolutions,
                         segment_outlines_coord,
                         &self.ranges,
-                        should_sync_coords,
                         cell_size,
-                    ) {
-                        needs_sync = true;
-                    }
+                    );
                 });
 
                 ui.add_space(2.0); // Spacing
@@ -671,7 +661,7 @@ impl TemplateApp {
                 // Bottom row
                 ui.horizontal(|ui| {
                     // YZ Pane
-                    if self.yz_pane.render(
+                    self.yz_pane.render(
                         ui,
                         &mut self.coord,
                         &self.world,
@@ -681,11 +671,8 @@ impl TemplateApp {
                         self.extra_resolutions,
                         segment_outlines_coord,
                         &self.ranges,
-                        should_sync_coords,
                         cell_size,
-                    ) {
-                        needs_sync = true;
-                    }
+                    );
 
                     ui.add_space(2.0); // Spacing
 
@@ -701,7 +688,6 @@ impl TemplateApp {
                             self.extra_resolutions,
                             None,
                             &segment_mode.ranges,
-                            false, // UV pane should always allow drag
                             cell_size,
                         ) {
                             needs_sync = true;
@@ -710,7 +696,7 @@ impl TemplateApp {
                 });
             });
 
-            if needs_sync {
+            if self.should_sync_coords() && needs_sync {
                 self.sync_coords();
             }
         });
@@ -729,8 +715,6 @@ impl TemplateApp {
             });
             ui.separator();
 
-            //ui.collapsing("Volumes", |_ui| {});
-            //ui.collapsing("Segments", |ui|
             {
                 let mut clicked = None;
                 self.catalog.scrolls().iter().for_each(|scroll| {
