@@ -1,3 +1,10 @@
+use crate::{
+    downloader::SimpleDownloader,
+    volume::{Volume, VolumeGrid64x4Mapped, VoxelPaintVolume},
+    zarr::{GrayScale, OmeZarrContext, ZarrArray},
+};
+use std::sync::Arc;
+
 #[derive(Copy, Clone, Debug)]
 pub struct Quality {
     pub bit_mask: u8,
@@ -222,5 +229,104 @@ impl VolumeReference for SurfaceVolumeReference {
 
     fn url_path_base(&self) -> String {
         format!("scroll/{}/segment/{}/", self.scroll_id, self.segment_id)
+    }
+}
+
+pub struct VolumeCreationParams {
+    pub cache_dir: String,
+}
+
+pub enum NewVolumeReference {
+    Volume64x4(Arc<dyn VolumeReference>),
+    OmeZarr { id: String, url: String },
+    Zarr { id: String, url: String },
+}
+impl NewVolumeReference {
+    const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
+
+    pub fn id(&self) -> String {
+        match self {
+            NewVolumeReference::Volume64x4(v) => v.id(),
+            NewVolumeReference::OmeZarr { id, .. } => id.clone(),
+            NewVolumeReference::Zarr { id, .. } => id.clone(),
+        }
+    }
+    pub fn label(&self) -> String {
+        match self {
+            NewVolumeReference::Volume64x4(v) => v.label(),
+            NewVolumeReference::OmeZarr { id, .. } => id.clone(),
+            NewVolumeReference::Zarr { id, .. } => id.clone(),
+        }
+    }
+    pub fn volume(&self, params: &VolumeCreationParams) -> Volume {
+        match self {
+            NewVolumeReference::Volume64x4(v) => {
+                let (sender, _) = std::sync::mpsc::channel::<(usize, usize, usize, Quality)>();
+
+                let volume_dir = v.sub_dir(&params.cache_dir);
+
+                let downloader = Box::new(SimpleDownloader::new(
+                    &volume_dir,
+                    Self::TILE_SERVER,
+                    &v.url_path_base(),
+                    None,
+                    sender,
+                    false,
+                ));
+                let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
+                v.into_volume()
+            }
+            NewVolumeReference::OmeZarr { url, .. } => {
+                OmeZarrContext::<GrayScale>::from_url_to_default_cache_dir(url).into_volume()
+            }
+            NewVolumeReference::Zarr { url, .. } => ZarrArray::from_url_to_default_cache_dir(url)
+                .into_ctx()
+                .into_ctx()
+                .into_volume(),
+        }
+    }
+
+    pub fn from_url(url: impl Into<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let url = url.into();
+        let url_trimmed = if url.ends_with('/') {
+            &url[..url.len() - 1]
+        } else {
+            &url
+        };
+
+        fn try_fetch_and_check(base_url: &str, file: &str, content_check: &str) -> Option<String> {
+            let file_url = format!("{}/{}", base_url, file);
+            ehttp::fetch_blocking(&ehttp::Request::get(file_url))
+                .ok()
+                .filter(|response| response.status == 200)
+                .and_then(|response| {
+                    let content = String::from_utf8_lossy(&response.bytes);
+                    if content.contains(content_check) {
+                        Some(content.into_owned())
+                    } else {
+                        None
+                    }
+                })
+        }
+
+        let id = url_trimmed.split('/').last().unwrap_or("unknown").to_string();
+
+        // Try OME-Zarr first
+        if try_fetch_and_check(url_trimmed, ".zattrs", "multiscales").is_some() {
+            return Ok(NewVolumeReference::OmeZarr { id, url: url.clone() });
+        }
+
+        // Try regular Zarr
+        if try_fetch_and_check(url_trimmed, ".zarray", "zarr_format").is_some()
+            || try_fetch_and_check(url_trimmed, ".zarray", "chunks").is_some()
+        {
+            return Ok(NewVolumeReference::Zarr { id, url: url.clone() });
+        }
+
+        Err(format!(
+            "URL {} is neither a valid OME-Zarr nor Zarr array (no .zattrs or .zarray found)",
+            url
+        )
+        .into())
     }
 }
