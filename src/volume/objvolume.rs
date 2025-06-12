@@ -1,4 +1,5 @@
 use super::{Image, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
+use crate::volume::CompositingMode;
 use libm::{pow, sqrt};
 use std::sync::Arc;
 use wavefront_obj::obj::{self, Object, Primitive, Vertex};
@@ -444,6 +445,12 @@ impl PaintVolume for ObjVolume {
         assert!(plane_coord == 2);
 
         let draw_outlines = config.draw_xyz_outlines;
+        let composite = config.compositing.mode != CompositingMode::None;
+        let composite_layers = config.compositing.num_layers as i32 / 2;
+        let composition = match config.compositing.mode {
+            CompositingMode::Max => |a: u8, b: u8| a.max(b),
+            _ => |_, _| 0,
+        };
 
         let real_xyz = if draw_outlines {
             self.convert_to_volume_coords(xyz)
@@ -579,7 +586,6 @@ impl PaintVolume for ObjVolume {
                             "tmin_u: {}, tmax_u: {}, tmin_v: {}, tmax_v: {}",
                             tmin_u, tmax_u, tmin_v, tmax_v
                         ); */
-
                         // TODO: would probably better to operate in paint coordinates instead
                         for v in (tmin_v..=tmax_v).step_by(paint_zoom as usize) {
                             for u in (tmin_u..=tmax_u).step_by(paint_zoom as usize) {
@@ -608,7 +614,7 @@ impl PaintVolume for ObjVolume {
                                         let z =
                                             (w0 as f64 * xyz1.z + w1 as f64 * xyz2.z + w2 as f64 * xyz3.z) * invwsum;
 
-                                        let (nx, ny, nz) = if xyz[2] == 0 {
+                                        let (nx, ny, nz) = if xyz[2] == 0 && !composite {
                                             (0.0, 0.0, 0.0)
                                         } else {
                                             let nxyz1 = &obj.normals[i1.2.unwrap()];
@@ -625,17 +631,40 @@ impl PaintVolume for ObjVolume {
                                             (nx, ny, nz)
                                         };
 
-                                        let x = x + w_factor * nx;
-                                        let y = y + w_factor * ny;
-                                        let z = z + w_factor * nz;
+                                        let value = if !composite {
+                                            let x = x + w_factor * nx;
+                                            let y = y + w_factor * ny;
+                                            let z = z + w_factor * nz;
 
-                                        let value = if config.trilinear_interpolation {
-                                            volume.get_interpolated(
-                                                [x / ffactor, y / ffactor, z / ffactor],
-                                                sfactor as i32,
-                                            )
+                                            if config.trilinear_interpolation {
+                                                volume.get_interpolated(
+                                                    [x / ffactor, y / ffactor, z / ffactor],
+                                                    sfactor as i32,
+                                                )
+                                            } else {
+                                                volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32)
+                                            }
                                         } else {
-                                            volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32)
+                                            let mut value: u8 = 0;
+                                            for w in (xyz[2] - composite_layers)..(xyz[2] + composite_layers) {
+                                                let w_factor = w as f64;
+
+                                                let x = x + w_factor * nx;
+                                                let y = y + w_factor * ny;
+                                                let z = z + w_factor * nz;
+
+                                                let new_value = if config.trilinear_interpolation {
+                                                    volume.get_interpolated(
+                                                        [x / ffactor, y / ffactor, z / ffactor],
+                                                        sfactor as i32,
+                                                    )
+                                                } else {
+                                                    volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32)
+                                                };
+
+                                                value = composition(value, new_value);
+                                            }
+                                            value
                                         };
 
                                         buffer.set_gray(

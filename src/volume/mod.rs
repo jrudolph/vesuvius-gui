@@ -17,6 +17,26 @@ pub use ppmvolume::PPMVolume;
 use std::rc::Rc;
 pub use volume64x4::VolumeGrid64x4Mapped;
 
+#[derive(Copy, Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum CompositingMode {
+    None,
+    Max,
+}
+impl CompositingMode {
+    pub fn label(&self) -> &str {
+        match self {
+            CompositingMode::None => "None",
+            CompositingMode::Max => "Max",
+        }
+    }
+    pub const VALUES: [CompositingMode; 2] = [CompositingMode::None, CompositingMode::Max];
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct CompositingSettings {
+    pub mode: CompositingMode,
+    pub num_layers: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct DrawingConfig {
@@ -29,6 +49,7 @@ pub struct DrawingConfig {
     pub draw_xyz_outlines: bool,
     pub show_segment_outlines: bool,
     pub draw_outline_vertices: bool,
+    pub compositing: CompositingSettings,
 }
 impl DrawingConfig {
     pub fn filters_active(&self) -> bool {
@@ -61,6 +82,10 @@ impl Default for DrawingConfig {
             draw_xyz_outlines: false,
             show_segment_outlines: true,
             draw_outline_vertices: false,
+            compositing: CompositingSettings {
+                mode: CompositingMode::None,
+                num_layers: 6,
+            },
         }
     }
 }

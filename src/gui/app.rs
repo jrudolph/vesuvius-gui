@@ -417,6 +417,7 @@ impl TemplateApp {
                         false,
                         true,
                     );
+
                     has_changed = has_changed || u_sl.changed() || v_sl.changed() || w_sl.changed();
                 }
 
@@ -463,6 +464,34 @@ impl TemplateApp {
                     has_changed = has_changed || cb(ui, "Sync coordinates ('S')", &mut self.sync_coordinates).changed();
 
                     cb(ui, "XYZ outline ('X')", &mut self.drawing_config.draw_xyz_outlines);
+
+                    ui.collapsing("Compositing", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Mode");
+                            // combo box
+                            egui::ComboBox::from_id_salt("Compositing Mode")
+                                .selected_text(self.drawing_config.compositing.mode.label())
+                                .show_ui(ui, |ui| {
+                                    for mode in CompositingMode::VALUES {
+                                        ui.selectable_value(
+                                            &mut self.drawing_config.compositing.mode,
+                                            mode,
+                                            mode.label(),
+                                        );
+                                    }
+                                });
+                            ui.end_row();
+                        });
+
+                        slider(
+                            ui,
+                            "Layers",
+                            &mut self.drawing_config.compositing.num_layers,
+                            1..=10,
+                            false,
+                            self.drawing_config.compositing.mode != CompositingMode::None,
+                        );
+                    });
                 }
 
                 if has_changed {
