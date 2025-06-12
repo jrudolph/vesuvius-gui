@@ -2,7 +2,6 @@ use vesuvius_gui::catalog::load_catalog;
 use vesuvius_gui::gui::{ObjFileConfig, TemplateApp, VesuviusConfig};
 
 use clap::Parser;
-use std::sync::Arc;
 use vesuvius_gui::model::{NewVolumeReference, VolumeReference};
 
 /// Vesuvius GUI, an app to visualize and explore 3D data of the Vesuvius Challenge (https://scrollprize.org)
@@ -59,9 +58,7 @@ impl TryFrom<Args> for VesuviusConfig {
             } else {
                 // Try to find in static volumes
                 if let Some(static_vol) = <dyn VolumeReference>::VOLUMES.iter().find(|v| v.id() == vol_str) {
-                    Some(NewVolumeReference::Volume64x4(Arc::new(
-                        vesuvius_gui::model::DynamicFullVolumeReference::new("unknown".to_string(), static_vol.id()),
-                    )))
+                    Some(NewVolumeReference::Volume64x4(static_vol.owned()))
                 } else {
                     return Err(format!(
                         "Error: Volume {} not found. Use one of:\n{}\n\nOr provide:\n- HTTP URL to zarr/ome-zarr volume\n- Local filesystem path to zarr/ome-zarr directory",

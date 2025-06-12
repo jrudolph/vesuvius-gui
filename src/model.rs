@@ -3,7 +3,6 @@ use crate::{
     volume::{LayersMappedVolume, Volume, VolumeGrid500Mapped, VolumeGrid64x4Mapped, VoxelPaintVolume},
     zarr::{GrayScale, OmeZarrContext, ZarrArray},
 };
-use std::sync::Arc;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Quality {
@@ -22,6 +21,7 @@ pub trait VolumeReference: Send + Sync {
     fn sub_dir(&self, data_dir: &str) -> String;
     fn label(&self) -> String;
     fn url_path_base(&self) -> String;
+    fn owned(&self) -> Box<dyn VolumeReference>;
 }
 impl dyn VolumeReference {
     pub const VOLUMES: [&'static dyn VolumeReference; 25] = [
@@ -63,6 +63,7 @@ impl TryFrom<String> for &'static dyn VolumeReference {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct DynamicFullVolumeReference {
     pub scroll_id: String,
     pub volume: String,
@@ -85,8 +86,12 @@ impl VolumeReference for DynamicFullVolumeReference {
     fn url_path_base(&self) -> String {
         format!("scroll/{}/volume/{}/", self.scroll_id, self.volume)
     }
+    fn owned(&self) -> Box<dyn VolumeReference> {
+        Box::new(self.clone())
+    }
 }
 
+#[derive(Debug, Clone)]
 pub struct FullVolumeReference {
     pub scroll_id: &'static str,
     pub volume: &'static str,
@@ -200,8 +205,12 @@ impl VolumeReference for FullVolumeReference {
     fn url_path_base(&self) -> String {
         format!("scroll/{}/volume/{}/", self.scroll_id, self.volume)
     }
+    fn owned(&self) -> Box<dyn VolumeReference> {
+        Box::new(self.clone())
+    }
 }
 
+#[derive(Debug, Clone)]
 pub struct SurfaceVolumeReference {
     pub scroll_id: u16,
     pub segment_id: &'static str,
@@ -230,6 +239,9 @@ impl VolumeReference for SurfaceVolumeReference {
     fn url_path_base(&self) -> String {
         format!("scroll/{}/segment/{}/", self.scroll_id, self.segment_id)
     }
+    fn owned(&self) -> Box<dyn VolumeReference> {
+        Box::new(self.clone())
+    }
 }
 
 pub struct VolumeCreationParams {
@@ -242,7 +254,7 @@ pub enum VolumeLocation {
 }
 
 pub enum NewVolumeReference {
-    Volume64x4(Arc<dyn VolumeReference>),
+    Volume64x4(Box<dyn VolumeReference>),
     OmeZarr { id: String, location: VolumeLocation },
     Zarr { id: String, location: VolumeLocation },
     Cells { id: String, path: String },

@@ -296,10 +296,7 @@ impl TemplateApp {
     }
 
     fn load_volume_by_ref(&mut self, volume_ref: &dyn VolumeReference) {
-        let new_vol = NewVolumeReference::Volume64x4(std::sync::Arc::new(DynamicFullVolumeReference::new(
-            "unknown".to_string(),
-            volume_ref.id(),
-        )));
+        let new_vol = NewVolumeReference::Volume64x4(volume_ref.owned());
         self.load_volume(&new_vol);
     }
 
