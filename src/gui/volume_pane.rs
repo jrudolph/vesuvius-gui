@@ -59,12 +59,15 @@ impl VolumePane {
         world: &Volume,
         surface_volume: Option<&Rc<dyn SurfaceVolume>>,
         zoom: f32,
-        frame_width: usize,
-        frame_height: usize,
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
         segment_outlines_coord: Option<[i32; 3]>,
     ) -> Response {
+        // Determine available space for this pane
+        let available_size = ui.available_size();
+        let frame_width = available_size.x as usize;
+        let frame_height = available_size.y as usize;
+
         // Get or create texture
         let texture = self.get_or_create_texture(
             ui,
@@ -87,7 +90,7 @@ impl VolumePane {
             zoom / next_smaller_pow_of_2
         };
 
-        // Create and display image
+        // Create and display image using available space but keeping scaling
         let image = Image::new(&texture)
             .max_height(frame_height as f32)
             .max_width(frame_width as f32)

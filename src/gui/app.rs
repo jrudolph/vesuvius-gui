@@ -1,7 +1,7 @@
 use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
-use crate::gui::{VolumePane, PaneType};
+use crate::gui::{PaneType, VolumePane};
 use crate::model::*;
 use crate::volume::*;
 use crate::zarr::ZarrArray;
@@ -20,8 +20,6 @@ use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
-
-const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -87,8 +85,6 @@ pub struct TemplateApp {
     volume_id: usize,
     coord: [i32; 3],
     zoom: f32,
-    frame_width: usize,
-    frame_height: usize,
     data_dir: String,
     #[serde(skip)]
     xy_pane: VolumePane,
@@ -144,8 +140,6 @@ impl Default for TemplateApp {
             volume_id: 0,
             coord: [2800, 2500, 10852],
             zoom: 1f32,
-            frame_width: 1000,
-            frame_height: 1000,
             data_dir: ".".to_string(),
             xy_pane: VolumePane::new(PaneType::XY, false),
             xz_pane: VolumePane::new(PaneType::XZ, false),
@@ -328,7 +322,6 @@ impl TemplateApp {
             self.sync_coords();
         }
     }
-
 
     fn sync_coords(&mut self) {
         if let Some(segment_mode) = self.segment_mode.as_ref() {
@@ -646,14 +639,6 @@ impl TemplateApp {
                 self.clear_textures();
             }
 
-            // use remaining space for image
-            let size = ui.available_size();
-            let new_width = size.x as usize / 2 - 10;
-            let new_height = size.y as usize / 2 - 10;
-
-            self.frame_width = new_width;
-            self.frame_height = new_height;
-
             // Split the rendering logic to avoid borrowing conflicts
             let mut clear_textures = false;
             let mut xy_response = None;
@@ -661,129 +646,177 @@ impl TemplateApp {
             let mut yz_response = None;
             let mut uv_response = None;
 
-            // First render all panes
-            ui.horizontal(|ui| {
-                // Prepare parameters for volume panes
-                let surface_volume = if self.is_segment_mode() {
-                    Some(&self.segment_mode.as_ref().unwrap().surface_volume)
-                } else {
-                    None
-                };
+            // Calculate grid dimensions
+            let available_size = ui.available_size();
+            let cell_width = (available_size.x - 2.0) / 2.0; // Account for spacing
+            let cell_height = (available_size.y - 2.0) / 2.0; // Account for spacing
+            let cell_size = Vec2::new(cell_width, cell_height);
 
-                let segment_outlines_coord = if self.is_segment_mode() {
-                    Some(self.segment_mode.as_ref().unwrap().coord)
-                } else {
-                    None
-                };
+            // Use a proper 2x2 grid layout with explicit sizing
+            ui.vertical(|ui| {
+                // Top row
+                ui.horizontal(|ui| {
+                    // Prepare parameters for volume panes
+                    let surface_volume = if self.is_segment_mode() {
+                        Some(&self.segment_mode.as_ref().unwrap().surface_volume)
+                    } else {
+                        None
+                    };
 
-                // XY Pane
-                xy_response = Some(self.xy_pane.render(
-                    ui,
-                    self.coord,
-                    &self.world,
-                    surface_volume,
-                    self.zoom,
-                    self.frame_width,
-                    self.frame_height,
-                    &self.drawing_config,
-                    self.extra_resolutions,
-                    segment_outlines_coord,
-                ));
+                    let segment_outlines_coord = if self.is_segment_mode() {
+                        Some(self.segment_mode.as_ref().unwrap().coord)
+                    } else {
+                        None
+                    };
 
-                // XZ Pane
-                xz_response = Some(self.xz_pane.render(
-                    ui,
-                    self.coord,
-                    &self.world,
-                    surface_volume,
-                    self.zoom,
-                    self.frame_width,
-                    self.frame_height,
-                    &self.drawing_config,
-                    self.extra_resolutions,
-                    segment_outlines_coord,
-                ));
-            });
-
-            ui.horizontal(|ui| {
-                // Prepare parameters for volume panes
-                let surface_volume = if self.is_segment_mode() {
-                    Some(&self.segment_mode.as_ref().unwrap().surface_volume)
-                } else {
-                    None
-                };
-
-                let segment_outlines_coord = if self.is_segment_mode() {
-                    Some(self.segment_mode.as_ref().unwrap().coord)
-                } else {
-                    None
-                };
-
-                // YZ Pane
-                yz_response = Some(self.yz_pane.render(
-                    ui,
-                    self.coord,
-                    &self.world,
-                    surface_volume,
-                    self.zoom,
-                    self.frame_width,
-                    self.frame_height,
-                    &self.drawing_config,
-                    self.extra_resolutions,
-                    segment_outlines_coord,
-                ));
-
-                // UV Pane (segment mode only)
-                if let Some(segment_mode) = self.segment_mode.as_mut() {
-                    uv_response = Some(segment_mode.uv_pane.render(
-                        ui,
-                        segment_mode.coord,
-                        &segment_mode.world,
-                        Some(&segment_mode.surface_volume),
+                    // XY Pane
+                    let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
+                    let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                    xy_response = Some(self.xy_pane.render(
+                        &mut child_ui,
+                        self.coord,
+                        &self.world,
+                        surface_volume,
                         self.zoom,
-                        self.frame_width,
-                        self.frame_height,
                         &self.drawing_config,
                         self.extra_resolutions,
-                        None,
+                        segment_outlines_coord,
                     ));
-                }
+
+                    ui.add_space(2.0); // Spacing
+
+                    // XZ Pane
+                    let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
+                    let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                    xz_response = Some(self.xz_pane.render(
+                        &mut child_ui,
+                        self.coord,
+                        &self.world,
+                        surface_volume,
+                        self.zoom,
+                        &self.drawing_config,
+                        self.extra_resolutions,
+                        segment_outlines_coord,
+                    ));
+                });
+
+                ui.add_space(2.0); // Spacing
+
+                // Bottom row
+                ui.horizontal(|ui| {
+                    // Prepare parameters for volume panes
+                    let surface_volume = if self.is_segment_mode() {
+                        Some(&self.segment_mode.as_ref().unwrap().surface_volume)
+                    } else {
+                        None
+                    };
+
+                    let segment_outlines_coord = if self.is_segment_mode() {
+                        Some(self.segment_mode.as_ref().unwrap().coord)
+                    } else {
+                        None
+                    };
+
+                    // YZ Pane
+                    let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
+                    let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                    yz_response = Some(self.yz_pane.render(
+                        &mut child_ui,
+                        self.coord,
+                        &self.world,
+                        surface_volume,
+                        self.zoom,
+                        &self.drawing_config,
+                        self.extra_resolutions,
+                        segment_outlines_coord,
+                    ));
+
+                    ui.add_space(2.0); // Spacing
+
+                    // UV Pane (segment mode only)
+                    let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
+                    let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                    if let Some(segment_mode) = self.segment_mode.as_mut() {
+                        uv_response = Some(segment_mode.uv_pane.render(
+                            &mut child_ui,
+                            segment_mode.coord,
+                            &segment_mode.world,
+                            Some(&segment_mode.surface_volume),
+                            self.zoom,
+                            &self.drawing_config,
+                            self.extra_resolutions,
+                            None,
+                        ));
+                    }
+                });
             });
 
             // Now handle all interactions
             if let Some(im_xy) = xy_response {
-                if self.xy_pane.handle_scroll(&im_xy, ui, &mut self.coord, &self.ranges, &mut self.zoom) {
+                if self
+                    .xy_pane
+                    .handle_scroll(&im_xy, ui, &mut self.coord, &self.ranges, &mut self.zoom)
+                {
                     clear_textures = true;
                 }
-                if !self.should_sync_coords() && self.xy_pane.handle_drag(&im_xy, &mut self.coord, &self.ranges, self.zoom) {
+                if !self.should_sync_coords()
+                    && self
+                        .xy_pane
+                        .handle_drag(&im_xy, &mut self.coord, &self.ranges, self.zoom)
+                {
                     clear_textures = true;
                 }
             }
 
             if let Some(im_xz) = xz_response {
-                if self.xz_pane.handle_scroll(&im_xz, ui, &mut self.coord, &self.ranges, &mut self.zoom) {
+                if self
+                    .xz_pane
+                    .handle_scroll(&im_xz, ui, &mut self.coord, &self.ranges, &mut self.zoom)
+                {
                     clear_textures = true;
                 }
-                if !self.should_sync_coords() && self.xz_pane.handle_drag(&im_xz, &mut self.coord, &self.ranges, self.zoom) {
+                if !self.should_sync_coords()
+                    && self
+                        .xz_pane
+                        .handle_drag(&im_xz, &mut self.coord, &self.ranges, self.zoom)
+                {
                     clear_textures = true;
                 }
             }
 
             if let Some(im_yz) = yz_response {
-                if self.yz_pane.handle_scroll(&im_yz, ui, &mut self.coord, &self.ranges, &mut self.zoom) {
+                if self
+                    .yz_pane
+                    .handle_scroll(&im_yz, ui, &mut self.coord, &self.ranges, &mut self.zoom)
+                {
                     clear_textures = true;
                 }
-                if !self.should_sync_coords() && self.yz_pane.handle_drag(&im_yz, &mut self.coord, &self.ranges, self.zoom) {
+                if !self.should_sync_coords()
+                    && self
+                        .yz_pane
+                        .handle_drag(&im_yz, &mut self.coord, &self.ranges, self.zoom)
+                {
                     clear_textures = true;
                 }
             }
 
             if let Some(im_uv) = uv_response {
                 if let Some(segment_mode) = self.segment_mode.as_mut() {
-                    if segment_mode.uv_pane.handle_scroll(&im_uv, ui, &mut segment_mode.coord, &segment_mode.ranges, &mut self.zoom) {
+                    if segment_mode.uv_pane.handle_scroll(
+                        &im_uv,
+                        ui,
+                        &mut segment_mode.coord,
+                        &segment_mode.ranges,
+                        &mut self.zoom,
+                    ) {
                         clear_textures = true;
                     }
-                    if segment_mode.uv_pane.handle_drag(&im_uv, &mut segment_mode.coord, &segment_mode.ranges, self.zoom) {
+                    if segment_mode.uv_pane.handle_drag(
+                        &im_uv,
+                        &mut segment_mode.coord,
+                        &segment_mode.ranges,
+                        self.zoom,
+                    ) {
                         clear_textures = true;
                     }
                 }
