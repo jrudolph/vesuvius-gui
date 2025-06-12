@@ -287,28 +287,19 @@ impl NewVolumeReference {
                 let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
                 v.into_volume()
             }
-            NewVolumeReference::OmeZarr { location, .. } => {
-                match location {
-                    VolumeLocation::RemoteUrl(url) => {
-                        OmeZarrContext::<GrayScale>::from_url_to_default_cache_dir(url).into_volume()
-                    }
-                    VolumeLocation::LocalPath(path) => {
-                        OmeZarrContext::<GrayScale>::from_path(path).into_volume()
-                    }
+            NewVolumeReference::OmeZarr { location, .. } => match location {
+                VolumeLocation::RemoteUrl(url) => {
+                    OmeZarrContext::<GrayScale>::from_url_to_default_cache_dir(url).into_volume()
                 }
-            }
-            NewVolumeReference::Zarr { location, .. } => {
-                match location {
-                    VolumeLocation::RemoteUrl(url) => ZarrArray::from_url_to_default_cache_dir(url)
-                        .into_ctx()
-                        .into_ctx()
-                        .into_volume(),
-                    VolumeLocation::LocalPath(path) => ZarrArray::from_path(path)
-                        .into_ctx()
-                        .into_ctx()
-                        .into_volume(),
-                }
-            }
+                VolumeLocation::LocalPath(path) => OmeZarrContext::<GrayScale>::from_path(path).into_volume(),
+            },
+            NewVolumeReference::Zarr { location, .. } => match location {
+                VolumeLocation::RemoteUrl(url) => ZarrArray::from_url_to_default_cache_dir(url)
+                    .into_ctx()
+                    .into_ctx()
+                    .into_volume(),
+                VolumeLocation::LocalPath(path) => ZarrArray::from_path(path).into_ctx().into_ctx().into_volume(),
+            },
 
             NewVolumeReference::Cells { path, .. } => VolumeGrid500Mapped::from_data_dir(path).into_volume(),
             NewVolumeReference::Layers { path, .. } => LayersMappedVolume::from_data_dir(path).into_volume(),
@@ -359,14 +350,8 @@ impl NewVolumeReference {
         }
 
         let (id, location_str) = match &location {
-            VolumeLocation::RemoteUrl(url) => (
-                url.split('/').last().unwrap_or("unknown").to_string(),
-                url.as_str()
-            ),
-            VolumeLocation::LocalPath(path) => (
-                path.split('/').last().unwrap_or("unknown").to_string(),
-                path.as_str()
-            ),
+            VolumeLocation::RemoteUrl(url) => (url.split('/').last().unwrap_or("unknown").to_string(), url.as_str()),
+            VolumeLocation::LocalPath(path) => (path.split('/').last().unwrap_or("unknown").to_string(), path.as_str()),
         };
 
         // Try OME-Zarr first
@@ -375,10 +360,37 @@ impl NewVolumeReference {
         }
 
         // Try regular Zarr
-        if check_file_content(&location, ".zarray", "zarr_format")
-            || check_file_content(&location, ".zarray", "chunks")
+        if check_file_content(&location, ".zarray", "zarr_format") || check_file_content(&location, ".zarray", "chunks")
         {
             return Ok(NewVolumeReference::Zarr { id, location });
+        }
+
+        // Try probing for cells and layers (only for local paths)
+        if let VolumeLocation::LocalPath(path) = &location {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                let mut contains_cell_files = false;
+                let mut contains_layer_files = false;
+
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        if let Some(name) = entry.path().file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with("cell_yxz_") && name.ends_with(".tif") {
+                                contains_cell_files = true;
+                            }
+                            if regex::Regex::new(r"(\d{5})\.tif").unwrap().captures(name).is_some() {
+                                contains_layer_files = true;
+                            }
+                        }
+                    }
+                }
+
+                if contains_cell_files {
+                    return Ok(NewVolumeReference::Cells { id, path: path.clone() });
+                }
+                if contains_layer_files {
+                    return Ok(NewVolumeReference::Layers { id, path: path.clone() });
+                }
+            }
         }
 
         let location_type = match location {
@@ -387,7 +399,7 @@ impl NewVolumeReference {
         };
 
         Err(format!(
-            "{} {} is neither a valid OME-Zarr nor Zarr array (no .zattrs or .zarray found)",
+            "{} {} is not a valid volume format (no .zattrs, .zarray, cell files, or layer files found)",
             location_type, location_str
         )
         .into())

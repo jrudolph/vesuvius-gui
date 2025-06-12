@@ -28,7 +28,7 @@ pub struct Args {
     #[clap(short, long)]
     overlay: Option<String>,
 
-    /// The id of a volume to open, or URL to a zarr/ome-zarr volume
+    /// The id of a volume to open, URL to a zarr/ome-zarr volume, or local path to zarr/ome-zarr directory
     #[clap(short, long)]
     volume: Option<Option<String>>,
 }
@@ -53,6 +53,9 @@ impl TryFrom<Args> for VesuviusConfig {
             // Try to parse as URL first
             if vol_str.starts_with("http") {
                 Some(NewVolumeReference::from_url(vol_str).map_err(|e| e.to_string())?)
+            } else if std::path::Path::new(&vol_str).exists() {
+                // Try to parse as local path
+                Some(NewVolumeReference::from_path(vol_str).map_err(|e| e.to_string())?)
             } else {
                 // Try to find in static volumes
                 if let Some(static_vol) = <dyn VolumeReference>::VOLUMES.iter().find(|v| v.id() == vol_str) {
@@ -61,7 +64,7 @@ impl TryFrom<Args> for VesuviusConfig {
                     )))
                 } else {
                     return Err(format!(
-                        "Error: Volume {} not found. Use one of\n{}",
+                        "Error: Volume {} not found. Use one of:\n{}\n\nOr provide:\n- HTTP URL to zarr/ome-zarr volume\n- Local filesystem path to zarr/ome-zarr directory",
                         vol_str,
                         <dyn VolumeReference>::VOLUMES
                             .iter()
