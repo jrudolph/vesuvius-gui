@@ -443,6 +443,7 @@ impl PaintVolume for ObjVolume {
         assert!(u_coord == 0);
         assert!(v_coord == 1);
         assert!(plane_coord == 2);
+        self.volume.reset_for_painting();
 
         let draw_outlines = config.draw_xyz_outlines;
         let composite = config.compositing.mode != CompositingMode::None;

@@ -7,7 +7,7 @@ use crate::volume::{PaintVolume, VoxelVolume};
 use blosc::BloscChunk;
 use derive_more::Debug;
 use ehttp::Request;
-use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
+use fxhash::{FxHashMap, FxHashSet};
 use libm::modf;
 pub use ome::OmeZarrContext;
 pub use ome::{ColorScheme, FourColors, GrayScale};
@@ -767,5 +767,8 @@ impl VoxelVolume for ZarrContext<3> {
             (xyz[0] * downsampling as f64) as usize,
         ])
         .unwrap_or(0)
+    }
+    fn reset_for_painting(&self) {
+        self.cache.lock().unwrap().purge_missing();
     }
 }

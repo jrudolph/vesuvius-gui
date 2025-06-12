@@ -91,6 +91,8 @@ impl Default for DrawingConfig {
 }
 
 pub trait VoxelVolume {
+    fn reset_for_painting(&self) {}
+
     fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8;
 
     fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
@@ -247,5 +249,8 @@ impl VoxelVolume for Volume {
     }
     fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
         self.volume.get_interpolated(xyz, downsampling)
+    }
+    fn reset_for_painting(&self) {
+        self.volume.reset_for_painting();
     }
 }

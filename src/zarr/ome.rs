@@ -261,4 +261,9 @@ impl<C: ColorScheme> VoxelVolume for OmeZarrContext<C> {
             scale,
         )
     }
+    fn reset_for_painting(&self) {
+        self.zarr_contexts.iter().for_each(|ctx| {
+            ctx.reset_for_painting();
+        });
+    }
 }
