@@ -860,7 +860,7 @@ impl eframe::App for TemplateApp {
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.visuals_mut().button_frame = false;
-                    ui.toggle_value(&mut self.catalog_panel_open, "📜 Catalog");
+                    ui.toggle_value(&mut self.catalog_panel_open, "📜 (C)atalog");
 
                     fn layout_button(
                         ui: &mut Ui,
@@ -878,12 +878,12 @@ impl eframe::App for TemplateApp {
                     ui.separator();
                     ui.label("Layout");
 
-                    layout_button(ui, &mut self.layout, GuiLayout::Grid, "4x4");
-                    layout_button(ui, &mut self.layout, GuiLayout::XY, "XY");
-                    layout_button(ui, &mut self.layout, GuiLayout::XZ, "XZ");
-                    layout_button(ui, &mut self.layout, GuiLayout::YZ, "YZ");
+                    layout_button(ui, &mut self.layout, GuiLayout::Grid, "4x4 (1)");
+                    layout_button(ui, &mut self.layout, GuiLayout::XY, "XY (2)");
+                    layout_button(ui, &mut self.layout, GuiLayout::XZ, "XZ (3)");
+                    layout_button(ui, &mut self.layout, GuiLayout::YZ, "YZ (4)");
                     if self.is_segment_mode() {
-                        layout_button(ui, &mut self.layout, GuiLayout::UV, "UV");
+                        layout_button(ui, &mut self.layout, GuiLayout::UV, "UV (5)");
                     }
                 });
             });
