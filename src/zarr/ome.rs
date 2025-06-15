@@ -2,11 +2,10 @@
 use super::{ZarrArray, ZarrContext};
 use crate::volume::PaintVolume;
 use crate::volume::VoxelVolume;
+use crate::zarr::default_cache_dir_for_url;
 use egui::Color32;
 use ehttp::Request;
 use serde::Deserialize;
-use sha2::Digest;
-use sha2::Sha256;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OmeMultiScale {
@@ -109,10 +108,8 @@ impl<C: ColorScheme> OmeZarrContext<C> {
         }
     }
     pub fn from_url_to_default_cache_dir(url: &str) -> Self {
-        let canonical_url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
-        let sha256 = format!("{:x}", Sha256::digest(canonical_url.as_bytes()));
-        let local_cache_dir = std::env::temp_dir().join("vesuvius-gui").join(sha256);
-        Self::from_url(url, local_cache_dir.to_str().unwrap())
+        let url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
+        Self::from_url(url, &default_cache_dir_for_url(url))
     }
     pub fn from_path(path: &str) -> Self {
         let attrs = {

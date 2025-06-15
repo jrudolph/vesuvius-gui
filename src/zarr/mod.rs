@@ -328,6 +328,17 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
     }
 }
 
+pub fn default_cache_dir_for_url(url: &str) -> String {
+    let canonical_url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
+    let sha256 = format!("{:x}", Sha256::digest(canonical_url.as_bytes()));
+    std::env::temp_dir()
+        .join("vesuvius-gui")
+        .join(sha256)
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
 impl<const N: usize> ZarrArray<N, u8> {
     fn load_chunk_context(&self, chunk_no: [usize; N]) -> Option<ChunkContext> {
         self.access
@@ -349,7 +360,7 @@ impl<const N: usize> ZarrArray<N, u8> {
         Self::from_access(Arc::new(BlockingRemoteZarrDirectory::new(url, local_cache_dir, client)))
     }
     pub fn from_url_to_default_cache_dir_blocking(url: &str, client: Client) -> Self {
-        Self::from_url_blocking(url, Self::default_cache_dir(&url).as_str(), client)
+        Self::from_url_blocking(url, default_cache_dir_for_url(&url).as_str(), client)
     }
     pub fn from_url(url: &str, local_cache_dir: &str) -> Self {
         //println!("Loading ZarrArray from url: {} to: {} ", url, local_cache_dir);
@@ -360,17 +371,7 @@ impl<const N: usize> ZarrArray<N, u8> {
         }))
     }
     pub fn from_url_to_default_cache_dir(url: &str) -> Self {
-        Self::from_url(url, &Self::default_cache_dir(url))
-    }
-    fn default_cache_dir(url: &str) -> String {
-        let canonical_url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
-        let sha256 = format!("{:x}", Sha256::digest(canonical_url.as_bytes()));
-        std::env::temp_dir()
-            .join("vesuvius-gui")
-            .join(sha256)
-            .to_str()
-            .unwrap()
-            .to_string()
+        Self::from_url(url, &default_cache_dir_for_url(url))
     }
     fn from_access(access: Arc<dyn ZarrFileAccess>) -> Self {
         let def = access.load_array_def();

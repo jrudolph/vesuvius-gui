@@ -1,8 +1,9 @@
 use crate::{
     downloader::SimpleDownloader,
     volume::{LayersMappedVolume, Volume, VolumeGrid500Mapped, VolumeGrid64x4Mapped, VoxelPaintVolume},
-    zarr::{GrayScale, OmeZarrContext, ZarrArray},
+    zarr::{default_cache_dir_for_url, GrayScale, OmeZarrContext, ZarrArray},
 };
+use std::path::Path;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Quality {
@@ -342,6 +343,12 @@ impl NewVolumeReference {
         fn check_file_content(location: &VolumeLocation, file: &str, content_check: &str) -> bool {
             match location {
                 VolumeLocation::RemoteUrl(url) => {
+                    let local_cache_dir = default_cache_dir_for_url(url);
+                    let local_path = format!("{}/{}", local_cache_dir, file);
+                    if Path::new(&local_path).exists() {
+                        return check_file_content(&VolumeLocation::LocalPath(local_cache_dir), file, content_check);
+                    }
+
                     let file_url = format!("{}/{}", url, file);
                     ehttp::fetch_blocking(&ehttp::Request::get(file_url))
                         .ok()
