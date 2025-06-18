@@ -558,15 +558,7 @@ impl ZarrContext<3> {
             self.get_from_cache(chunk_no, idx)
         }
     }
-    /// Get interpolated value at index
     fn get_interpolated(&self, xyz: [f64; 3]) -> Option<u8> {
-        /* if xyz[0] > self.array.def.shape[0] as f64
-            || xyz[1] > self.array.def.shape[1] as f64
-            || xyz[2] > self.array.def.shape[2] as f64
-        {
-            return None; // FIXME: or just return 0?
-        } */
-
         let (dx, x0) = modf(xyz[0]);
         let x0 = x0 as usize;
         let x1 = x0 + 1;
@@ -770,6 +762,14 @@ impl VoxelVolume for ZarrContext<3> {
             (xyz[2] * downsampling as f64) as usize,
             (xyz[1] * downsampling as f64) as usize,
             (xyz[0] * downsampling as f64) as usize,
+        ])
+        .unwrap_or(0)
+    }
+    fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        self.get_interpolated([
+            (xyz[2] * downsampling as f64) as f64,
+            (xyz[1] * downsampling as f64) as f64,
+            (xyz[0] * downsampling as f64) as f64,
         ])
         .unwrap_or(0)
     }
