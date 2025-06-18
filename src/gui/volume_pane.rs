@@ -242,6 +242,10 @@ impl VolumePane {
         });
 
         if let Some(texture) = cached_texture {
+            ui.memory_mut(|mem| {
+                let cache: &mut TextureCache = mem.caches.cache::<TextureCache>();
+                cache.set(cache_key, texture.clone());
+            });
             texture
         } else {
             // Create texture outside of memory lock to avoid deadlock
