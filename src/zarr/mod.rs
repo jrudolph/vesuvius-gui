@@ -6,6 +6,7 @@ mod test;
 use crate::volume::{PaintVolume, VoxelVolume};
 use blosc::BloscChunk;
 use derive_more::Debug;
+use directories::BaseDirs;
 use ehttp::Request;
 use fxhash::{FxHashMap, FxHashSet};
 use libm::modf;
@@ -331,8 +332,11 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
 pub fn default_cache_dir_for_url(url: &str) -> String {
     let canonical_url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
     let sha256 = format!("{:x}", Sha256::digest(canonical_url.as_bytes()));
-    std::env::temp_dir()
+    BaseDirs::new()
+        .unwrap()
+        .cache_dir()
         .join("vesuvius-gui")
+        .join("zarr")
         .join(sha256)
         .to_str()
         .unwrap()
