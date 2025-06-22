@@ -1,17 +1,19 @@
 use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume};
 use egui::cache::FramePublisher;
-use egui::{Image, PointerButton, Response, Ui, Vec2};
+use egui::{PointerButton, Response, Ui, Vec2};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 
 const ZOOM_RES_FACTOR: f32 = 1.3;
+const TILE_SIZE: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct TextureCacheKey {
+struct TileCacheKey {
     pane_type: PaneType,
+    tile_x: i32,
+    tile_y: i32,
     coord: [i32; 3],
     zoom_level: u32, // zoom * 1000 as u32 for discrete levels
-    frame_size: (usize, usize),
     drawing_config: DrawingConfig,
     segment_outlines_coord: Option<[i32; 3]>,
     extra_resolutions: u32,
@@ -19,12 +21,13 @@ struct TextureCacheKey {
     surface_volume_id: Option<usize>,
 }
 
-impl TextureCacheKey {
+impl TileCacheKey {
     fn new(
         pane_type: PaneType,
+        tile_x: i32,
+        tile_y: i32,
         coord: [i32; 3],
         zoom: f32,
-        frame_size: (usize, usize),
         drawing_config: &DrawingConfig,
         segment_outlines_coord: Option<[i32; 3]>,
         extra_resolutions: u32,
@@ -38,11 +41,18 @@ impl TextureCacheKey {
             ptr as *const () as usize
         });
 
+        // For tile caching, we only need the depth coordinate (d_coord)
+        // since tile_x, tile_y already encode the spatial position
+        let (_, _, d_coord) = pane_type.coordinates();
+        let mut cache_coord = [0; 3];
+        cache_coord[d_coord] = coord[d_coord];
+
         Self {
             pane_type,
-            coord,
+            tile_x,
+            tile_y,
+            coord: cache_coord,
             zoom_level,
-            frame_size,
             drawing_config: drawing_config.clone(),
             segment_outlines_coord,
             extra_resolutions,
@@ -52,7 +62,7 @@ impl TextureCacheKey {
     }
 }
 
-type TextureCache = FramePublisher<TextureCacheKey, egui::TextureHandle>;
+type TileCache = FramePublisher<TileCacheKey, egui::TextureHandle>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PaneType {
@@ -95,6 +105,76 @@ impl VolumePane {
         }
     }
 
+    fn calculate_visible_tiles(
+        &self,
+        coord: [i32; 3],
+        zoom: f32,
+        frame_width: usize,
+        frame_height: usize,
+    ) -> Vec<(i32, i32, egui::Rect)> {
+        let (u_coord, v_coord, _) = self.pane_type.coordinates();
+        
+        // Calculate world space viewport dimensions
+        let world_width = frame_width as f32 / zoom;
+        let world_height = frame_height as f32 / zoom;
+        
+        // Calculate viewport bounds in world coordinates
+        let viewport_left = coord[u_coord] as f32 - world_width / 2.0;
+        let viewport_right = coord[u_coord] as f32 + world_width / 2.0;
+        let viewport_top = coord[v_coord] as f32 - world_height / 2.0;
+        let viewport_bottom = coord[v_coord] as f32 + world_height / 2.0;
+        
+        // Calculate tile range
+        let start_tile_x = (viewport_left / TILE_SIZE as f32).floor() as i32;
+        let end_tile_x = (viewport_right / TILE_SIZE as f32).ceil() as i32;
+        let start_tile_y = (viewport_top / TILE_SIZE as f32).floor() as i32;
+        let end_tile_y = (viewport_bottom / TILE_SIZE as f32).ceil() as i32;
+        
+        // Generate tile list with screen positions
+        let mut tiles = Vec::new();
+        for tile_y in start_tile_y..end_tile_y {
+            for tile_x in start_tile_x..end_tile_x {
+                let screen_rect = self.calculate_tile_screen_rect(
+                    tile_x, tile_y, coord, zoom, frame_width, frame_height
+                );
+                tiles.push((tile_x, tile_y, screen_rect));
+            }
+        }
+        tiles
+    }
+
+    fn calculate_tile_screen_rect(
+        &self,
+        tile_x: i32,
+        tile_y: i32,
+        coord: [i32; 3],
+        zoom: f32,
+        frame_width: usize,
+        frame_height: usize,
+    ) -> egui::Rect {
+        let (u_coord, v_coord, _) = self.pane_type.coordinates();
+        
+        // Tile bounds in world coordinates
+        let tile_world_left = tile_x as f32 * TILE_SIZE as f32;
+        let tile_world_right = (tile_x + 1) as f32 * TILE_SIZE as f32;
+        let tile_world_top = tile_y as f32 * TILE_SIZE as f32;
+        let tile_world_bottom = (tile_y + 1) as f32 * TILE_SIZE as f32;
+        
+        // Convert to screen coordinates relative to viewport center
+        let center_x = frame_width as f32 / 2.0;
+        let center_y = frame_height as f32 / 2.0;
+        
+        let screen_left = center_x + (tile_world_left - coord[u_coord] as f32) * zoom;
+        let screen_right = center_x + (tile_world_right - coord[u_coord] as f32) * zoom;
+        let screen_top = center_y + (tile_world_top - coord[v_coord] as f32) * zoom;
+        let screen_bottom = center_y + (tile_world_bottom - coord[v_coord] as f32) * zoom;
+        
+        egui::Rect::from_min_max(
+            egui::pos2(screen_left, screen_top),
+            egui::pos2(screen_right, screen_bottom),
+        )
+    }
+
     pub fn render(
         &self,
         ui: &mut Ui,
@@ -115,8 +195,8 @@ impl VolumePane {
         let frame_width = cell_size.x as usize;
         let frame_height = cell_size.y as usize;
 
-        // Get or create texture
-        let texture = self.get_or_create_texture(
+        // Get or create tiles
+        let tiles = self.get_or_create_tiles(
             ui,
             *coord,
             world,
@@ -129,21 +209,18 @@ impl VolumePane {
             segment_outlines_coord,
         );
 
-        // Calculate scaling for image display
-        let pane_scaling = if *zoom >= 1.0 {
-            *zoom
-        } else {
-            let next_smaller_pow_of_2 = 2.0f32.powf((*zoom as f32).log2().floor());
-            *zoom / next_smaller_pow_of_2
-        };
-
-        // Create and display image using available space but keeping scaling
-        let image = Image::new(&texture)
-            .max_height(frame_height as f32)
-            .max_width(frame_width as f32)
-            .fit_to_original_size(pane_scaling);
-
-        let response = ui.add(image).interact(egui::Sense::drag());
+        // Use a canvas to paint all tiles
+        let (response, painter) = ui.allocate_painter(cell_size, egui::Sense::drag());
+        
+        // Paint all tiles on the canvas
+        for (texture, tile_rect) in tiles {
+            painter.image(
+                texture.id(),
+                tile_rect,
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)),
+                egui::Color32::WHITE,
+            );
+        }
 
         // Handle interactions and return whether textures need clearing
         let mut interaction_happened = false;
@@ -210,7 +287,7 @@ impl VolumePane {
         changed
     }
 
-    fn get_or_create_texture(
+    fn get_or_create_tiles(
         &self,
         ui: &Ui,
         coord: [i32; 3],
@@ -222,12 +299,48 @@ impl VolumePane {
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
         segment_outlines_coord: Option<[i32; 3]>,
+    ) -> Vec<(egui::TextureHandle, egui::Rect)> {
+        let visible_tiles = self.calculate_visible_tiles(coord, zoom, frame_width, frame_height);
+        
+        visible_tiles
+            .into_iter()
+            .map(|(tile_x, tile_y, tile_rect)| {
+                let texture = self.get_or_create_tile(
+                    ui,
+                    tile_x,
+                    tile_y,
+                    coord,
+                    world,
+                    surface_volume,
+                    zoom,
+                    drawing_config,
+                    extra_resolutions,
+                    segment_outlines_coord,
+                );
+                (texture, tile_rect)
+            })
+            .collect()
+    }
+
+    fn get_or_create_tile(
+        &self,
+        ui: &Ui,
+        tile_x: i32,
+        tile_y: i32,
+        coord: [i32; 3],
+        world: &Volume,
+        surface_volume: Option<&Rc<dyn SurfaceVolume>>,
+        zoom: f32,
+        drawing_config: &DrawingConfig,
+        extra_resolutions: u32,
+        segment_outlines_coord: Option<[i32; 3]>,
     ) -> egui::TextureHandle {
-        let cache_key = TextureCacheKey::new(
+        let cache_key = TileCacheKey::new(
             self.pane_type,
+            tile_x,
+            tile_y,
             coord,
             zoom,
-            (frame_width, frame_height),
             drawing_config,
             segment_outlines_coord,
             extra_resolutions,
@@ -235,28 +348,28 @@ impl VolumePane {
             surface_volume,
         );
 
-        // Check if texture exists in cache first
+        // Check if tile exists in cache first
         let cached_texture = ui.memory_mut(|mem| {
-            let cache: &mut TextureCache = mem.caches.cache::<TextureCache>();
+            let cache: &mut TileCache = mem.caches.cache::<TileCache>();
             cache.get(&cache_key).cloned()
         });
 
         if let Some(texture) = cached_texture {
             ui.memory_mut(|mem| {
-                let cache: &mut TextureCache = mem.caches.cache::<TextureCache>();
+                let cache: &mut TileCache = mem.caches.cache::<TileCache>();
                 cache.set(cache_key, texture.clone());
             });
             texture
         } else {
-            // Create texture outside of memory lock to avoid deadlock
-            let texture = self.create_texture(
+            // Create tile outside of memory lock to avoid deadlock
+            let texture = self.create_tile(
                 ui,
+                tile_x,
+                tile_y,
                 coord,
                 world,
                 surface_volume,
                 zoom,
-                frame_width,
-                frame_height,
                 drawing_config,
                 extra_resolutions,
                 segment_outlines_coord,
@@ -264,7 +377,7 @@ impl VolumePane {
 
             // Store in cache
             ui.memory_mut(|mem| {
-                let cache: &mut TextureCache = mem.caches.cache::<TextureCache>();
+                let cache: &mut TileCache = mem.caches.cache::<TileCache>();
                 cache.set(cache_key, texture.clone());
             });
 
@@ -272,15 +385,15 @@ impl VolumePane {
         }
     }
 
-    fn create_texture(
+    fn create_tile(
         &self,
         ui: &Ui,
+        tile_x: i32,
+        tile_y: i32,
         coord: [i32; 3],
         world: &Volume,
         surface_volume: Option<&Rc<dyn SurfaceVolume>>,
         zoom: f32,
-        frame_width: usize,
-        frame_height: usize,
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
         segment_outlines_coord: Option<[i32; 3]>,
@@ -290,19 +403,23 @@ impl VolumePane {
 
         let (u_coord, v_coord, d_coord) = self.pane_type.coordinates();
 
-        let (scaling, paint_zoom) = if zoom >= 1.0 {
-            (zoom, 1 as u8)
-        } else {
-            let next_smaller_pow_of_2 = 2.0f32.powf((zoom as f32).log2().floor());
-            (
-                zoom / next_smaller_pow_of_2,
-                (1.0 / next_smaller_pow_of_2).round() as u8,
-            )
-        };
+        // For tiles, always use fixed TILE_SIZE regardless of scaling
+        // The scaling is handled in the painting process via paint_zoom
+        let tile_width = TILE_SIZE;
+        let tile_height = TILE_SIZE;
+        let paint_zoom = 1u8;
+        let mut image = crate::volume::Image::new(tile_width, tile_height);
 
-        let width = (frame_width as f32 / scaling) as usize;
-        let height = (frame_height as f32 / scaling) as usize;
-        let mut image = crate::volume::Image::new(width, height);
+        // Calculate world coordinates for this tile
+        // Each tile always covers a TILE_SIZE x TILE_SIZE area in world space
+        // regardless of the actual rendered tile size (for consistent tiling)
+        let tile_world_u = tile_x as f32 * TILE_SIZE as f32;
+        let tile_world_v = tile_y as f32 * TILE_SIZE as f32;
+        
+        // Set tile center in world coordinates  
+        let mut tile_coord = coord;
+        tile_coord[u_coord] = (tile_world_u + TILE_SIZE as f32 / 2.0) as i32;
+        tile_coord[v_coord] = (tile_world_v + TILE_SIZE as f32 / 2.0) as i32;
 
         let min_level = (32 - ((ZOOM_RES_FACTOR / zoom) as u32).leading_zeros()).min(4).max(0);
         let max_level: u32 = (min_level + extra_resolutions).min(4);
@@ -310,12 +427,12 @@ impl VolumePane {
         for level in (min_level..=max_level).rev() {
             let sfactor = 1 << level as u8;
             world.paint(
-                coord,
+                tile_coord,
                 u_coord,
                 v_coord,
                 d_coord,
-                width,
-                height,
+                tile_width,
+                tile_height,
                 sfactor,
                 paint_zoom,
                 drawing_config,
@@ -323,35 +440,16 @@ impl VolumePane {
             );
         }
 
-        // Add overlay if enabled and not in segment pane
-        // TODO: Re-enable overlay support after fixing borrow checker issues
-        // if !self.is_segment_pane && show_overlay {
-        //     if let Some(zarr) = overlay {
-        //         zarr.paint(
-        //             coord,
-        //             u_coord,
-        //             v_coord,
-        //             d_coord,
-        //             width,
-        //             height,
-        //             1 << min_level as u8,
-        //             paint_zoom,
-        //             drawing_config,
-        //             &mut image,
-        //         );
-        //     }
-        // }
-
         // Add segment outlines if configured
         if let (Some(surface_vol), Some(outlines_coord)) = (surface_volume, segment_outlines_coord) {
             if !self.is_segment_pane && drawing_config.show_segment_outlines {
                 surface_vol.paint_plane_intersection(
-                    coord,
+                    tile_coord,
                     u_coord,
                     v_coord,
                     d_coord,
-                    width,
-                    height,
+                    tile_width,
+                    tile_height,
                     1,
                     paint_zoom,
                     Some(outlines_coord),
@@ -363,7 +461,7 @@ impl VolumePane {
 
         let image: egui::ColorImage = image.into();
         ui.ctx().load_texture(
-            format!("{}_{}{}{}", self.pane_type.label(), u_coord, v_coord, d_coord),
+            format!("{}_{}_{}_{}", self.pane_type.label(), tile_x, tile_y, coord[d_coord]),
             image,
             Default::default(),
         )
