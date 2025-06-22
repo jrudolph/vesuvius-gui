@@ -3,6 +3,8 @@ use egui::cache::FramePublisher;
 use egui::{PointerButton, Response, Ui, Vec2};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
+use std::sync::Arc;
+use tokio::task::JoinHandle;
 
 const ZOOM_RES_FACTOR: f32 = 1.3;
 const TILE_SIZE: usize = 512;
@@ -32,7 +34,7 @@ impl TileCacheKey {
         segment_outlines_coord: Option<[i32; 3]>,
         extra_resolutions: u32,
         world: &Volume,
-        surface_volume: Option<&Rc<dyn SurfaceVolume>>,
+        surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
     ) -> Self {
         let volume_id = world as *const Volume as usize;
         let surface_volume_id = surface_volume.map(|sv| {
@@ -61,7 +63,12 @@ impl TileCacheKey {
     }
 }
 
-type TileCache = FramePublisher<TileCacheKey, egui::TextureHandle>;
+enum AsyncTexture {
+    Loading(JoinHandle<egui::TextureHandle>),
+    Ready(egui::TextureHandle),
+}
+
+type TileCache = FramePublisher<TileCacheKey, AsyncTexture>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PaneType {
@@ -214,7 +221,7 @@ impl VolumePane {
         ui: &mut Ui,
         coord: &mut [i32; 3],
         world: &Volume,
-        surface_volume: Option<&Rc<dyn SurfaceVolume>>,
+        surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
         zoom: &mut f32,
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
@@ -326,7 +333,7 @@ impl VolumePane {
         ui: &Ui,
         coord: [i32; 3],
         world: &Volume,
-        surface_volume: Option<&Rc<dyn SurfaceVolume>>,
+        surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
         zoom: f32,
         frame_width: usize,
         frame_height: usize,
@@ -335,40 +342,41 @@ impl VolumePane {
         segment_outlines_coord: Option<[i32; 3]>,
     ) -> Vec<(egui::TextureHandle, egui::Rect)> {
         let visible_tiles = self.calculate_visible_tiles(coord, zoom, frame_width, frame_height);
+        let mut ready_tiles = Vec::new();
 
-        visible_tiles
-            .into_iter()
-            .map(|(tile_x, tile_y, tile_rect)| {
-                let texture = self.get_or_create_tile(
-                    ui,
-                    tile_x,
-                    tile_y,
-                    coord,
-                    world,
-                    surface_volume,
-                    zoom,
-                    drawing_config,
-                    extra_resolutions,
-                    segment_outlines_coord,
-                );
-                (texture, tile_rect)
-            })
-            .collect()
+        for (tile_x, tile_y, tile_rect) in visible_tiles {
+            if let Some(texture) = self.get_or_create_tile_async(
+                ui,
+                tile_x,
+                tile_y,
+                coord,
+                world,
+                surface_volume,
+                zoom,
+                drawing_config,
+                extra_resolutions,
+                segment_outlines_coord,
+            ) {
+                ready_tiles.push((texture, tile_rect));
+            }
+        }
+
+        ready_tiles
     }
 
-    fn get_or_create_tile(
+    fn get_or_create_tile_async(
         &self,
         ui: &Ui,
         tile_x: i32,
         tile_y: i32,
         coord: [i32; 3],
         world: &Volume,
-        surface_volume: Option<&Rc<dyn SurfaceVolume>>,
+        surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
         zoom: f32,
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
         segment_outlines_coord: Option<[i32; 3]>,
-    ) -> egui::TextureHandle {
+    ) -> Option<egui::TextureHandle> {
         // Calculate paint_zoom for cache key (same logic as in create_tile)
         let paint_zoom = if zoom >= 1.0 {
             1u8
@@ -391,41 +399,184 @@ impl VolumePane {
             surface_volume,
         );
 
-        // Check if tile exists in cache first
-        let cached_texture = ui.memory_mut(|mem| {
+        // Check if tile exists in cache
+        ui.memory_mut(|mem| {
             let cache: &mut TileCache = mem.caches.cache::<TileCache>();
-            cache.get(&cache_key).cloned()
-        });
 
-        if let Some(texture) = cached_texture {
-            ui.memory_mut(|mem| {
-                let cache: &mut TileCache = mem.caches.cache::<TileCache>();
-                cache.set(cache_key, texture.clone());
-            });
-            texture
-        } else {
-            // Create tile outside of memory lock to avoid deadlock
-            let texture = self.create_tile(
-                ui,
+            match cache.get(&cache_key) {
+                Some(AsyncTexture::Ready(texture)) => {
+                    // Texture is ready, return it and refresh cache
+                    let texture_clone = texture.clone();
+                    cache.set(cache_key, AsyncTexture::Ready(texture_clone.clone()));
+                    Some(texture_clone)
+                }
+                Some(AsyncTexture::Loading(handle)) => {
+                    // Check if future is ready
+                    if handle.is_finished() {
+                        // Future completed, extract the result
+                        match handle.try_join() {
+                            Ok(Ok(texture)) => {
+                                // Store the ready texture and return it
+                                cache.set(cache_key, AsyncTexture::Ready(texture.clone()));
+                                Some(texture)
+                            }
+                            Ok(Err(_)) | Err(_) => None,
+                        }
+                    } else {
+                        // Still loading, refresh the cache entry to keep it alive
+                        let handle_clone = handle.clone();
+                        cache.set(cache_key, AsyncTexture::Loading(handle_clone));
+                        // Request repaint and return None
+                        ui.ctx().request_repaint();
+                        None
+                    }
+                }
+                None => {
+                    // Start async rendering
+                    let handle = self.create_tile_async(
+                        ui.ctx().clone(),
+                        tile_x,
+                        tile_y,
+                        coord,
+                        world.clone(),
+                        surface_volume.cloned(),
+                        zoom,
+                        drawing_config.clone(),
+                        extra_resolutions,
+                        segment_outlines_coord,
+                    );
+
+                    cache.set(cache_key, AsyncTexture::Loading(handle));
+                    // Request repaint to check again later
+                    ui.ctx().request_repaint();
+                    None
+                }
+            }
+        })
+    }
+
+    fn create_tile_async(
+        &self,
+        ctx: egui::Context,
+        tile_x: i32,
+        tile_y: i32,
+        coord: [i32; 3],
+        world: Volume,
+        surface_volume: Option<Arc<dyn SurfaceVolume + Send + Sync>>,
+        zoom: f32,
+        drawing_config: DrawingConfig,
+        extra_resolutions: u32,
+        segment_outlines_coord: Option<[i32; 3]>,
+    ) -> JoinHandle<egui::TextureHandle> {
+        let pane_type = self.pane_type;
+        let is_segment_pane = self.is_segment_pane;
+
+        tokio::task::spawn_blocking(move || {
+            let volume_pane = VolumePane::new(pane_type, is_segment_pane);
+            volume_pane.create_tile_sync(
+                ctx,
                 tile_x,
                 tile_y,
                 coord,
-                world,
-                surface_volume,
+                &world,
+                surface_volume, //.as_ref().map(|sv| sv),
                 zoom,
-                drawing_config,
+                &drawing_config,
                 extra_resolutions,
                 segment_outlines_coord,
+            )
+        })
+    }
+
+    fn create_tile_sync(
+        &self,
+        ctx: egui::Context,
+        tile_x: i32,
+        tile_y: i32,
+        coord: [i32; 3],
+        world: &Volume,
+        surface_volume: Option<Arc<dyn SurfaceVolume + Send + Sync>>,
+        zoom: f32,
+        drawing_config: &DrawingConfig,
+        extra_resolutions: u32,
+        segment_outlines_coord: Option<[i32; 3]>,
+    ) -> egui::TextureHandle {
+        use std::time::Instant;
+        let _start = Instant::now();
+
+        let (u_coord, v_coord, d_coord) = self.pane_type.coordinates();
+
+        // Use integer paint zoom levels like the original code
+        let paint_zoom = if zoom >= 1.0 {
+            1u8
+        } else {
+            // For zoom < 1.0, use integer downsampling
+            let downsample_factor = (1.0 / zoom).ceil() as u8;
+            downsample_factor.clamp(1, 8) // Reasonable limits
+        };
+
+        // Always use fixed tile size - let paint_zoom handle the scaling
+        let tile_width = TILE_SIZE;
+        let tile_height = TILE_SIZE;
+        let mut image = crate::volume::Image::new(tile_width, tile_height);
+
+        // Calculate world coordinates for this tile
+        // When paint_zoom > 1, each tile covers a larger world area
+        let effective_tile_size = TILE_SIZE as f32 * paint_zoom as f32;
+
+        // tile_x corresponds to u_coord, tile_y corresponds to v_coord
+        let tile_world_u = tile_x as f32 * effective_tile_size;
+        let tile_world_v = tile_y as f32 * effective_tile_size;
+
+        // Set tile center in world coordinates for this pane's coordinate system
+        let mut tile_coord = coord;
+        tile_coord[u_coord] = (tile_world_u + effective_tile_size / 2.0) as i32;
+        tile_coord[v_coord] = (tile_world_v + effective_tile_size / 2.0) as i32;
+
+        let min_level = (32 - ((ZOOM_RES_FACTOR / zoom) as u32).leading_zeros()).min(4).max(0);
+        let max_level: u32 = (min_level + extra_resolutions).min(4);
+
+        for level in (min_level..=max_level).rev() {
+            let sfactor = 1 << level as u8;
+            world.paint(
+                tile_coord,
+                u_coord,
+                v_coord,
+                d_coord,
+                tile_width,
+                tile_height,
+                sfactor,
+                paint_zoom,
+                drawing_config,
+                &mut image,
             );
-
-            // Store in cache
-            ui.memory_mut(|mem| {
-                let cache: &mut TileCache = mem.caches.cache::<TileCache>();
-                cache.set(cache_key, texture.clone());
-            });
-
-            texture
         }
+
+        // Add segment outlines if configured
+        if let (Some(surface_vol), Some(outlines_coord)) = (surface_volume, segment_outlines_coord) {
+            if !self.is_segment_pane && drawing_config.show_segment_outlines {
+                surface_vol.paint_plane_intersection(
+                    tile_coord,
+                    u_coord,
+                    v_coord,
+                    d_coord,
+                    tile_width,
+                    tile_height,
+                    1,
+                    paint_zoom,
+                    Some(outlines_coord),
+                    drawing_config,
+                    &mut image,
+                );
+            }
+        }
+
+        let image: egui::ColorImage = image.into();
+        ctx.load_texture(
+            format!("{}_{}_{}_{}", self.pane_type.label(), tile_x, tile_y, coord[d_coord]),
+            image,
+            Default::default(),
+        )
     }
 
     fn create_tile(
@@ -435,7 +586,7 @@ impl VolumePane {
         tile_y: i32,
         coord: [i32; 3],
         world: &Volume,
-        surface_volume: Option<&Rc<dyn SurfaceVolume>>,
+        surface_volume: Option<Arc<dyn SurfaceVolume + Send + Sync>>,
         zoom: f32,
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
