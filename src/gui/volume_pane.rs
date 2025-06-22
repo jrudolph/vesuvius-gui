@@ -13,7 +13,7 @@ struct TileCacheKey {
     tile_x: i32,
     tile_y: i32,
     coord: [i32; 3],
-    zoom_level: u32, // zoom * 1000 as u32 for discrete levels
+    paint_zoom: u8, // The actual paint_zoom level used for rendering
     drawing_config: DrawingConfig,
     segment_outlines_coord: Option<[i32; 3]>,
     extra_resolutions: u32,
@@ -27,14 +27,13 @@ impl TileCacheKey {
         tile_x: i32,
         tile_y: i32,
         coord: [i32; 3],
-        zoom: f32,
+        paint_zoom: u8,
         drawing_config: &DrawingConfig,
         segment_outlines_coord: Option<[i32; 3]>,
         extra_resolutions: u32,
         world: &Volume,
         surface_volume: Option<&Rc<dyn SurfaceVolume>>,
     ) -> Self {
-        let zoom_level = (zoom * 1000.0) as u32;
         let volume_id = world as *const Volume as usize;
         let surface_volume_id = surface_volume.map(|sv| {
             let ptr: *const dyn SurfaceVolume = sv.as_ref();
@@ -52,7 +51,7 @@ impl TileCacheKey {
             tile_x,
             tile_y,
             coord: cache_coord,
-            zoom_level,
+            paint_zoom,
             drawing_config: drawing_config.clone(),
             segment_outlines_coord,
             extra_resolutions,
@@ -114,6 +113,17 @@ impl VolumePane {
     ) -> Vec<(i32, i32, egui::Rect)> {
         let (u_coord, v_coord, _) = self.pane_type.coordinates();
         
+        // Calculate paint_zoom to determine effective tile size
+        let paint_zoom = if zoom >= 1.0 {
+            1u8
+        } else {
+            let downsample_factor = (1.0 / zoom).ceil() as u8;
+            downsample_factor.clamp(1, 8)
+        };
+        
+        // When paint_zoom > 1, the effective tile size in world coordinates is larger
+        let effective_tile_size = TILE_SIZE as f32 * paint_zoom as f32;
+        
         // Calculate world space viewport dimensions
         let world_width = frame_width as f32 / zoom;
         let world_height = frame_height as f32 / zoom;
@@ -124,11 +134,11 @@ impl VolumePane {
         let viewport_top = coord[v_coord] as f32 - world_height / 2.0;
         let viewport_bottom = coord[v_coord] as f32 + world_height / 2.0;
         
-        // Calculate tile range
-        let start_tile_x = (viewport_left / TILE_SIZE as f32).floor() as i32;
-        let end_tile_x = (viewport_right / TILE_SIZE as f32).ceil() as i32;
-        let start_tile_y = (viewport_top / TILE_SIZE as f32).floor() as i32;
-        let end_tile_y = (viewport_bottom / TILE_SIZE as f32).ceil() as i32;
+        // Calculate tile range using effective tile size
+        let start_tile_x = (viewport_left / effective_tile_size).floor() as i32;
+        let end_tile_x = (viewport_right / effective_tile_size).ceil() as i32;
+        let start_tile_y = (viewport_top / effective_tile_size).floor() as i32;
+        let end_tile_y = (viewport_bottom / effective_tile_size).ceil() as i32;
         
         // Generate tile list with screen positions
         let mut tiles = Vec::new();
@@ -154,11 +164,22 @@ impl VolumePane {
     ) -> egui::Rect {
         let (u_coord, v_coord, _) = self.pane_type.coordinates();
         
-        // Tile bounds in world coordinates
-        let tile_world_left = tile_x as f32 * TILE_SIZE as f32;
-        let tile_world_right = (tile_x + 1) as f32 * TILE_SIZE as f32;
-        let tile_world_top = tile_y as f32 * TILE_SIZE as f32;
-        let tile_world_bottom = (tile_y + 1) as f32 * TILE_SIZE as f32;
+        // Calculate paint_zoom to account for scaling
+        let paint_zoom = if zoom >= 1.0 {
+            1u8
+        } else {
+            let downsample_factor = (1.0 / zoom).ceil() as u8;
+            downsample_factor.clamp(1, 8)
+        };
+        
+        // When paint_zoom > 1, the effective tile size in world coordinates is larger
+        let effective_tile_size = TILE_SIZE as f32 * paint_zoom as f32;
+        
+        // Tile bounds in world coordinates using effective tile size
+        let tile_world_left = tile_x as f32 * effective_tile_size;
+        let tile_world_right = (tile_x + 1) as f32 * effective_tile_size;
+        let tile_world_top = tile_y as f32 * effective_tile_size;
+        let tile_world_bottom = (tile_y + 1) as f32 * effective_tile_size;
         
         // Convert to screen coordinates relative to viewport center
         let center_x = frame_width as f32 / 2.0;
@@ -335,12 +356,21 @@ impl VolumePane {
         extra_resolutions: u32,
         segment_outlines_coord: Option<[i32; 3]>,
     ) -> egui::TextureHandle {
+        // Calculate paint_zoom for cache key (same logic as in create_tile)
+        let paint_zoom = if zoom >= 1.0 {
+            1u8
+        } else {
+            // For zoom < 1.0, use integer downsampling
+            let downsample_factor = (1.0 / zoom).ceil() as u8;
+            downsample_factor.clamp(1, 8) // Reasonable limits
+        };
+
         let cache_key = TileCacheKey::new(
             self.pane_type,
             tile_x,
             tile_y,
             coord,
-            zoom,
+            paint_zoom,
             drawing_config,
             segment_outlines_coord,
             extra_resolutions,
@@ -403,23 +433,30 @@ impl VolumePane {
 
         let (u_coord, v_coord, d_coord) = self.pane_type.coordinates();
 
-        // For tiles, always use fixed TILE_SIZE regardless of scaling
-        // The scaling is handled in the painting process via paint_zoom
+        // Use integer paint zoom levels like the original code
+        let paint_zoom = if zoom >= 1.0 {
+            1u8
+        } else {
+            // For zoom < 1.0, use integer downsampling
+            let downsample_factor = (1.0 / zoom).ceil() as u8;
+            downsample_factor.clamp(1, 8) // Reasonable limits
+        };
+
+        // Always use fixed tile size - let paint_zoom handle the scaling
         let tile_width = TILE_SIZE;
         let tile_height = TILE_SIZE;
-        let paint_zoom = 1u8;
         let mut image = crate::volume::Image::new(tile_width, tile_height);
 
-        // Calculate world coordinates for this tile
-        // Each tile always covers a TILE_SIZE x TILE_SIZE area in world space
-        // regardless of the actual rendered tile size (for consistent tiling)
-        let tile_world_u = tile_x as f32 * TILE_SIZE as f32;
-        let tile_world_v = tile_y as f32 * TILE_SIZE as f32;
+        // Calculate world coordinates for this tile  
+        // When paint_zoom > 1, each tile covers a larger world area
+        let effective_tile_size = TILE_SIZE as f32 * paint_zoom as f32;
+        let tile_world_u = tile_x as f32 * effective_tile_size;
+        let tile_world_v = tile_y as f32 * effective_tile_size;
         
         // Set tile center in world coordinates  
         let mut tile_coord = coord;
-        tile_coord[u_coord] = (tile_world_u + TILE_SIZE as f32 / 2.0) as i32;
-        tile_coord[v_coord] = (tile_world_v + TILE_SIZE as f32 / 2.0) as i32;
+        tile_coord[u_coord] = (tile_world_u + effective_tile_size / 2.0) as i32;
+        tile_coord[v_coord] = (tile_world_v + effective_tile_size / 2.0) as i32;
 
         let min_level = (32 - ((ZOOM_RES_FACTOR / zoom) as u32).leading_zeros()).min(4).max(0);
         let max_level: u32 = (min_level + extra_resolutions).min(4);
