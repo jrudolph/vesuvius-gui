@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use super::{ZarrArray, ZarrContext};
 use crate::volume::PaintVolume;
+use crate::volume::VoxelPaintVolume;
 use crate::volume::VoxelVolume;
 use crate::zarr::default_cache_dir_for_url;
 use egui::Color32;
@@ -52,6 +53,7 @@ impl OmeZarrAttrs {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct OmeZarr {
     attrs: OmeZarrAttrs,
 }
@@ -186,7 +188,7 @@ impl<C: ColorScheme> OmeZarrContext<C> {
     }
 }
 
-impl<C: ColorScheme> PaintVolume for OmeZarrContext<C> {
+impl<C: ColorScheme + 'static> PaintVolume for OmeZarrContext<C> {
     fn paint(
         &self,
         xyz: [i32; 3],
@@ -232,6 +234,15 @@ impl<C: ColorScheme> PaintVolume for OmeZarrContext<C> {
                 }
             }
         }
+    }
+    fn shared(&self) -> crate::volume::Volume {
+        OmeZarrContext {
+            ome_zarr: self.ome_zarr.clone(),
+            cache_missing: self.cache_missing,
+            zarr_contexts: self.zarr_contexts.clone(),
+            phantom: std::marker::PhantomData::<C>,
+        }
+        .into_volume()
     }
 }
 

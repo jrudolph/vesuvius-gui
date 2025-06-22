@@ -559,6 +559,9 @@ impl PaintVolume for TileCollectingVolume {
     ) {
         panic!();
     }
+    fn shared(&self) -> Volume {
+        panic!();
+    }
 }
 impl VoxelVolume for TileCollectingVolume {
     fn get(&self, xyz: [f64; 3], _downsampling: i32) -> u8 {

@@ -3,7 +3,7 @@ mod ome;
 #[cfg(test)]
 mod test;
 
-use crate::volume::{PaintVolume, VoxelVolume};
+use crate::volume::{PaintVolume, VoxelPaintVolume, VoxelVolume};
 use blosc::BloscChunk;
 use derive_more::Debug;
 use directories::BaseDirs;
@@ -700,6 +700,20 @@ impl ZarrContext<3> {
     }
 }
 
+impl Clone for ZarrContext<3> {
+    fn clone(&self) -> Self {
+        ZarrContext {
+            array: self.array.clone(),
+            cache_missing: self.cache_missing,
+            cache: self.cache.clone(),
+            state: RefCell::new(ZarrContextState {
+                last_chunk_no: [usize::MAX; 3],
+                last_context: None,
+            }),
+        }
+    }
+}
+
 impl PaintVolume for ZarrContext<3> {
     fn paint(
         &self,
@@ -754,6 +768,10 @@ impl PaintVolume for ZarrContext<3> {
                 }
             }
         }
+    }
+
+    fn shared(&self) -> crate::volume::Volume {
+        self.clone().into_volume()
     }
 }
 impl VoxelVolume for ZarrContext<3> {

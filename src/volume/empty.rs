@@ -1,4 +1,4 @@
-use crate::volume::{PaintVolume, VoxelVolume};
+use crate::volume::{PaintVolume, VoxelPaintVolume, VoxelVolume};
 
 use super::{DrawingConfig, Image, SurfaceVolume};
 
@@ -23,6 +23,9 @@ impl PaintVolume for EmptyVolume {
         _config: &DrawingConfig,
         _buffer: &mut Image,
     ) {
+    }
+    fn shared(&self) -> super::Volume {
+        EmptyVolume {}.into_volume()
     }
 }
 

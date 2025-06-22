@@ -172,6 +172,8 @@ pub trait PaintVolume {
         config: &DrawingConfig,
         buffer: &mut Image,
     );
+
+    fn shared(&self) -> Volume;
 }
 
 pub trait VoxelPaintVolume: PaintVolume + VoxelVolume {
@@ -241,6 +243,10 @@ impl PaintVolume for Volume {
             config,
             buffer,
         );
+    }
+
+    fn shared(&self) -> Volume {
+        self.volume.shared()
     }
 }
 impl VoxelVolume for Volume {

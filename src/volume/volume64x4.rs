@@ -471,4 +471,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
             }
         }
     }
+    fn shared(&self) -> super::Volume {
+        todo!()
+    }
 }

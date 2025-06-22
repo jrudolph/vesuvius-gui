@@ -1,5 +1,5 @@
 use super::{Image, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
-use crate::volume::CompositingMode;
+use crate::volume::{CompositingMode, VoxelPaintVolume};
 use libm::{pow, sqrt};
 use std::sync::Arc;
 use wavefront_obj::obj::{self, Object, Primitive, Vertex};
@@ -710,6 +710,9 @@ impl PaintVolume for ObjVolume {
                 _ => todo!(),
             }
         }
+    }
+    fn shared(&self) -> Volume {
+        self.clone().into_volume()
     }
 }
 
