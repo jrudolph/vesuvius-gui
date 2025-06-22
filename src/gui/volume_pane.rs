@@ -112,7 +112,7 @@ impl VolumePane {
         frame_height: usize,
     ) -> Vec<(i32, i32, egui::Rect)> {
         let (u_coord, v_coord, _) = self.pane_type.coordinates();
-        
+
         // Calculate paint_zoom to determine effective tile size
         let paint_zoom = if zoom >= 1.0 {
             1u8
@@ -120,33 +120,43 @@ impl VolumePane {
             let downsample_factor = (1.0 / zoom).ceil() as u8;
             downsample_factor.clamp(1, 8)
         };
-        
+
         // When paint_zoom > 1, the effective tile size in world coordinates is larger
         let effective_tile_size = TILE_SIZE as f32 * paint_zoom as f32;
-        
+
         // Calculate world space viewport dimensions
         let world_width = frame_width as f32 / zoom;
         let world_height = frame_height as f32 / zoom;
-        
+
         // Calculate viewport bounds in world coordinates
         let viewport_left = coord[u_coord] as f32 - world_width / 2.0;
         let viewport_right = coord[u_coord] as f32 + world_width / 2.0;
         let viewport_top = coord[v_coord] as f32 - world_height / 2.0;
         let viewport_bottom = coord[v_coord] as f32 + world_height / 2.0;
-        
+
+        #[cfg(debug_assertions)]
+        {
+            println!("Pane {:?}: u_coord={}, v_coord={}", self.pane_type, u_coord, v_coord);
+            println!("  coord=[{},{},{}]", coord[0], coord[1], coord[2]);
+            println!(
+                "  viewport: left={:.1}, right={:.1}, top={:.1}, bottom={:.1}",
+                viewport_left, viewport_right, viewport_top, viewport_bottom
+            );
+            println!("  effective_tile_size={:.1}", effective_tile_size);
+        }
+
         // Calculate tile range using effective tile size
         let start_tile_x = (viewport_left / effective_tile_size).floor() as i32;
         let end_tile_x = (viewport_right / effective_tile_size).ceil() as i32;
         let start_tile_y = (viewport_top / effective_tile_size).floor() as i32;
         let end_tile_y = (viewport_bottom / effective_tile_size).ceil() as i32;
-        
+
         // Generate tile list with screen positions
         let mut tiles = Vec::new();
         for tile_y in start_tile_y..end_tile_y {
             for tile_x in start_tile_x..end_tile_x {
-                let screen_rect = self.calculate_tile_screen_rect(
-                    tile_x, tile_y, coord, zoom, frame_width, frame_height
-                );
+                let screen_rect =
+                    self.calculate_tile_screen_rect(tile_x, tile_y, coord, zoom, frame_width, frame_height);
                 tiles.push((tile_x, tile_y, screen_rect));
             }
         }
@@ -163,7 +173,7 @@ impl VolumePane {
         frame_height: usize,
     ) -> egui::Rect {
         let (u_coord, v_coord, _) = self.pane_type.coordinates();
-        
+
         // Calculate paint_zoom to account for scaling
         let paint_zoom = if zoom >= 1.0 {
             1u8
@@ -171,25 +181,28 @@ impl VolumePane {
             let downsample_factor = (1.0 / zoom).ceil() as u8;
             downsample_factor.clamp(1, 8)
         };
-        
+
         // When paint_zoom > 1, the effective tile size in world coordinates is larger
         let effective_tile_size = TILE_SIZE as f32 * paint_zoom as f32;
-        
+
         // Tile bounds in world coordinates using effective tile size
         let tile_world_left = tile_x as f32 * effective_tile_size;
         let tile_world_right = (tile_x + 1) as f32 * effective_tile_size;
         let tile_world_top = tile_y as f32 * effective_tile_size;
         let tile_world_bottom = (tile_y + 1) as f32 * effective_tile_size;
-        
-        // Convert to screen coordinates relative to viewport center
+
+        // Convert to screen coordinates relative to the pane's viewport center
+        // The painter uses coordinates relative to the allocated UI area (0,0 to frame_width,frame_height)
         let center_x = frame_width as f32 / 2.0;
         let center_y = frame_height as f32 / 2.0;
-        
+
+        // Calculate screen position relative to current view center
         let screen_left = center_x + (tile_world_left - coord[u_coord] as f32) * zoom;
         let screen_right = center_x + (tile_world_right - coord[u_coord] as f32) * zoom;
         let screen_top = center_y + (tile_world_top - coord[v_coord] as f32) * zoom;
         let screen_bottom = center_y + (tile_world_bottom - coord[v_coord] as f32) * zoom;
-        
+
+        // Ensure coordinates are within reasonable bounds for the pane
         egui::Rect::from_min_max(
             egui::pos2(screen_left, screen_top),
             egui::pos2(screen_right, screen_bottom),
@@ -209,10 +222,6 @@ impl VolumePane {
         ranges: &[RangeInclusive<i32>; 3],
         cell_size: Vec2,
     ) -> bool {
-        // Allocate exact size for this pane
-        let (rect, _) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
-        let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(rect));
-
         let frame_width = cell_size.x as usize;
         let frame_height = cell_size.y as usize;
 
@@ -230,14 +239,18 @@ impl VolumePane {
             segment_outlines_coord,
         );
 
-        // Use a canvas to paint all tiles
+        // Allocate space for this pane using the proper egui pattern
         let (response, painter) = ui.allocate_painter(cell_size, egui::Sense::drag());
-        
-        // Paint all tiles on the canvas
+
+        // Paint all tiles on the allocated space - tiles should use response.rect coordinate system
         for (texture, tile_rect) in tiles {
+            // Adjust tile_rect to be relative to response.rect
+            let adjusted_rect =
+                egui::Rect::from_min_size(response.rect.min + tile_rect.min.to_vec2(), tile_rect.size());
+
             painter.image(
                 texture.id(),
-                tile_rect,
+                adjusted_rect,
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)),
                 egui::Color32::WHITE,
             );
@@ -322,7 +335,7 @@ impl VolumePane {
         segment_outlines_coord: Option<[i32; 3]>,
     ) -> Vec<(egui::TextureHandle, egui::Rect)> {
         let visible_tiles = self.calculate_visible_tiles(coord, zoom, frame_width, frame_height);
-        
+
         visible_tiles
             .into_iter()
             .map(|(tile_x, tile_y, tile_rect)| {
@@ -447,13 +460,15 @@ impl VolumePane {
         let tile_height = TILE_SIZE;
         let mut image = crate::volume::Image::new(tile_width, tile_height);
 
-        // Calculate world coordinates for this tile  
+        // Calculate world coordinates for this tile
         // When paint_zoom > 1, each tile covers a larger world area
         let effective_tile_size = TILE_SIZE as f32 * paint_zoom as f32;
+
+        // tile_x corresponds to u_coord, tile_y corresponds to v_coord
         let tile_world_u = tile_x as f32 * effective_tile_size;
         let tile_world_v = tile_y as f32 * effective_tile_size;
-        
-        // Set tile center in world coordinates  
+
+        // Set tile center in world coordinates for this pane's coordinate system
         let mut tile_coord = coord;
         tile_coord[u_coord] = (tile_world_u + effective_tile_size / 2.0) as i32;
         tile_coord[v_coord] = (tile_world_v + effective_tile_size / 2.0) as i32;
