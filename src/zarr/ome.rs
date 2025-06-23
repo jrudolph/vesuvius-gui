@@ -207,8 +207,7 @@ impl<C: ColorScheme + 'static + Send + Sync> PaintVolume for OmeZarrContext<C> {
         if !self.cache_missing {
             self.zarr_contexts.iter().for_each(|ctx| {
                 // clean missing entries from cache
-                let mut access = ctx.cache.lock().unwrap();
-                access.purge_missing();
+                ctx.cache.purge_missing();
             });
         }
 

@@ -9,6 +9,7 @@ anyhow          = { version = "1" }
 async-recursion = { version = "1" }
 base64          = { version = "0.22" }
 clap            = { version = "4", features = [ "derive" ] }
+dashmap         = { version = "6" }
 derive_more     = { version = "1", features = [ "debug" ] }
 directories     = { version = "6" }
 eframe          = { version = "0.30", default-features = false, features = [
