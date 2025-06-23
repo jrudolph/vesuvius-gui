@@ -1,14 +1,17 @@
 use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume, VolumeCons};
 use egui::cache::FramePublisher;
-use egui::{PointerButton, Response, Ui, Vec2};
+use egui::{ColorImage, PointerButton, Response, Ui, Vec2};
 use futures::FutureExt;
 use std::ops::{Deref, RangeInclusive};
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 const ZOOM_RES_FACTOR: f32 = 1.3;
-const TILE_SIZE: usize = 512;
+const TILE_SIZE: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TileCacheKey {
@@ -78,14 +81,14 @@ impl HandleHolder {
 impl Drop for HandleHolder {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            handle.abort();
+            //handle.abort();
         }
     }
 }
 
 #[derive(Clone)]
 enum AsyncTexture {
-    Loading(Arc<Mutex<Option<HandleHolder>>>),
+    Loading(Arc<Mutex<Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>>>>),
     Ready(egui::TextureHandle),
 }
 
@@ -440,61 +443,104 @@ impl VolumePane {
                 set(ui, cache_key, AsyncTexture::Ready(texture.clone()));
                 Some(texture)
             }
-            Some(AsyncTexture::Loading(handle_mutex)) => {
-                // Try to check if the task is finished and get the result
-                let mut handle_guard = handle_mutex.lock().unwrap();
+            Some(AsyncTexture::Loading(future_mutex)) => {
+                let mut future_guard = future_mutex.lock().unwrap();
 
-                if let Some(handle) = handle_guard.as_ref() {
-                    if handle.is_finished() {
-                        // Take ownership of the handle to consume it
-                        if let Some(owned_handle) = handle_guard.take() {
-                            // Release the lock before calling now_or_never
-                            drop(handle_guard);
+                // Create a waker that will work properly with tokio futures
+                let waker = futures::task::noop_waker();
+                let mut context = Context::from_waker(&waker);
 
-                            match owned_handle.now_or_never() {
-                                Some(Ok(image)) => {
-                                    let texture = ui.ctx().load_texture(
-                                        format!(
-                                            "{}_{}_{}_{}",
-                                            self.pane_type.label(),
-                                            tile_x,
-                                            tile_y,
-                                            self.pane_type.coordinates().2
-                                        ),
-                                        image,
-                                        Default::default(),
-                                    );
-                                    // Store the ready texture and return it
-                                    set(ui, cache_key, AsyncTexture::Ready(texture.clone()));
-                                    Some(texture)
-                                }
-                                Some(Err(_)) => {
-                                    // Task failed, don't cache anything, let it retry
-                                    println!("Error loading tile ({}, {}): task failed", tile_x, tile_y);
-                                    None
-                                }
-                                None => {
-                                    println!("Error loading tile ({}, {}): task not finished", tile_x, tile_y);
-                                    // This shouldn't happen if is_finished() was true
-                                    ui.ctx().request_repaint();
-                                    None
-                                }
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
+                // Poll the future in a blocking context to get accurate results
+                let poll_result = tokio::task::block_in_place(|| {
+                    /* Handle::current().block_on(async {
+                        Poll::Ready(future_guard.as_mut().await)
+                    }) */
+                    future_guard.as_mut().poll(&mut context)
+                });
+
+                match poll_result {
+                    Poll::Ready(image) => {
+                        println!("Tile ({}, {}) for pane {:?} is ready", tile_x, tile_y, self.pane_type);
+                        let texture = ui.ctx().load_texture(
+                            format!(
+                                "{}_{}_{}_{}",
+                                self.pane_type.label(),
+                                tile_x,
+                                tile_y,
+                                self.pane_type.coordinates().2
+                            ),
+                            image.as_ref().clone(),
+                            Default::default(),
+                        );
+                        // Store the ready texture and return it
+                        drop(future_guard); // Release lock before cache operation
+                        set(ui, cache_key, AsyncTexture::Ready(texture.clone()));
+                        Some(texture)
+                    }
+                    Poll::Pending => {
+                        println!(
+                            "Tile ({}, {}) for pane {:?} is still loading",
+                            tile_x, tile_y, self.pane_type
+                        );
                         // Still loading, refresh cache entry to keep it alive and request repaint
-                        let handle_mutex_clone = handle_mutex.clone();
-                        drop(handle_guard); // Release the lock
-                        set(ui, cache_key, AsyncTexture::Loading(handle_mutex_clone));
+                        let future_clone = future_mutex.clone();
+                        drop(future_guard); // Release lock before cache operation
+                        set(ui, cache_key, AsyncTexture::Loading(future_clone));
                         ui.ctx().request_repaint();
                         None
                     }
+                }
+
+                /* if handle.is_finished() {
+                    /* // Take ownership of the handle to consume it
+                    if let Some(owned_handle) = handle_guard.take() {
+                        // Release the lock before calling now_or_never
+                        drop(handle_guard);
+
+                        match owned_handle.now_or_never() {
+                            Some(Ok(image)) => {
+                                let texture = ui.ctx().load_texture(
+                                    format!(
+                                        "{}_{}_{}_{}",
+                                        self.pane_type.label(),
+                                        tile_x,
+                                        tile_y,
+                                        self.pane_type.coordinates().2
+                                    ),
+                                    image,
+                                    Default::default(),
+                                );
+                                // Store the ready texture and return it
+                                set(ui, cache_key, AsyncTexture::Ready(texture.clone()));
+                                Some(texture)
+                            }
+                            Some(Err(_)) => {
+                                // Task failed, don't cache anything, let it retry
+                                println!("Error loading tile ({}, {}): task failed", tile_x, tile_y);
+                                None
+                            }
+                            None => {
+                                println!("Error loading tile ({}, {}): task not finished", tile_x, tile_y);
+                                // This shouldn't happen if is_finished() was true
+                                ui.ctx().request_repaint();
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    } */
                 } else {
+                    // Still loading, refresh cache entry to keep it alive and request repaint
+                    let handle_mutex_clone = handle_mutex.clone();
+                    drop(handle_guard); // Release the lock
+                    set(ui, cache_key, AsyncTexture::Loading(handle_mutex_clone));
+                    ui.ctx().request_repaint();
+                    None
+                } */
+                /* } else {
                     // Handle was already taken, this shouldn't happen normally
                     None
-                }
+                } */
             }
             None => {
                 // Start async rendering
@@ -511,8 +557,7 @@ impl VolumePane {
                     segment_outlines_coord,
                 );
 
-                let handle_mutex = Arc::new(Mutex::new(Some(HandleHolder { handle: Some(handle) })));
-                set(ui, cache_key, AsyncTexture::Loading(handle_mutex));
+                set(ui, cache_key, AsyncTexture::Loading(handle));
                 // Request repaint to check again later
                 ui.ctx().request_repaint();
                 None
@@ -532,11 +577,11 @@ impl VolumePane {
         drawing_config: DrawingConfig,
         extra_resolutions: u32,
         segment_outlines_coord: Option<[i32; 3]>,
-    ) -> JoinHandle<egui::ColorImage> {
+    ) -> Arc<Mutex<Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>>>> {
         let pane_type = self.pane_type;
         let is_segment_pane = self.is_segment_pane;
 
-        tokio::task::spawn_blocking(move || {
+        let handle = tokio::task::spawn_blocking(move || {
             println!(
                 "Creating tile ({}, {}) for pane {:?} at coord {:?} with zoom {:.2}",
                 tile_x, tile_y, pane_type, coord, zoom
@@ -558,8 +603,22 @@ impl VolumePane {
                 "Finished creating tile ({}, {}) for pane {:?} at coord {:?} with zoom {:.2}",
                 tile_x, tile_y, pane_type, coord, zoom
             );
-            image
-        })
+            Arc::new(image)
+        });
+
+        // Map the JoinError to a default error image and box the future
+        let future: Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>> = Box::pin(async move {
+            match handle.await {
+                Ok(image) => image,
+                Err(_join_error) => {
+                    println!("Error loading tile ({}, {}): task failed", tile_x, tile_y);
+                    // Return a simple error image
+                    Arc::new(egui::ColorImage::example())
+                }
+            }
+        });
+
+        Arc::new(Mutex::new(future))
     }
 
     fn create_tile_sync(
