@@ -20,6 +20,7 @@ use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -35,8 +36,8 @@ pub struct SegmentMode {
     world: Volume,
     // This is the same reference as `world`. We need to add it just because upcasting between SurfaceVolume and VoxelPaintVolume is so hard.
     // TODO: remove when there's a better way to upcast
-    #[serde(skip)]
-    surface_volume: Rc<dyn SurfaceVolume>,
+    //#[serde(skip)]
+    //surface_volume: Rc<dyn SurfaceVolume>,
     #[serde(skip)]
     uv_pane: VolumePane,
     #[serde(skip)]
@@ -53,7 +54,7 @@ impl Default for SegmentMode {
             height: 1000,
             ranges: [0..=1000, 0..=1000, -40..=40],
             world: EmptyVolume {}.into_volume(),
-            surface_volume: Rc::new(EmptyVolume {}),
+            //surface_volume: Rc::new(EmptyVolume {}),
             uv_pane: VolumePane::new(PaneType::UV, true),
             convert_to_world_coords: Box::new(|x| x),
         }
@@ -228,7 +229,7 @@ impl TemplateApp {
             let ppm = PPMVolume::new(segment_file, base);
             let width = ppm.width() as i32;
             let height = ppm.height() as i32;
-            let ppm = Rc::new(ppm);
+            let ppm = Arc::new(ppm);
             let ppm2 = ppm.clone();
             println!("Loaded PPM volume with size {}x{}", width, height);
 
@@ -241,7 +242,7 @@ impl TemplateApp {
             segment.height = height as usize;
             segment.ranges = [0..=width, 0..=height, -40..=40];
             segment.world = Volume::from_ref(ppm.clone());
-            segment.surface_volume = ppm;
+            //segment.surface_volume = ppm;
             segment.convert_to_world_coords = Box::new(move |coord| ppm2.convert_to_world_coords(coord));
 
             self.segment_mode = Some(segment)
@@ -253,7 +254,7 @@ impl TemplateApp {
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
 
-            let volume = Rc::new(obj_volume);
+            let volume = Arc::new(obj_volume);
             let obj2 = volume.clone();
             println!("Loaded Obj volume with size {}x{}", width, height);
 
@@ -266,7 +267,7 @@ impl TemplateApp {
             segment.height = height as usize;
             segment.ranges = [0..=width, 0..=height, -40..=40];
             segment.world = Volume::from_ref(volume.clone());
-            segment.surface_volume = volume;
+            //segment.surface_volume = volume;
             segment.convert_to_world_coords = Box::new(move |coords| obj2.convert_to_volume_coords(coords));
 
             self.segment_mode = Some(segment)
@@ -704,7 +705,7 @@ impl TemplateApp {
             ui,
             &mut self.coord,
             &self.world,
-            self.segment_mode.as_ref().map(|s| &s.surface_volume),
+            //self.segment_mode.as_ref().map(|s| &s.surface_volume),
             &mut self.zoom,
             &self.drawing_config,
             self.extra_resolutions,
@@ -719,7 +720,7 @@ impl TemplateApp {
                 ui,
                 &mut segment_mode.coord,
                 &segment_mode.world,
-                Some(&segment_mode.surface_volume),
+                // Some(&segment_mode.surface_volume),
                 &mut self.zoom,
                 &self.drawing_config,
                 self.extra_resolutions,

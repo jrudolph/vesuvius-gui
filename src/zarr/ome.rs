@@ -4,6 +4,8 @@ use crate::volume::PaintVolume;
 use crate::volume::VoxelPaintVolume;
 use crate::volume::VoxelVolume;
 use crate::zarr::default_cache_dir_for_url;
+use crate::zarr::ome;
+use egui::cache;
 use egui::Color32;
 use ehttp::Request;
 use serde::Deserialize;
@@ -188,7 +190,7 @@ impl<C: ColorScheme> OmeZarrContext<C> {
     }
 }
 
-impl<C: ColorScheme + 'static> PaintVolume for OmeZarrContext<C> {
+impl<C: ColorScheme + 'static + Send + Sync> PaintVolume for OmeZarrContext<C> {
     fn paint(
         &self,
         xyz: [i32; 3],
@@ -235,14 +237,20 @@ impl<C: ColorScheme + 'static> PaintVolume for OmeZarrContext<C> {
             }
         }
     }
-    fn shared(&self) -> crate::volume::Volume {
-        OmeZarrContext {
-            ome_zarr: self.ome_zarr.clone(),
-            cache_missing: self.cache_missing,
-            zarr_contexts: self.zarr_contexts.clone(),
-            phantom: std::marker::PhantomData::<C>,
-        }
-        .into_volume()
+    fn shared(&self) -> crate::volume::VolumeCons {
+        let ome_zarr = self.ome_zarr.clone();
+        let cache_missing = self.cache_missing;
+        let zarr_contexts = self.zarr_contexts.iter().map(|ctx| ctx.shareable()).collect::<Vec<_>>();
+
+        Box::new(move || {
+            OmeZarrContext {
+                ome_zarr: ome_zarr.clone(),
+                cache_missing,
+                zarr_contexts: zarr_contexts.into_iter().map(|ctx| ctx()).collect(),
+                phantom: std::marker::PhantomData::<C>,
+            }
+            .into_volume()
+        })
     }
 }
 

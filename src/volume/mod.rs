@@ -14,7 +14,7 @@ pub use layers::LayersMappedVolume;
 use libm::modf;
 pub use objvolume::{ObjFile, ObjVolume};
 pub use ppmvolume::PPMVolume;
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 pub use volume64x4::VolumeGrid64x4Mapped;
 
 #[derive(Copy, Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
@@ -158,6 +158,8 @@ impl From<Image> for ColorImage {
     }
 }
 
+pub(crate) type VolumeCons = Box<dyn (FnOnce() -> Volume) + Send + Sync>;
+
 pub trait PaintVolume {
     fn paint(
         &self,
@@ -173,7 +175,7 @@ pub trait PaintVolume {
         buffer: &mut Image,
     );
 
-    fn shared(&self) -> Volume;
+    fn shared(&self) -> VolumeCons;
 }
 
 pub trait VoxelPaintVolume: PaintVolume + VoxelVolume {
@@ -205,15 +207,15 @@ pub trait SurfaceVolume: PaintVolume + VoxelVolume {
 
 #[derive(Clone)]
 pub struct Volume {
-    pub volume: Rc<dyn VoxelPaintVolume>,
+    pub volume: Arc<dyn VoxelPaintVolume>,
 }
 impl Volume {
     pub fn new(volume: impl VoxelPaintVolume + 'static) -> Self {
         Self {
-            volume: Rc::new(volume),
+            volume: Arc::new(volume),
         }
     }
-    pub fn from_ref(volume: Rc<dyn VoxelPaintVolume>) -> Self {
+    pub fn from_ref(volume: Arc<dyn VoxelPaintVolume>) -> Self {
         Self { volume }
     }
 }
@@ -245,7 +247,7 @@ impl PaintVolume for Volume {
         );
     }
 
-    fn shared(&self) -> Volume {
+    fn shared(&self) -> VolumeCons {
         self.volume.shared()
     }
 }

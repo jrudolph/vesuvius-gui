@@ -1,9 +1,10 @@
-use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume};
+use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume, VolumeCons};
 use egui::cache::FramePublisher;
 use egui::{PointerButton, Response, Ui, Vec2};
-use std::ops::RangeInclusive;
+use futures::FutureExt;
+use std::ops::{Deref, RangeInclusive};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 
 const ZOOM_RES_FACTOR: f32 = 1.3;
@@ -20,7 +21,7 @@ struct TileCacheKey {
     segment_outlines_coord: Option<[i32; 3]>,
     extra_resolutions: u32,
     volume_id: usize,
-    surface_volume_id: Option<usize>,
+    //surface_volume_id: Option<usize>,
 }
 
 impl TileCacheKey {
@@ -34,13 +35,13 @@ impl TileCacheKey {
         segment_outlines_coord: Option<[i32; 3]>,
         extra_resolutions: u32,
         world: &Volume,
-        surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
+        //surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
     ) -> Self {
         let volume_id = world as *const Volume as usize;
-        let surface_volume_id = surface_volume.map(|sv| {
+        /* let surface_volume_id = surface_volume.map(|sv| {
             let ptr: *const dyn SurfaceVolume = sv.as_ref();
             ptr as *const () as usize
-        });
+        }); */
 
         // For tile caching, we only need the depth coordinate (d_coord)
         // since tile_x, tile_y already encode the spatial position
@@ -58,13 +59,33 @@ impl TileCacheKey {
             segment_outlines_coord,
             extra_resolutions,
             volume_id,
-            surface_volume_id,
+            //surface_volume_id,
         }
     }
 }
 
+struct HandleHolder {
+    handle: Option<JoinHandle<egui::ColorImage>>,
+}
+impl HandleHolder {
+    fn is_finished(&self) -> bool {
+        self.handle.as_ref().map_or(false, |h| h.is_finished())
+    }
+    fn now_or_never(mut self) -> Option<Result<egui::ColorImage, tokio::task::JoinError>> {
+        self.handle.take().unwrap().now_or_never()
+    }
+}
+impl Drop for HandleHolder {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+#[derive(Clone)]
 enum AsyncTexture {
-    Loading(JoinHandle<egui::TextureHandle>),
+    Loading(Arc<Mutex<Option<HandleHolder>>>),
     Ready(egui::TextureHandle),
 }
 
@@ -221,7 +242,7 @@ impl VolumePane {
         ui: &mut Ui,
         coord: &mut [i32; 3],
         world: &Volume,
-        surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
+        //surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
         zoom: &mut f32,
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
@@ -237,7 +258,7 @@ impl VolumePane {
             ui,
             *coord,
             world,
-            surface_volume,
+            //surface_volume,
             *zoom,
             frame_width,
             frame_height,
@@ -333,7 +354,7 @@ impl VolumePane {
         ui: &Ui,
         coord: [i32; 3],
         world: &Volume,
-        surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
+        //surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
         zoom: f32,
         frame_width: usize,
         frame_height: usize,
@@ -351,7 +372,7 @@ impl VolumePane {
                 tile_y,
                 coord,
                 world,
-                surface_volume,
+                //surface_volume,
                 zoom,
                 drawing_config,
                 extra_resolutions,
@@ -371,7 +392,7 @@ impl VolumePane {
         tile_y: i32,
         coord: [i32; 3],
         world: &Volume,
-        surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
+        //surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
         zoom: f32,
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
@@ -396,63 +417,107 @@ impl VolumePane {
             segment_outlines_coord,
             extra_resolutions,
             world,
-            surface_volume,
+            //surface_volume,
         );
 
         // Check if tile exists in cache
-        ui.memory_mut(|mem| {
+        let cached_value = ui.memory_mut(|mem| {
             let cache: &mut TileCache = mem.caches.cache::<TileCache>();
 
-            match cache.get(&cache_key) {
-                Some(AsyncTexture::Ready(texture)) => {
-                    // Texture is ready, return it and refresh cache
-                    let texture_clone = texture.clone();
-                    cache.set(cache_key, AsyncTexture::Ready(texture_clone.clone()));
-                    Some(texture_clone)
-                }
-                Some(AsyncTexture::Loading(handle)) => {
-                    // Check if future is ready
+            // Clone the cached value to avoid borrow conflicts
+            cache.get(&cache_key).cloned()
+        });
+        fn set(ui: &Ui, key: TileCacheKey, value: AsyncTexture) {
+            ui.memory_mut(|mem| {
+                let cache: &mut TileCache = mem.caches.cache::<TileCache>();
+                cache.set(key, value);
+            });
+        }
+
+        match cached_value {
+            Some(AsyncTexture::Ready(texture)) => {
+                // Texture is ready, return it and refresh cache
+                set(ui, cache_key, AsyncTexture::Ready(texture.clone()));
+                Some(texture)
+            }
+            Some(AsyncTexture::Loading(handle_mutex)) => {
+                // Try to check if the task is finished and get the result
+                let mut handle_guard = handle_mutex.lock().unwrap();
+
+                if let Some(handle) = handle_guard.as_ref() {
                     if handle.is_finished() {
-                        // Future completed, extract the result
-                        match handle.try_join() {
-                            Ok(Ok(texture)) => {
-                                // Store the ready texture and return it
-                                cache.set(cache_key, AsyncTexture::Ready(texture.clone()));
-                                Some(texture)
+                        // Take ownership of the handle to consume it
+                        if let Some(owned_handle) = handle_guard.take() {
+                            // Release the lock before calling now_or_never
+                            drop(handle_guard);
+
+                            match owned_handle.now_or_never() {
+                                Some(Ok(image)) => {
+                                    let texture = ui.ctx().load_texture(
+                                        format!(
+                                            "{}_{}_{}_{}",
+                                            self.pane_type.label(),
+                                            tile_x,
+                                            tile_y,
+                                            self.pane_type.coordinates().2
+                                        ),
+                                        image,
+                                        Default::default(),
+                                    );
+                                    // Store the ready texture and return it
+                                    set(ui, cache_key, AsyncTexture::Ready(texture.clone()));
+                                    Some(texture)
+                                }
+                                Some(Err(_)) => {
+                                    // Task failed, don't cache anything, let it retry
+                                    println!("Error loading tile ({}, {}): task failed", tile_x, tile_y);
+                                    None
+                                }
+                                None => {
+                                    println!("Error loading tile ({}, {}): task not finished", tile_x, tile_y);
+                                    // This shouldn't happen if is_finished() was true
+                                    ui.ctx().request_repaint();
+                                    None
+                                }
                             }
-                            Ok(Err(_)) | Err(_) => None,
+                        } else {
+                            None
                         }
                     } else {
-                        // Still loading, refresh the cache entry to keep it alive
-                        let handle_clone = handle.clone();
-                        cache.set(cache_key, AsyncTexture::Loading(handle_clone));
-                        // Request repaint and return None
+                        // Still loading, refresh cache entry to keep it alive and request repaint
+                        let handle_mutex_clone = handle_mutex.clone();
+                        drop(handle_guard); // Release the lock
+                        set(ui, cache_key, AsyncTexture::Loading(handle_mutex_clone));
                         ui.ctx().request_repaint();
                         None
                     }
-                }
-                None => {
-                    // Start async rendering
-                    let handle = self.create_tile_async(
-                        ui.ctx().clone(),
-                        tile_x,
-                        tile_y,
-                        coord,
-                        world.clone(),
-                        surface_volume.cloned(),
-                        zoom,
-                        drawing_config.clone(),
-                        extra_resolutions,
-                        segment_outlines_coord,
-                    );
-
-                    cache.set(cache_key, AsyncTexture::Loading(handle));
-                    // Request repaint to check again later
-                    ui.ctx().request_repaint();
+                } else {
+                    // Handle was already taken, this shouldn't happen normally
                     None
                 }
             }
-        })
+            None => {
+                // Start async rendering
+                let handle = self.create_tile_async(
+                    ui.ctx().clone(),
+                    tile_x,
+                    tile_y,
+                    coord,
+                    world.shared(),
+                    //surface_volume.cloned(),
+                    zoom,
+                    drawing_config.clone(),
+                    extra_resolutions,
+                    segment_outlines_coord,
+                );
+
+                let handle_mutex = Arc::new(Mutex::new(Some(HandleHolder { handle: Some(handle) })));
+                set(ui, cache_key, AsyncTexture::Loading(handle_mutex));
+                // Request repaint to check again later
+                ui.ctx().request_repaint();
+                None
+            }
+        }
     }
 
     fn create_tile_async(
@@ -461,30 +526,39 @@ impl VolumePane {
         tile_x: i32,
         tile_y: i32,
         coord: [i32; 3],
-        world: Volume,
-        surface_volume: Option<Arc<dyn SurfaceVolume + Send + Sync>>,
+        world: VolumeCons,
+        //surface_volume: Option<Arc<dyn SurfaceVolume + Send + Sync>>,
         zoom: f32,
         drawing_config: DrawingConfig,
         extra_resolutions: u32,
         segment_outlines_coord: Option<[i32; 3]>,
-    ) -> JoinHandle<egui::TextureHandle> {
+    ) -> JoinHandle<egui::ColorImage> {
         let pane_type = self.pane_type;
         let is_segment_pane = self.is_segment_pane;
 
         tokio::task::spawn_blocking(move || {
+            println!(
+                "Creating tile ({}, {}) for pane {:?} at coord {:?} with zoom {:.2}",
+                tile_x, tile_y, pane_type, coord, zoom
+            );
             let volume_pane = VolumePane::new(pane_type, is_segment_pane);
-            volume_pane.create_tile_sync(
+            let image = volume_pane.create_tile_sync(
                 ctx,
                 tile_x,
                 tile_y,
                 coord,
-                &world,
-                surface_volume, //.as_ref().map(|sv| sv),
+                &world(),
+                //surface_volume, //.as_ref().map(|sv| sv),
                 zoom,
                 &drawing_config,
                 extra_resolutions,
                 segment_outlines_coord,
-            )
+            );
+            println!(
+                "Finished creating tile ({}, {}) for pane {:?} at coord {:?} with zoom {:.2}",
+                tile_x, tile_y, pane_type, coord, zoom
+            );
+            image
         })
     }
 
@@ -495,12 +569,12 @@ impl VolumePane {
         tile_y: i32,
         coord: [i32; 3],
         world: &Volume,
-        surface_volume: Option<Arc<dyn SurfaceVolume + Send + Sync>>,
+        //surface_volume: Option<Arc<dyn SurfaceVolume + Send + Sync>>,
         zoom: f32,
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
         segment_outlines_coord: Option<[i32; 3]>,
-    ) -> egui::TextureHandle {
+    ) -> egui::ColorImage {
         use std::time::Instant;
         let _start = Instant::now();
 
@@ -553,7 +627,7 @@ impl VolumePane {
         }
 
         // Add segment outlines if configured
-        if let (Some(surface_vol), Some(outlines_coord)) = (surface_volume, segment_outlines_coord) {
+        /* if let (Some(surface_vol), Some(outlines_coord)) = (surface_volume, segment_outlines_coord) {
             if !self.is_segment_pane && drawing_config.show_segment_outlines {
                 surface_vol.paint_plane_intersection(
                     tile_coord,
@@ -569,14 +643,10 @@ impl VolumePane {
                     &mut image,
                 );
             }
-        }
+        } */
 
         let image: egui::ColorImage = image.into();
-        ctx.load_texture(
-            format!("{}_{}_{}_{}", self.pane_type.label(), tile_x, tile_y, coord[d_coord]),
-            image,
-            Default::default(),
-        )
+        image
     }
 
     fn create_tile(

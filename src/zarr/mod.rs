@@ -18,6 +18,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;
+use std::sync::RwLock;
 use std::{
     ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
@@ -698,6 +699,21 @@ impl ZarrContext<3> {
             }
         }
     }
+    fn shareable(&self) -> Box<dyn (FnOnce() -> ZarrContext<3>) + Send + Sync> {
+        let array = self.array.clone();
+        let cache = self.cache.clone();
+        let cache_missing = self.cache_missing;
+        Box::new(move || ZarrContext {
+            array,
+            cache_missing,
+            cache,
+            state: ZarrContextState {
+                last_chunk_no: [usize::MAX; 3],
+                last_context: None,
+            }
+            .into(),
+        })
+    }
 }
 
 impl Clone for ZarrContext<3> {
@@ -706,10 +722,11 @@ impl Clone for ZarrContext<3> {
             array: self.array.clone(),
             cache_missing: self.cache_missing,
             cache: self.cache.clone(),
-            state: RefCell::new(ZarrContextState {
+            state: ZarrContextState {
                 last_chunk_no: [usize::MAX; 3],
                 last_context: None,
-            }),
+            }
+            .into(),
         }
     }
 }
@@ -770,8 +787,23 @@ impl PaintVolume for ZarrContext<3> {
         }
     }
 
-    fn shared(&self) -> crate::volume::Volume {
-        self.clone().into_volume()
+    fn shared(&self) -> crate::volume::VolumeCons {
+        let array = self.array.clone();
+        let cache = self.cache.clone();
+        let cache_missing = self.cache_missing;
+        Box::new(move || {
+            ZarrContext {
+                array,
+                cache_missing,
+                cache,
+                state: ZarrContextState {
+                    last_chunk_no: [usize::MAX; 3],
+                    last_context: None,
+                }
+                .into(),
+            }
+            .into_volume()
+        })
     }
 }
 impl VoxelVolume for ZarrContext<3> {

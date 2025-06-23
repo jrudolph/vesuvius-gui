@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug)]
@@ -96,7 +96,7 @@ impl State {
 pub struct VolumeGrid64x4Mapped {
     data_dir: String,
     downloader: Box<dyn Downloader>,
-    state: RefCell<State>,
+    state: RwLock<State>,
 }
 impl VolumeGrid64x4Mapped {
     fn map_for(data_dir: &str, x: usize, y: usize, z: usize, quality: Quality) -> Option<TileState> {
@@ -123,7 +123,7 @@ impl VolumeGrid64x4Mapped {
     }
 
     pub(crate) fn try_loading_tile(&self, x: usize, y: usize, z: usize, quality: Quality) -> Rc<TileState> {
-        self.state.borrow_mut().try_loading_tile(&self, x, y, z, quality)
+        self.state.write().unwrap().try_loading_tile(&self, x, y, z, quality)
     }
 
     pub fn from_data_dir(data_dir: &str, downloader: Box<dyn Downloader>) -> VolumeGrid64x4Mapped {
@@ -147,7 +147,7 @@ impl VolumeGrid64x4Mapped {
         let tile_y = y / 64;
         let tile_z = z / 64;
         let key = (tile_x, tile_y, tile_z, downsampling as usize);
-        if key != self.state.borrow().last_tile_key {
+        if key != self.state.read().unwrap().last_tile_key {
             let tile = self.try_loading_tile(
                 tile_x,
                 tile_y,
@@ -157,16 +157,16 @@ impl VolumeGrid64x4Mapped {
                     bit_mask: 0xff,
                 },
             );
-            let mut state = self.state.borrow_mut();
+            let mut state = self.state.write().unwrap();
             state.last_tile_key = key;
             state.last_tile = Rc::downgrade(&tile);
             Some(tile)
         } else {
-            self.state.borrow().last_tile.upgrade()
+            self.state.read().unwrap().last_tile.upgrade()
         }
     }
     fn drop_last_cached(&self) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.write().unwrap();
         state.last_tile_key = (0, 0, 0, 0);
         state.last_tile = Weak::new();
     }
@@ -471,7 +471,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
             }
         }
     }
-    fn shared(&self) -> super::Volume {
+    fn shared(&self) -> super::VolumeCons {
         todo!()
     }
 }

@@ -99,7 +99,8 @@ impl TryFrom<Args> for VesuviusConfig {
 
 // When compiling natively:
 #[cfg(not(target_arch = "wasm32"))]
-fn main() -> eframe::Result<()> {
+#[tokio::main]
+async fn main() -> eframe::Result<()> {
     let args = Args::parse();
     let catalog = load_catalog();
 

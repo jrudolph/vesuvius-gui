@@ -34,7 +34,7 @@ impl<T: VoxelVolume + AutoPaintVolume> PaintVolume for T {
             }
         }
     }
-    fn shared(&self) -> super::Volume {
+    fn shared(&self) -> super::VolumeCons {
         todo!()
     }
 }

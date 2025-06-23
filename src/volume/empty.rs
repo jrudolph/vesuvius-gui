@@ -24,8 +24,8 @@ impl PaintVolume for EmptyVolume {
         _buffer: &mut Image,
     ) {
     }
-    fn shared(&self) -> super::Volume {
-        EmptyVolume {}.into_volume()
+    fn shared(&self) -> super::VolumeCons {
+        Box::new(|| EmptyVolume {}.into_volume())
     }
 }
 

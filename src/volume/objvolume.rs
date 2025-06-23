@@ -711,8 +711,21 @@ impl PaintVolume for ObjVolume {
             }
         }
     }
-    fn shared(&self) -> Volume {
-        self.clone().into_volume()
+    fn shared(&self) -> super::VolumeCons {
+        let obj = self.obj.clone();
+        let width = self.width;
+        let height = self.height;
+        let volume = self.volume.shared();
+
+        Box::new(move || {
+            ObjVolume {
+                volume: volume(),
+                obj,
+                width,
+                height,
+            }
+            .into_volume()
+        })
     }
 }
 
