@@ -184,8 +184,8 @@ impl VolumePane {
 
         // Generate tile list with screen positions
         let mut tiles = Vec::new();
-        for tile_y in start_tile_y..end_tile_y {
-            for tile_x in start_tile_x..end_tile_x {
+        for tile_y in start_tile_y - 1..end_tile_y + 1 {
+            for tile_x in start_tile_x - 1..end_tile_x + 1 {
                 let screen_rect =
                     self.calculate_tile_screen_rect(tile_x, tile_y, coord, zoom, frame_width, frame_height);
                 tiles.push((tile_x, tile_y, screen_rect));
