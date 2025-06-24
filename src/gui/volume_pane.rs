@@ -545,7 +545,6 @@ impl VolumePane {
             None => {
                 // Start async rendering
                 let handle = self.create_tile_async(
-                    ui.ctx().clone(),
                     tile_x,
                     tile_y,
                     coord,
@@ -567,7 +566,6 @@ impl VolumePane {
 
     fn create_tile_async(
         &self,
-        ctx: egui::Context,
         tile_x: i32,
         tile_y: i32,
         coord: [i32; 3],
@@ -588,7 +586,6 @@ impl VolumePane {
             );
             let volume_pane = VolumePane::new(pane_type, is_segment_pane);
             let image = volume_pane.create_tile_sync(
-                ctx,
                 tile_x,
                 tile_y,
                 coord,
@@ -623,7 +620,6 @@ impl VolumePane {
 
     fn create_tile_sync(
         &self,
-        ctx: egui::Context,
         tile_x: i32,
         tile_y: i32,
         coord: [i32; 3],
@@ -706,96 +702,5 @@ impl VolumePane {
 
         let image: egui::ColorImage = image.into();
         image
-    }
-
-    fn create_tile(
-        &self,
-        ui: &Ui,
-        tile_x: i32,
-        tile_y: i32,
-        coord: [i32; 3],
-        world: &Volume,
-        surface_volume: Option<Arc<dyn SurfaceVolume + Send + Sync>>,
-        zoom: f32,
-        drawing_config: &DrawingConfig,
-        extra_resolutions: u32,
-        segment_outlines_coord: Option<[i32; 3]>,
-    ) -> egui::TextureHandle {
-        use std::time::Instant;
-        let _start = Instant::now();
-
-        let (u_coord, v_coord, d_coord) = self.pane_type.coordinates();
-
-        // Use integer paint zoom levels like the original code
-        let paint_zoom = if zoom >= 1.0 {
-            1u8
-        } else {
-            // For zoom < 1.0, use integer downsampling
-            let downsample_factor = (1.0 / zoom).ceil() as u8;
-            downsample_factor.clamp(1, 8) // Reasonable limits
-        };
-
-        // Always use fixed tile size - let paint_zoom handle the scaling
-        let tile_width = TILE_SIZE;
-        let tile_height = TILE_SIZE;
-        let mut image = crate::volume::Image::new(tile_width, tile_height);
-
-        // Calculate world coordinates for this tile
-        // When paint_zoom > 1, each tile covers a larger world area
-        let effective_tile_size = TILE_SIZE as f32 * paint_zoom as f32;
-
-        // tile_x corresponds to u_coord, tile_y corresponds to v_coord
-        let tile_world_u = tile_x as f32 * effective_tile_size;
-        let tile_world_v = tile_y as f32 * effective_tile_size;
-
-        // Set tile center in world coordinates for this pane's coordinate system
-        let mut tile_coord = coord;
-        tile_coord[u_coord] = (tile_world_u + effective_tile_size / 2.0) as i32;
-        tile_coord[v_coord] = (tile_world_v + effective_tile_size / 2.0) as i32;
-
-        let min_level = (32 - ((ZOOM_RES_FACTOR / zoom) as u32).leading_zeros()).min(4).max(0);
-        let max_level: u32 = (min_level + extra_resolutions).min(4);
-
-        for level in (min_level..=max_level).rev() {
-            let sfactor = 1 << level as u8;
-            world.paint(
-                tile_coord,
-                u_coord,
-                v_coord,
-                d_coord,
-                tile_width,
-                tile_height,
-                sfactor,
-                paint_zoom,
-                drawing_config,
-                &mut image,
-            );
-        }
-
-        // Add segment outlines if configured
-        if let (Some(surface_vol), Some(outlines_coord)) = (surface_volume, segment_outlines_coord) {
-            if !self.is_segment_pane && drawing_config.show_segment_outlines {
-                surface_vol.paint_plane_intersection(
-                    tile_coord,
-                    u_coord,
-                    v_coord,
-                    d_coord,
-                    tile_width,
-                    tile_height,
-                    1,
-                    paint_zoom,
-                    Some(outlines_coord),
-                    drawing_config,
-                    &mut image,
-                );
-            }
-        }
-
-        let image: egui::ColorImage = image.into();
-        ui.ctx().load_texture(
-            format!("{}_{}_{}_{}", self.pane_type.label(), tile_x, tile_y, coord[d_coord]),
-            image,
-            Default::default(),
-        )
     }
 }
