@@ -1,11 +1,11 @@
 use image::{ImageBuffer, Rgb};
 use rayon::prelude::*;
 use serde::de::value;
-use std::path::Path;
 use std::sync::Mutex;
+use std::{path::Path, sync::Arc};
 use vesuvius_gui::{
     model::{NewVolumeReference, VolumeCreationParams, VolumeReference},
-    volume::{VoxelPaintVolume, VoxelVolume},
+    volume::{PaintVolume, VoxelPaintVolume, VoxelVolume},
     zarr::ZarrArray,
 };
 
@@ -58,7 +58,9 @@ fn main() {
     let value_region_max = 0.7; // Maximum value for the region of interest
 
     // from visual inspection
-    let y_range = 1584..2823;
+    //let y_range = 1584..2823;
+    // avoid long rays
+    let y_range = 2300..2823;
 
     // full
     let x_range = 1466..3739;
@@ -83,23 +85,26 @@ fn main() {
 
     // Create image buffer with mutex for thread-safe access
     let img = ImageBuffer::new(width, height);
-    let img_mutex = Mutex::new(img);
+    let img_mutex = Arc::new(Mutex::new(img));
+    let img_mutex_clone = img_mutex.clone();
 
     let client = reqwest::blocking::Client::new();
     let array = ZarrArray::<3,u8>::from_url_to_default_cache_dir_blocking("https://d1q9tbl6hor5wj.cloudfront.net/esrf/20250506/SCROLLS_TA_HEL_4.320um_1.0m_116keV_binmean_2_PHerc0343P_TA_0001_masked.zarr/0", client);
-    let base = array.into_ctx();
+    let base = array.into_ctx().into_ctx();
 
     // Process lines in parallel
     (x_range.start..x_range.end)
+        .map(|x| (x as f64, base.shared(), img_mutex.clone()))
+        .collect::<Vec<_>>()
         .into_par_iter()
         .enumerate()
-        .for_each(|(img_x, x)| {
-            if img_x % 100 == 0 {
+        .for_each(move |(img_x, (x, base, img_mutex))| {
+            if img_x % 1 == 0 {
                 println!("Processing column {}/{}", img_x, width);
             }
 
             // Create volume for this thread
-            let volume = base.into_ctx().into_volume();
+            let volume = base();
 
             // Create line buffer
             let mut line_buffer = vec![Rgb([0u8, 0u8, 0u8]); height as usize];
@@ -132,7 +137,7 @@ fn main() {
             }
         });
 
-    let img = img_mutex.into_inner().unwrap();
+    let img = img_mutex_clone.lock().unwrap().clone();
 
     // Save image
     println!("Saving image...");
