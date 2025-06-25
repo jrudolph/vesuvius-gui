@@ -1,6 +1,8 @@
 use image::{ImageBuffer, Rgb};
+use rayon::prelude::*;
 use serde::de::value;
 use std::path::Path;
+use std::sync::Mutex;
 use vesuvius_gui::{
     model::{NewVolumeReference, VolumeCreationParams, VolumeReference},
     volume::{VoxelPaintVolume, VoxelVolume},
@@ -48,9 +50,9 @@ fn alpha_composite_raycast(
 }
 
 fn main() {
-    let client = reqwest::blocking::Client::new();
-    let array = ZarrArray::<3,u8>::from_url_to_default_cache_dir_blocking("https://d1q9tbl6hor5wj.cloudfront.net/esrf/20250506/SCROLLS_TA_HEL_4.320um_1.0m_116keV_binmean_2_PHerc0343P_TA_0001_masked.zarr/0", client);
-    let volume = array.into_ctx().into_ctx().into_volume();
+    //let array = ZarrArray::<3,u8>::from_url_to_default_cache_dir_blocking("https://d1q9tbl6hor5wj.cloudfront.net/esrf/20250506/SCROLLS_TA_HEL_4.320um_1.0m_116keV_binmean_2_PHerc0343P_TA_0001_masked.zarr/0", client);
+    // can be cloned / shared across threads
+    //let volume_base = array.into_ctx();
 
     let value_region_min = 0.3; // Minimum value for the region of interest
     let value_region_max = 0.7; // Maximum value for the region of interest
@@ -79,34 +81,58 @@ fn main() {
 
     println!("Rendering {}x{} image...", width, height);
 
-    // Create image buffer
-    let mut img = ImageBuffer::new(width, height);
+    // Create image buffer with mutex for thread-safe access
+    let img = ImageBuffer::new(width, height);
+    let img_mutex = Mutex::new(img);
 
-    // Cast rays for each pixel
-    for (img_x, x) in (x_range.start..x_range.end).enumerate() {
-        if img_x % 100 == 0 {
-            println!("Processing column {}/{}", img_x, width);
-            img.save("tmp/raycast_output_tmp.png").expect("Failed to save image");
-        }
+    let client = reqwest::blocking::Client::new();
+    let array = ZarrArray::<3,u8>::from_url_to_default_cache_dir_blocking("https://d1q9tbl6hor5wj.cloudfront.net/esrf/20250506/SCROLLS_TA_HEL_4.320um_1.0m_116keV_binmean_2_PHerc0343P_TA_0001_masked.zarr/0", client);
+    let base = array.into_ctx();
 
-        for (img_z, z) in (z_range.start..z_range.end).enumerate() {
-            let intensity = alpha_composite_raycast(
-                &volume,
-                x as f64,
-                z as f64,
-                y_range.end as f64,   // Start from top (2823)
-                y_range.start as f64, // End at bottom (1584)
-                step_size,
-                max_alpha,
-                value_region_min,
-                value_region_max,
-            );
+    // Process lines in parallel
+    (x_range.start..x_range.end)
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(img_x, x)| {
+            if img_x % 100 == 0 {
+                println!("Processing column {}/{}", img_x, width);
+            }
 
-            // Convert intensity to grayscale
-            let pixel_val = (intensity * 255.0).min(255.0) as u8;
-            img.put_pixel(img_x as u32, img_z as u32, Rgb([pixel_val, pixel_val, pixel_val]));
-        }
-    }
+            // Create volume for this thread
+            let volume = base.into_ctx().into_volume();
+
+            // Create line buffer
+            let mut line_buffer = vec![Rgb([0u8, 0u8, 0u8]); height as usize];
+
+            // Process all pixels in this line
+            for (img_z, z) in (z_range.start..z_range.end).enumerate() {
+                let intensity = alpha_composite_raycast(
+                    &volume,
+                    x as f64,
+                    z as f64,
+                    y_range.end as f64,   // Start from top (2823)
+                    y_range.start as f64, // End at bottom (1584)
+                    step_size,
+                    max_alpha,
+                    value_region_min,
+                    value_region_max,
+                );
+
+                // Convert intensity to grayscale
+                let pixel_val = (intensity * 255.0).min(255.0) as u8;
+                line_buffer[img_z] = Rgb([pixel_val, pixel_val, pixel_val]);
+            }
+
+            // Acquire lock and blit line into image
+            {
+                let mut img = img_mutex.lock().unwrap();
+                for (img_z, pixel) in line_buffer.iter().enumerate() {
+                    img.put_pixel(img_x as u32, img_z as u32, *pixel);
+                }
+            }
+        });
+
+    let img = img_mutex.into_inner().unwrap();
 
     // Save image
     println!("Saving image...");
