@@ -1,4 +1,5 @@
 use image::{ImageBuffer, Rgb};
+use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use serde::de::value;
 use std::sync::Mutex;
@@ -92,47 +93,101 @@ fn main() {
     let array = ZarrArray::<3,u8>::from_url_to_default_cache_dir_blocking("https://d1q9tbl6hor5wj.cloudfront.net/esrf/20250506/SCROLLS_TA_HEL_4.320um_1.0m_116keV_binmean_2_PHerc0343P_TA_0001_masked.zarr/0", client);
     let base = array.into_ctx().into_ctx();
 
-    // Process lines in parallel
-    (x_range.start..x_range.end)
-        .map(|x| (x as f64, base.shared(), img_mutex.clone()))
+    // Tile-based processing for better memory locality
+    let tile_size = 64usize; // Power-of-2 tile size
+
+    // Calculate tile grid
+    let tiles_x = (width as usize + tile_size - 1) / tile_size;
+    let tiles_z = (height as usize + tile_size - 1) / tile_size;
+
+    let total_tiles = tiles_x * tiles_z;
+    println!(
+        "Processing {}x{} tiles of size {}x{} (total: {} tiles)",
+        tiles_x, tiles_z, tile_size, tile_size, total_tiles
+    );
+
+    // Create progress bar
+    let progress_bar = ProgressBar::new(total_tiles as u64);
+    progress_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} tiles ({percent}%) ETA: {eta}")
+            .unwrap()
+            .progress_chars("#>-")
+    );
+
+    // Process tiles in parallel with progress tracking
+    (0..total_tiles)
+        .map(|tile_idx| (tile_idx, base.shared(), img_mutex.clone(), progress_bar.clone()))
         .collect::<Vec<_>>()
         .into_par_iter()
-        .enumerate()
-        .for_each(move |(img_x, (x, base, img_mutex))| {
-            if img_x % 1 == 0 {
-                println!("Processing column {}/{}", img_x, width);
+        .progress_with(progress_bar)
+        .for_each(|(tile_idx, base_shared, img_mutex, pb)| {
+            let tile_x = tile_idx % tiles_x;
+            let tile_z = tile_idx / tiles_x;
+
+            let x_start = tile_x * tile_size;
+            let x_end = (x_start + tile_size).min(width as usize);
+            let z_start = tile_z * tile_size;
+            let z_end = (z_start + tile_size).min(height as usize);
+
+            if pb.position() % 100 == 0 {
+                let img = img_mutex.lock().unwrap();
+                img.save("tmp/raycast_output_progress.png")
+                    .expect("Failed to save image");
             }
+
+            /* println!(
+                "Processing tile {}/{} ({}x{} at {},{}) ",
+                tile_idx + 1,
+                tiles_x * tiles_z,
+                x_end - x_start,
+                z_end - z_start,
+                tile_x,
+                tile_z
+            ); */
 
             // Create volume for this thread
-            let volume = base();
+            let volume = base_shared();
 
-            // Create line buffer
-            let mut line_buffer = vec![Rgb([0u8, 0u8, 0u8]); height as usize];
+            // Create tile buffer
+            let tile_width = x_end - x_start;
+            let tile_height = z_end - z_start;
+            let mut tile_buffer = vec![Rgb([0u8, 0u8, 0u8]); tile_width * tile_height];
 
-            // Process all pixels in this line
-            for (img_z, z) in (z_range.start..z_range.end).enumerate() {
-                let intensity = alpha_composite_raycast(
-                    &volume,
-                    x as f64,
-                    z as f64,
-                    y_range.end as f64,   // Start from top (2823)
-                    y_range.start as f64, // End at bottom (1584)
-                    step_size,
-                    max_alpha,
-                    value_region_min,
-                    value_region_max,
-                );
+            // Process all pixels in this tile
+            for local_x in 0..tile_width {
+                for local_z in 0..tile_height {
+                    let world_x = x_range.start + x_start + local_x;
+                    let world_z = z_range.start + z_start + local_z;
 
-                // Convert intensity to grayscale
-                let pixel_val = (intensity * 255.0).min(255.0) as u8;
-                line_buffer[img_z] = Rgb([pixel_val, pixel_val, pixel_val]);
+                    let intensity = alpha_composite_raycast(
+                        &volume,
+                        world_x as f64,
+                        world_z as f64,
+                        y_range.end as f64,   // Start from top (2823)
+                        y_range.start as f64, // End at bottom (1584)
+                        step_size,
+                        max_alpha,
+                        value_region_min,
+                        value_region_max,
+                    );
+
+                    // Convert intensity to grayscale
+                    let pixel_val = (intensity * 255.0).min(255.0) as u8;
+                    tile_buffer[local_x * tile_height + local_z] = Rgb([pixel_val, pixel_val, pixel_val]);
+                }
             }
 
-            // Acquire lock and blit line into image
+            // Acquire lock and blit tile into image
             {
                 let mut img = img_mutex.lock().unwrap();
-                for (img_z, pixel) in line_buffer.iter().enumerate() {
-                    img.put_pixel(img_x as u32, img_z as u32, *pixel);
+                for local_x in 0..tile_width {
+                    for local_z in 0..tile_height {
+                        let img_x = x_start + local_x;
+                        let img_z = z_start + local_z;
+                        let pixel = tile_buffer[local_x * tile_height + local_z];
+                        img.put_pixel(img_x as u32, img_z as u32, pixel);
+                    }
                 }
             }
         });
