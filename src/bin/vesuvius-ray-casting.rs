@@ -58,6 +58,7 @@ fn main() {
     let value_region_min = 0.3; // Minimum value for the region of interest
     let value_region_max = 0.7; // Maximum value for the region of interest
 
+    /* // 4um binmean 2
     // from visual inspection
     //let y_range = 1584..2823;
     // avoid long rays
@@ -65,7 +66,14 @@ fn main() {
 
     // full
     let x_range = 1466..3739;
-    let z_range = 684..4700;
+    let z_range = 684..4700; */
+
+    // 2um
+    let y_range = 5700..7711; // full range starts at 2918
+
+    // full
+    let x_range = 2448..11390;
+    let z_range = 3264..17604;
 
     // center region
     /* let x_range = 2000..3000;
@@ -90,7 +98,12 @@ fn main() {
     let img_mutex_clone = img_mutex.clone();
 
     let client = reqwest::blocking::Client::new();
-    let array = ZarrArray::<3,u8>::from_url_to_default_cache_dir_blocking("https://d1q9tbl6hor5wj.cloudfront.net/esrf/20250506/SCROLLS_TA_HEL_4.320um_1.0m_116keV_binmean_2_PHerc0343P_TA_0001_masked.zarr/0", client);
+    //let array = ZarrArray::<3,u8>::from_url_to_default_cache_dir_blocking("https://d1q9tbl6hor5wj.cloudfront.net/esrf/20250506/SCROLLS_TA_HEL_4.320um_1.0m_116keV_binmean_2_PHerc0343P_TA_0001_masked.zarr/0", client);
+    let array = ZarrArray::<3, u8>::from_url_to_default_cache_dir_blocking(
+        "http://serve-volumes/esrf/20250506/SCROLLS_HEL_2.215um_0.4m_111keV_PHerc0343P_TA_0001_masked.zarr/0",
+        client,
+    );
+
     let base = array.into_ctx().into_ctx();
 
     // Tile-based processing for better memory locality
@@ -132,7 +145,7 @@ fn main() {
 
             if pb.position() % 100 == 0 {
                 let img = img_mutex.lock().unwrap();
-                img.save("tmp/raycast_output_progress.png")
+                img.save("tmp/raycast_output_progress-2um.png")
                     .expect("Failed to save image");
             }
 
@@ -196,7 +209,7 @@ fn main() {
 
     // Save image
     println!("Saving image...");
-    img.save("tmp/raycast_output.png").expect("Failed to save image");
+    img.save("tmp/raycast_output-2um.png").expect("Failed to save image");
 
     println!("Ray casting complete! Saved raycast_output.png");
 }
