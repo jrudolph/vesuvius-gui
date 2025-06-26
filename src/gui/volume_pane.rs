@@ -460,7 +460,7 @@ impl VolumePane {
 
                 match poll_result {
                     Poll::Ready(image) => {
-                        println!("Tile ({}, {}) for pane {:?} is ready", tile_x, tile_y, self.pane_type);
+                        //println!("Tile ({}, {}) for pane {:?} is ready", tile_x, tile_y, self.pane_type);
                         let texture = ui.ctx().load_texture(
                             format!(
                                 "{}_{}_{}_{}",
@@ -478,10 +478,10 @@ impl VolumePane {
                         Some(texture)
                     }
                     Poll::Pending => {
-                        println!(
+                        /* println!(
                             "Tile ({}, {}) for pane {:?} is still loading",
                             tile_x, tile_y, self.pane_type
-                        );
+                        ); */
                         // Still loading, refresh cache entry to keep it alive and request repaint
                         let future_clone = future_mutex.clone();
                         drop(future_guard); // Release lock before cache operation
@@ -580,10 +580,10 @@ impl VolumePane {
         let is_segment_pane = self.is_segment_pane;
 
         let handle = tokio::task::spawn_blocking(move || {
-            println!(
+            /* println!(
                 "Creating tile ({}, {}) for pane {:?} at coord {:?} with zoom {:.2}",
                 tile_x, tile_y, pane_type, coord, zoom
-            );
+            ); */
             let volume_pane = VolumePane::new(pane_type, is_segment_pane);
             let image = volume_pane.create_tile_sync(
                 tile_x,
@@ -596,10 +596,10 @@ impl VolumePane {
                 extra_resolutions,
                 segment_outlines_coord,
             );
-            println!(
+            /* println!(
                 "Finished creating tile ({}, {}) for pane {:?} at coord {:?} with zoom {:.2}",
                 tile_x, tile_y, pane_type, coord, zoom
-            );
+            ); */
             Arc::new(image)
         });
 
