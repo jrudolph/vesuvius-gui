@@ -530,7 +530,7 @@ impl<const N: usize> ZarrContextCache<N> {
         }
     }
     fn purge_missing(&self) {
-        // self.cache.retain(|_, e| if e.is_none() { false } else { true });
+        self.cache.retain(|_, e| if e.is_none() { false } else { true });
     }
 }
 
