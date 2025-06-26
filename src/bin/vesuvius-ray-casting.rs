@@ -25,7 +25,7 @@ fn alpha_composite_raycast(
     let mut accumulated_alpha = 0.0;
 
     let mut y = y_start;
-    while y > y_end && accumulated_alpha < max_alpha {
+    while y < y_end && accumulated_alpha < max_alpha {
         let voxel_value = volume.get_interpolated([x, y, z], 1) as f64 / 255.0;
 
         // lerp and clamp voxel value to the specified range
@@ -44,7 +44,7 @@ fn alpha_composite_raycast(
         /* println!("Raycasting at ({}, {}, {}): voxel_value = {}, weight = {}, alpha = {}, accumulated_intensity = {}, accumulated_alpha = {}",
         x, y, z, voxel_value, weight, alpha, accumulated_intensity, accumulated_alpha); */
 
-        y -= step_size;
+        y += step_size;
     }
 
     accumulated_intensity
@@ -58,29 +58,15 @@ fn main() {
     let value_region_min = 0.3; // Minimum value for the region of interest
     let value_region_max = 0.7; // Maximum value for the region of interest
 
-    /* // 4um binmean 2
-    // from visual inspection
-    //let y_range = 1584..2823;
-    // avoid long rays
-    let y_range = 2300..2823;
+    // 4um 500P2
+    let y_range = 3623..6450;
 
     // full
-    let x_range = 1466..3739;
-    let z_range = 684..4700; */
-
-    // 2um
-    let y_range = 5700..7711; // full range starts at 2918
-
-    // full
-    let x_range = 2448..11390;
-    let z_range = 3264..17604;
-
-    // center region
-    /* let x_range = 2000..3000;
-    let z_range = 2000..3000; */
-
-    /* let x_range = 2500..2501;
-    let z_range = 2500..2501; */
+    let x_range = 1346..8342;
+    let z_range = 1753..14556;
+    // middle
+    //let x_range = 4800..4900;
+    //let z_range = 5000..5100;
 
     // Ray casting parameters
     let step_size = 1.0;
@@ -100,7 +86,7 @@ fn main() {
     let client = reqwest::blocking::Client::new();
     //let array = ZarrArray::<3,u8>::from_url_to_default_cache_dir_blocking("https://d1q9tbl6hor5wj.cloudfront.net/esrf/20250506/SCROLLS_TA_HEL_4.320um_1.0m_116keV_binmean_2_PHerc0343P_TA_0001_masked.zarr/0", client);
     let array = ZarrArray::<3, u8>::from_url_to_default_cache_dir_blocking(
-        "http://serve-volumes/esrf/20250506/SCROLLS_HEL_2.215um_0.4m_111keV_PHerc0343P_TA_0001_masked.zarr/0",
+        "http://serve-volumes/esrf/20250506/4.317um_HA2200_HEL_111keV_1.2m_scroll-fragment-0500P2_D_0001_masked.zarr/0",
         client,
     );
 
@@ -145,7 +131,7 @@ fn main() {
 
             if pb.position() % 100 == 0 {
                 let img = img_mutex.lock().unwrap();
-                img.save("tmp/raycast_output_progress-2um.png")
+                img.save("tmp/raycast_output_progress-4um-500p2.png")
                     .expect("Failed to save image");
             }
 
@@ -177,8 +163,8 @@ fn main() {
                         &volume,
                         world_x as f64,
                         world_z as f64,
-                        y_range.end as f64,   // Start from top (2823)
-                        y_range.start as f64, // End at bottom (1584)
+                        y_range.start as f64, // Start from top (2823)
+                        y_range.end as f64,   // End at bottom (1584)
                         step_size,
                         max_alpha,
                         value_region_min,
@@ -209,7 +195,8 @@ fn main() {
 
     // Save image
     println!("Saving image...");
-    img.save("tmp/raycast_output-2um.png").expect("Failed to save image");
+    img.save("tmp/raycast_output-4um-500p2.png")
+        .expect("Failed to save image");
 
     println!("Ray casting complete! Saved raycast_output.png");
 }
