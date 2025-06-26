@@ -26,7 +26,13 @@ fn alpha_composite_raycast(
 
     let mut y = y_start;
     while y < y_end && accumulated_alpha < max_alpha {
-        let voxel_value = volume.get_interpolated([x, y, z], 1) as f64 / 255.0;
+        let voxel_value = volume.get([x, y, z], 1) as f64 / 255.0;
+
+        if voxel_value < value_region_min {
+            // Skip this voxel if it's outside the region of interest
+            y += step_size;
+            continue;
+        }
 
         // lerp and clamp voxel value to the specified range
         let voxel_value = (voxel_value - value_region_min) / (value_region_max - value_region_min);
@@ -58,15 +64,19 @@ fn main() {
     let value_region_min = 0.3; // Minimum value for the region of interest
     let value_region_max = 0.7; // Maximum value for the region of interest
 
-    // 4um 500P2
-    let y_range = 3623..6450;
+    // // 4um 500P2
+    // let y_range = 3623..6450;
+
+    // // full
+    // let x_range = 1346..8342;
+    // let z_range = 1753..14556;
+
+    // 2um 500P2
+    let y_range = 7012..12414;
 
     // full
-    let x_range = 1346..8342;
-    let z_range = 1753..14556;
-    // middle
-    //let x_range = 4800..4900;
-    //let z_range = 5000..5100;
+    let x_range = 2572..16149;
+    let z_range = 1405..27501;
 
     // Ray casting parameters
     let step_size = 1.0;
@@ -86,14 +96,14 @@ fn main() {
     let client = reqwest::blocking::Client::new();
     //let array = ZarrArray::<3,u8>::from_url_to_default_cache_dir_blocking("https://d1q9tbl6hor5wj.cloudfront.net/esrf/20250506/SCROLLS_TA_HEL_4.320um_1.0m_116keV_binmean_2_PHerc0343P_TA_0001_masked.zarr/0", client);
     let array = ZarrArray::<3, u8>::from_url_to_default_cache_dir_blocking(
-        "http://serve-volumes/esrf/20250506/4.317um_HA2200_HEL_111keV_1.2m_scroll-fragment-0500P2_D_0001_masked.zarr/0",
+        "http://serve-volumes/esrf/20250506/2.215um_HEL_TA_0.4m_110keV_scroll-fragment_0500P2_TA_0001_masked.zarr/0",
         client,
     );
 
     let base = array.into_ctx().into_ctx();
 
     // Tile-based processing for better memory locality
-    let tile_size = 64usize; // Power-of-2 tile size
+    let tile_size = 128usize; // Power-of-2 tile size
 
     // Calculate tile grid
     let tiles_x = (width as usize + tile_size - 1) / tile_size;
@@ -129,9 +139,9 @@ fn main() {
             let z_start = tile_z * tile_size;
             let z_end = (z_start + tile_size).min(height as usize);
 
-            if pb.position() % 100 == 0 {
+            if pb.position() % 1000 == 0 {
                 let img = img_mutex.lock().unwrap();
-                img.save("tmp/raycast_output_progress-4um-500p2.png")
+                img.save("tmp/raycast_output_progress-2um-500p2.png")
                     .expect("Failed to save image");
             }
 
@@ -195,7 +205,7 @@ fn main() {
 
     // Save image
     println!("Saving image...");
-    img.save("tmp/raycast_output-4um-500p2.png")
+    img.save("tmp/raycast_output-2um-500p2.png")
         .expect("Failed to save image");
 
     println!("Ray casting complete! Saved raycast_output.png");
