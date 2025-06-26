@@ -488,10 +488,42 @@ impl TemplateApp {
                             ui,
                             "Layers",
                             &mut self.drawing_config.compositing.num_layers,
-                            1..=10,
+                            1..=20,
                             false,
-                            self.drawing_config.compositing.mode != CompositingMode::None,
+                            true,
                         );
+
+                        if self.drawing_config.compositing.mode == CompositingMode::Alpha {
+                            slider(
+                                ui,
+                                "Alpha Min",
+                                &mut self.drawing_config.compositing.alpha_min,
+                                0..=255,
+                                false,
+                                true,
+                            );
+                            slider(
+                                ui,
+                                "Alpha Max",
+                                &mut self.drawing_config.compositing.alpha_max,
+                                0..=255,
+                                false,
+                                true,
+                            );
+                            slider(
+                                ui,
+                                "Alpha Threshold",
+                                &mut self.drawing_config.compositing.alpha_threshold,
+                                0..=10000,
+                                false,
+                                true,
+                            );
+                            cb(
+                                ui,
+                                "Reverse Direction",
+                                &mut self.drawing_config.compositing.reverse_direction,
+                            );
+                        }
                     });
                 }
 

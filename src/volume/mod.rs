@@ -14,27 +14,33 @@ pub use layers::LayersMappedVolume;
 use libm::modf;
 pub use objvolume::{ObjFile, ObjVolume};
 pub use ppmvolume::PPMVolume;
-use std::{rc::Rc, sync::Arc};
+use std::sync::Arc;
 pub use volume64x4::VolumeGrid64x4Mapped;
 
 #[derive(Copy, Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub enum CompositingMode {
     None,
     Max,
+    Alpha,
 }
 impl CompositingMode {
     pub fn label(&self) -> &str {
         match self {
             CompositingMode::None => "None",
             CompositingMode::Max => "Max",
+            CompositingMode::Alpha => "Alpha",
         }
     }
-    pub const VALUES: [CompositingMode; 2] = [CompositingMode::None, CompositingMode::Max];
+    pub const VALUES: [CompositingMode; 3] = [CompositingMode::None, CompositingMode::Max, CompositingMode::Alpha];
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct CompositingSettings {
     pub mode: CompositingMode,
     pub num_layers: u8,
+    pub alpha_min: u8,
+    pub alpha_max: u8,
+    pub alpha_threshold: u16,
+    pub reverse_direction: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
@@ -85,6 +91,10 @@ impl Default for DrawingConfig {
             compositing: CompositingSettings {
                 mode: CompositingMode::None,
                 num_layers: 6,
+                alpha_min: (0.3 * 255.0) as u8,
+                alpha_max: (0.7 * 255.0) as u8,
+                alpha_threshold: 9500,
+                reverse_direction: false,
             },
         }
     }

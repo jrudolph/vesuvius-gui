@@ -426,6 +426,84 @@ fn orient2d(u1: i32, v1: i32, u2: i32, v2: i32, u3: i32, v3: i32) -> i32 {
     (u2 - u1) * (v3 - v1) - (v2 - v1) * (u3 - u1)
 }
 
+trait CompositionState {
+    fn update(&mut self, a: u8) -> bool;
+    fn result(&self) -> u8;
+    fn reset(&mut self);
+}
+struct MaxCompositionState {
+    value: u8,
+}
+impl MaxCompositionState {
+    fn new() -> Self {
+        Self { value: 0 }
+    }
+}
+impl CompositionState for MaxCompositionState {
+    fn update(&mut self, a: u8) -> bool {
+        self.value = self.value.max(a);
+        true
+    }
+    fn result(&self) -> u8 {
+        self.value
+    }
+    fn reset(&mut self) {
+        self.value = 0;
+    }
+}
+struct NoCompositionState;
+impl CompositionState for NoCompositionState {
+    fn update(&mut self, _a: u8) -> bool {
+        false
+    }
+    fn result(&self) -> u8 {
+        0
+    }
+    fn reset(&mut self) {}
+}
+
+struct AlphaCompositionState {
+    min: f32,
+    max: f32,
+    alpha_cutoff: f32,
+    value: f32,
+    alpha: f32,
+}
+impl AlphaCompositionState {
+    fn new(min: f32, max: f32, alpha_cutoff: f32) -> Self {
+        Self {
+            min,
+            max,
+            alpha_cutoff,
+            value: 0.0,
+            alpha: 0.0,
+        }
+    }
+}
+impl CompositionState for AlphaCompositionState {
+    fn update(&mut self, a: u8) -> bool {
+        let value = (a as f32 / 255.0 - self.min) / (self.max - self.min).clamp(0.0, 1.0);
+
+        if value == 0.0 {
+            // speed through empty area
+            return true;
+        }
+
+        let weight = (1.0 - self.alpha) * value;
+        self.value += weight * value as f32;
+        self.alpha += weight;
+
+        return self.alpha < self.alpha_cutoff;
+    }
+    fn result(&self) -> u8 {
+        (self.value * 255.0).clamp(0.0, 255.0) as u8
+    }
+    fn reset(&mut self) {
+        self.value = 0.0;
+        self.alpha = 0.0;
+    }
+}
+
 impl PaintVolume for ObjVolume {
     fn paint(
         &self,
@@ -448,10 +526,16 @@ impl PaintVolume for ObjVolume {
         let draw_outlines = config.draw_xyz_outlines;
         let composite = config.compositing.mode != CompositingMode::None;
         let composite_layers = config.compositing.num_layers as i32 / 2;
-        let composition = match config.compositing.mode {
-            CompositingMode::Max => |a: u8, b: u8| a.max(b),
-            _ => |_, _| 0,
+        let mut composition: Box<dyn CompositionState> = match config.compositing.mode {
+            CompositingMode::Max => Box::new(MaxCompositionState::new()),
+            CompositingMode::Alpha => Box::new(AlphaCompositionState::new(
+                config.compositing.alpha_min as f32 / 255.0,
+                config.compositing.alpha_max as f32 / 255.0,
+                config.compositing.alpha_threshold as f32 / 10000.0,
+            )),
+            _ => Box::new(NoCompositionState {}),
         };
+        let composite_direction = if config.compositing.reverse_direction { -1 } else { 1 };
 
         let real_xyz = if draw_outlines {
             self.convert_to_volume_coords(xyz)
@@ -646,8 +730,14 @@ impl PaintVolume for ObjVolume {
                                                 volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32)
                                             }
                                         } else {
-                                            let mut value: u8 = 0;
-                                            for w in (xyz[2] - composite_layers)..(xyz[2] + composite_layers) {
+                                            composition.reset();
+                                            let start = xyz[2] + composite_direction * composite_layers;
+                                            let end = xyz[2];
+
+                                            let step = if start < end { 1 } else { -1 };
+
+                                            let mut w = start;
+                                            while w != end {
                                                 let w_factor = w as f64;
 
                                                 let x = x + w_factor * nx;
@@ -663,9 +753,13 @@ impl PaintVolume for ObjVolume {
                                                     volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32)
                                                 };
 
-                                                value = composition(value, new_value);
+                                                if !composition.update(new_value) {
+                                                    break;
+                                                }
+
+                                                w += step;
                                             }
-                                            value
+                                            composition.result()
                                         };
 
                                         buffer.set_gray(
