@@ -486,9 +486,18 @@ impl TemplateApp {
 
                         slider(
                             ui,
-                            "Layers",
-                            &mut self.drawing_config.compositing.num_layers,
-                            1..=20,
+                            "Layers In Front",
+                            &mut self.drawing_config.compositing.layers_in_front,
+                            0..=100,
+                            false,
+                            true,
+                        );
+
+                        slider(
+                            ui,
+                            "Layers Behind",
+                            &mut self.drawing_config.compositing.layers_behind,
+                            0..=100,
                             false,
                             true,
                         );
@@ -515,6 +524,14 @@ impl TemplateApp {
                                 "Alpha Threshold",
                                 &mut self.drawing_config.compositing.alpha_threshold,
                                 0..=10000,
+                                false,
+                                true,
+                            );
+                            slider(
+                                ui,
+                                "Material",
+                                &mut self.drawing_config.compositing.material,
+                                0..=200,
                                 false,
                                 true,
                             );
@@ -628,6 +645,13 @@ impl TemplateApp {
                 }
                 if i.key_pressed(egui::Key::X) {
                     self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
+                }
+                if i.key_pressed(egui::Key::A) {
+                    if self.drawing_config.compositing.mode == CompositingMode::None {
+                        self.drawing_config.compositing.mode = CompositingMode::Alpha;
+                    } else {
+                        self.drawing_config.compositing.mode = CompositingMode::None;
+                    }
                 }
                 if i.key_pressed(egui::Key::J) {
                     let segment_mode = self.segment_mode.as_mut().unwrap();

@@ -36,10 +36,12 @@ impl CompositingMode {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct CompositingSettings {
     pub mode: CompositingMode,
-    pub num_layers: u8,
+    pub layers_in_front: u8,
+    pub layers_behind: u8,
     pub alpha_min: u8,
     pub alpha_max: u8,
     pub alpha_threshold: u16,
+    pub material: u8,
     pub reverse_direction: bool,
 }
 
@@ -90,10 +92,12 @@ impl Default for DrawingConfig {
             draw_outline_vertices: false,
             compositing: CompositingSettings {
                 mode: CompositingMode::None,
-                num_layers: 6,
+                layers_in_front: 6,
+                layers_behind: 6,
                 alpha_min: (0.3 * 255.0) as u8,
                 alpha_max: (0.7 * 255.0) as u8,
                 alpha_threshold: 9500,
+                material: 1,
                 reverse_direction: false,
             },
         }

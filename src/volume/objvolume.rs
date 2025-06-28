@@ -466,15 +466,17 @@ struct AlphaCompositionState {
     min: f32,
     max: f32,
     alpha_cutoff: f32,
+    material: f32,
     value: f32,
     alpha: f32,
 }
 impl AlphaCompositionState {
-    fn new(min: f32, max: f32, alpha_cutoff: f32) -> Self {
+    fn new(min: f32, max: f32, alpha_cutoff: f32, material: f32) -> Self {
         Self {
             min,
             max,
             alpha_cutoff,
+            material,
             value: 0.0,
             alpha: 0.0,
         }
@@ -482,15 +484,17 @@ impl AlphaCompositionState {
 }
 impl CompositionState for AlphaCompositionState {
     fn update(&mut self, a: u8) -> bool {
-        let value = (a as f32 / 255.0 - self.min) / (self.max - self.min).clamp(0.0, 1.0);
+        let value = ((a as f32 / 255.0 - self.min) / (self.max - self.min)).clamp(0.0, 1.0);
 
         if value == 0.0 {
             // speed through empty area
             return true;
         }
 
-        let weight = (1.0 - self.alpha) * value;
-        self.value += weight * value as f32;
+        let before_value = self.value;
+        let before_alpha = self.alpha;
+        let weight = (1.0 - self.alpha) * (value * self.material).min(1.0);
+        self.value += weight * value;
         self.alpha += weight;
 
         return self.alpha < self.alpha_cutoff;
@@ -525,13 +529,15 @@ impl PaintVolume for ObjVolume {
 
         let draw_outlines = config.draw_xyz_outlines;
         let composite = config.compositing.mode != CompositingMode::None;
-        let composite_layers = config.compositing.num_layers as i32 / 2;
+        let composite_layers_in_front = config.compositing.layers_in_front as i32;
+        let composite_layers_behind = config.compositing.layers_behind as i32;
         let mut composition: Box<dyn CompositionState> = match config.compositing.mode {
             CompositingMode::Max => Box::new(MaxCompositionState::new()),
             CompositingMode::Alpha => Box::new(AlphaCompositionState::new(
                 config.compositing.alpha_min as f32 / 255.0,
                 config.compositing.alpha_max as f32 / 255.0,
                 config.compositing.alpha_threshold as f32 / 10000.0,
+                config.compositing.material as f32 / 100.0,
             )),
             _ => Box::new(NoCompositionState {}),
         };
@@ -731,8 +737,8 @@ impl PaintVolume for ObjVolume {
                                             }
                                         } else {
                                             composition.reset();
-                                            let start = xyz[2] + composite_direction * composite_layers;
-                                            let end = xyz[2];
+                                            let start = xyz[2] + composite_direction * composite_layers_in_front;
+                                            let end = xyz[2] - composite_direction * (composite_layers_behind + 1);
 
                                             let step = if start < end { 1 } else { -1 };
 
