@@ -41,7 +41,7 @@ pub struct CompositingSettings {
     pub alpha_min: u8,
     pub alpha_max: u8,
     pub alpha_threshold: u16,
-    pub material: u8,
+    pub material: u16,
     pub reverse_direction: bool,
 }
 

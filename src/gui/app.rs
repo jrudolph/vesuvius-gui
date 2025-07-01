@@ -531,7 +531,7 @@ impl TemplateApp {
                                 ui,
                                 "Material",
                                 &mut self.drawing_config.compositing.material,
-                                0..=200,
+                                0..=300,
                                 false,
                                 true,
                             );
