@@ -523,7 +523,6 @@ impl PaintVolume for ObjVolume {
         assert!(u_coord == 0);
         assert!(v_coord == 1);
         assert!(plane_coord == 2);
-        self.volume.reset_for_painting();
 
         let draw_outlines = config.draw_xyz_outlines;
         let composite = config.compositing.mode != CompositingMode::None;
@@ -1047,5 +1046,8 @@ fn point(x0: i32, y0: i32, buffer: &mut Image, width: usize, r: u8, g: u8, b: u8
 impl VoxelVolume for ObjVolume {
     fn get(&self, _xyz: [f64; 3], _downsampling: i32) -> u8 {
         todo!()
+    }
+    fn reset_for_painting(&self) {
+        self.volume.reset_for_painting();
     }
 }
