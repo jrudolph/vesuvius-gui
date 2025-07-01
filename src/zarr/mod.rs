@@ -470,7 +470,7 @@ struct ZarrContextCache<const N: usize> {
 impl<const N: usize> ZarrContextCache<N> {
     fn new(def: &ZarrArrayDef) -> Self {
         ZarrContextCache {
-            cache: DashMap::default(),
+            cache: DashMap::with_shard_amount(1024),
             access_counter: AtomicU64::new(0),
             non_empty_entries: AtomicU64::new(0),
             max_entries: 2000000000 / def.chunks.iter().product::<usize>(), // FIXME: make configurable
