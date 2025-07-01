@@ -275,6 +275,13 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
         if std::path::Path::new(&target_file).exists() {
             Some(target_file)
         } else {
+            let missing_marker_file = format!("{}.missing", target_file);
+            if std::path::Path::new(&missing_marker_file).exists() {
+                //TODO: and not older than negative TTL
+                //println!("Chunk {} is missing, skipping download", target_file);
+                return None;
+            }
+
             let chunk_str = chunk_no
                 .iter()
                 .map(|i| i.to_string())
@@ -303,6 +310,10 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
                     "Failed to download chunk from {}, status {}",
                     target_url, response.status
                 ); */
+                let missing_tmp = format!("{}.missing.tmp", target_file);
+                std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
+                std::fs::write(&missing_tmp, "").unwrap(); // create missing marker file
+                std::fs::rename(&missing_tmp, &missing_marker_file).unwrap();
                 return None;
             }
             let data = response.bytes().unwrap().to_vec();
