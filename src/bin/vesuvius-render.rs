@@ -355,7 +355,7 @@ impl Rendering {
         let height = self.params.height;
         let tile_width = self.params.tile_size;
         let tile_height = self.params.tile_size;
-        let world = ObjVolume::new(self.obj.clone(), Volume::from_ref(dummy.clone()), width, height).into_volume();
+        let world = ObjVolume::new(self.obj.clone(), Volume::from_ref(Arc::new(dummy.as_ref().clone())), width, height).into_volume();
 
         let mut image = Image::new(tile_width, tile_height);
         let xyz = [
@@ -456,7 +456,7 @@ impl Rendering {
         }
         let dir = self.downloader.settings.cache_dir.clone();
 
-        let vol = volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {}));
+        let vol = volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Arc::new(PanicDownloader {}));
         let world = ObjVolume::new(
             self.obj.clone(),
             vol.into_volume(),
@@ -559,7 +559,7 @@ impl PaintVolume for TileCollectingVolume {
     ) {
         panic!();
     }
-    fn shared(&self) -> Volume {
+    fn shared(&self) -> super::VolumeCons {
         panic!();
     }
 }

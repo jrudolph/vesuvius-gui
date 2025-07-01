@@ -39,7 +39,7 @@ enum DownloadMessage {
     Position(i32, i32, i32, usize, usize),
 }
 
-pub trait Downloader {
+pub trait Downloader: Send + Sync {
     fn queue(&self, task: DownloadTask);
 }
 

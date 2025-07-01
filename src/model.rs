@@ -3,7 +3,7 @@ use crate::{
     volume::{LayersMappedVolume, Volume, VolumeGrid500Mapped, VolumeGrid64x4Mapped, VoxelPaintVolume},
     zarr::{default_cache_dir_for_url, GrayScale, OmeZarrContext, ZarrArray},
 };
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 #[derive(Copy, Clone, Debug)]
 pub struct Quality {
@@ -289,7 +289,7 @@ impl NewVolumeReference {
 
                 let volume_dir = v.sub_dir(&params.cache_dir);
 
-                let downloader = Box::new(SimpleDownloader::new(
+                let downloader = Arc::new(SimpleDownloader::new(
                     &volume_dir,
                     Self::TILE_SERVER,
                     &v.url_path_base(),
