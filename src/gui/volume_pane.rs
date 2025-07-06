@@ -16,10 +16,10 @@ const TILE_SIZE: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TileCacheKey {
     pane_type: PaneType,
-    tile_x: i32,
-    tile_y: i32,
-    coord: [i32; 3],
-    paint_zoom: u8, // The actual paint_zoom level used for rendering
+    tile_u: i32,
+    tile_v: i32,
+    w: i32,
+    paint_zoom: u8,
     drawing_config: DrawingConfig,
     segment_outlines_coord: Option<[i32; 3]>,
     extra_resolutions: u32,
@@ -49,14 +49,12 @@ impl TileCacheKey {
         // For tile caching, we only need the depth coordinate (d_coord)
         // since tile_x, tile_y already encode the spatial position
         let (_, _, d_coord) = pane_type.coordinates();
-        let mut cache_coord = [0; 3];
-        cache_coord[d_coord] = coord[d_coord];
 
         Self {
             pane_type,
-            tile_x,
-            tile_y,
-            coord: cache_coord,
+            tile_u: tile_x,
+            tile_v: tile_y,
+            w: coord[d_coord],
             paint_zoom,
             drawing_config: drawing_config.clone(),
             segment_outlines_coord,
