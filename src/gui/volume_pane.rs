@@ -364,8 +364,6 @@ impl VolumePane {
         segment_outlines_coord: Option<[i32; 3]>,
     ) -> Vec<(egui::TextureHandle, egui::Rect)> {
         let visible_tiles = self.calculate_visible_tiles(coord, zoom, frame_width, frame_height);
-        let mut ready_tiles = Vec::new();
-
         let paint_zoom = if zoom >= 1.0 {
             1u8
         } else {
@@ -374,30 +372,70 @@ impl VolumePane {
             downsample_factor.clamp(1, 8) // Reasonable limits
         };
 
-        for (tile_x, tile_y, tile_rect) in visible_tiles {
-            let key = TileCacheKey::new(
-                self.pane_type,
-                tile_x,
-                tile_y,
-                coord[self.pane_type.coordinates().2],
-                zoom,
-                paint_zoom,
-                drawing_config,
-                segment_outlines_coord,
-                extra_resolutions,
-                world,
-                //surface_volume,
-            );
+        let keys_and_rects = visible_tiles
+            .iter()
+            .map(|(tile_x, tile_y, tile_rect)| {
+                let key = TileCacheKey::new(
+                    self.pane_type,
+                    *tile_x,
+                    *tile_y,
+                    coord[self.pane_type.coordinates().2],
+                    zoom,
+                    paint_zoom,
+                    drawing_config,
+                    segment_outlines_coord,
+                    extra_resolutions,
+                    world,
+                    //surface_volume,
+                );
+                (key, *tile_rect)
+            })
+            .collect::<Vec<_>>();
 
-            if let Some(texture) = self.get_or_create_tile_async(ui, key, world) {
+        for (key, _) in keys_and_rects.iter() {
+            self.ensure_tile_async(ui, key.clone(), world);
+        }
+
+        let millis = if self.pane_type == PaneType::UV { 10 } else { 20 };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);
+        let mut ready_tiles = Vec::new();
+        for (key, tile_rect) in keys_and_rects {
+            if let Some(texture) = self.get_or_create_tile_async(ui, key, world, deadline) {
                 ready_tiles.push((texture, tile_rect));
             }
         }
-
         ready_tiles
     }
+    fn ensure_tile_async(&self, ui: &Ui, key: TileCacheKey, world: &Volume) {
+        // Check if tile exists in cache
+        let cached_value = ui.memory_mut(|mem| {
+            let cache: &mut TileCache = mem.caches.cache::<TileCache>();
+            cache.get(&key).cloned()
+        });
+        fn set(ui: &Ui, key: TileCacheKey, value: AsyncTexture) {
+            ui.memory_mut(|mem| {
+                let cache: &mut TileCache = mem.caches.cache::<TileCache>();
+                cache.set(key, value);
+            });
+        }
 
-    fn get_or_create_tile_async(&self, ui: &Ui, key: TileCacheKey, world: &Volume) -> Option<egui::TextureHandle> {
+        match cached_value {
+            None => {
+                let handle = self.create_tile_async(&key, world);
+
+                set(ui, key, AsyncTexture::Loading(handle));
+            }
+            _ => {}
+        }
+    }
+
+    fn get_or_create_tile_async(
+        &self,
+        ui: &Ui,
+        key: TileCacheKey,
+        world: &Volume,
+        deadline: std::time::Instant,
+    ) -> Option<egui::TextureHandle> {
         // Calculate paint_zoom for cache key (same logic as in create_tile)
 
         // Check if tile exists in cache
@@ -427,97 +465,46 @@ impl VolumePane {
                 let waker = futures::task::noop_waker();
                 let mut context = Context::from_waker(&waker);
 
-                // Poll the future in a blocking context to get accurate results
-                let poll_result = tokio::task::block_in_place(|| {
-                    /* Handle::current().block_on(async {
-                        Poll::Ready(future_guard.as_mut().await)
-                    }) */
-                    future_guard.as_mut().poll(&mut context)
-                });
+                // Poll repeatedly until deadline is reached or future is ready
+                loop {
+                    let poll_result = tokio::task::block_in_place(|| future_guard.as_mut().poll(&mut context));
 
-                match poll_result {
-                    Poll::Ready(image) => {
-                        //println!("Tile ({}, {}) for pane {:?} is ready", tile_x, tile_y, self.pane_type);
-                        let texture = ui.ctx().load_texture(
-                            format!(
-                                "{}_{}_{}_{}",
-                                self.pane_type.label(),
-                                key.tile_u,
-                                key.tile_v,
-                                self.pane_type.coordinates().2
-                            ),
-                            image.as_ref().clone(),
-                            Default::default(),
-                        );
-                        // Store the ready texture and return it
-                        drop(future_guard); // Release lock before cache operation
-                        set(ui, key, AsyncTexture::Ready(texture.clone()));
-                        Some(texture)
-                    }
-                    Poll::Pending => {
-                        /* println!(
-                            "Tile ({}, {}) for pane {:?} is still loading",
-                            tile_x, tile_y, self.pane_type
-                        ); */
-                        // Still loading, refresh cache entry to keep it alive and request repaint
-                        let future_clone = future_mutex.clone();
-                        drop(future_guard); // Release lock before cache operation
-                        set(ui, key, AsyncTexture::Loading(future_clone));
-                        ui.ctx().request_repaint();
-                        None
+                    match poll_result {
+                        Poll::Ready(image) => {
+                            //println!("Tile ({}, {}) for pane {:?} is ready", tile_x, tile_y, self.pane_type);
+                            let texture = ui.ctx().load_texture(
+                                format!(
+                                    "{}_{}_{}_{}",
+                                    self.pane_type.label(),
+                                    key.tile_u,
+                                    key.tile_v,
+                                    self.pane_type.coordinates().2
+                                ),
+                                image.as_ref().clone(),
+                                Default::default(),
+                            );
+                            // Store the ready texture and return it
+                            drop(future_guard); // Release lock before cache operation
+                            set(ui, key, AsyncTexture::Ready(texture.clone()));
+                            return Some(texture);
+                        }
+                        Poll::Pending => {
+                            // Check if deadline has passed
+                            if std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            // Small yield to prevent busy waiting
+                            std::thread::yield_now();
+                        }
                     }
                 }
 
-                /* if handle.is_finished() {
-                    /* // Take ownership of the handle to consume it
-                    if let Some(owned_handle) = handle_guard.take() {
-                        // Release the lock before calling now_or_never
-                        drop(handle_guard);
-
-                        match owned_handle.now_or_never() {
-                            Some(Ok(image)) => {
-                                let texture = ui.ctx().load_texture(
-                                    format!(
-                                        "{}_{}_{}_{}",
-                                        self.pane_type.label(),
-                                        tile_x,
-                                        tile_y,
-                                        self.pane_type.coordinates().2
-                                    ),
-                                    image,
-                                    Default::default(),
-                                );
-                                // Store the ready texture and return it
-                                set(ui, cache_key, AsyncTexture::Ready(texture.clone()));
-                                Some(texture)
-                            }
-                            Some(Err(_)) => {
-                                // Task failed, don't cache anything, let it retry
-                                println!("Error loading tile ({}, {}): task failed", tile_x, tile_y);
-                                None
-                            }
-                            None => {
-                                println!("Error loading tile ({}, {}): task not finished", tile_x, tile_y);
-                                // This shouldn't happen if is_finished() was true
-                                ui.ctx().request_repaint();
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    } */
-                } else {
-                    // Still loading, refresh cache entry to keep it alive and request repaint
-                    let handle_mutex_clone = handle_mutex.clone();
-                    drop(handle_guard); // Release the lock
-                    set(ui, cache_key, AsyncTexture::Loading(handle_mutex_clone));
-                    ui.ctx().request_repaint();
-                    None
-                } */
-                /* } else {
-                    // Handle was already taken, this shouldn't happen normally
-                    None
-                } */
+                // Deadline exceeded, still loading
+                let future_clone = future_mutex.clone();
+                drop(future_guard); // Release lock before cache operation
+                set(ui, key, AsyncTexture::Loading(future_clone));
+                ui.ctx().request_repaint();
+                None
             }
             None => {
                 // Start async rendering
