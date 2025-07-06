@@ -19,6 +19,7 @@ struct TileCacheKey {
     tile_u: i32,
     tile_v: i32,
     w: i32,
+    min_level: u32,
     paint_zoom: u8,
     drawing_config: DrawingConfig,
     segment_outlines_coord: Option<[i32; 3]>,
@@ -30,9 +31,10 @@ struct TileCacheKey {
 impl TileCacheKey {
     fn new(
         pane_type: PaneType,
-        tile_x: i32,
-        tile_y: i32,
-        coord: [i32; 3],
+        tile_u: i32,
+        tile_v: i32,
+        w: i32,
+        zoom: f32,
         paint_zoom: u8,
         drawing_config: &DrawingConfig,
         segment_outlines_coord: Option<[i32; 3]>,
@@ -45,16 +47,14 @@ impl TileCacheKey {
             let ptr: *const dyn SurfaceVolume = sv.as_ref();
             ptr as *const () as usize
         }); */
-
-        // For tile caching, we only need the depth coordinate (d_coord)
-        // since tile_x, tile_y already encode the spatial position
-        let (_, _, d_coord) = pane_type.coordinates();
+        let min_level = (32 - ((ZOOM_RES_FACTOR / zoom) as u32).leading_zeros()).min(4).max(0);
 
         Self {
             pane_type,
-            tile_u: tile_x,
-            tile_v: tile_y,
-            w: coord[d_coord],
+            tile_u,
+            tile_v,
+            w,
+            min_level,
             paint_zoom,
             drawing_config: drawing_config.clone(),
             segment_outlines_coord,
@@ -366,40 +366,6 @@ impl VolumePane {
         let visible_tiles = self.calculate_visible_tiles(coord, zoom, frame_width, frame_height);
         let mut ready_tiles = Vec::new();
 
-        for (tile_x, tile_y, tile_rect) in visible_tiles {
-            if let Some(texture) = self.get_or_create_tile_async(
-                ui,
-                tile_x,
-                tile_y,
-                coord,
-                world,
-                //surface_volume,
-                zoom,
-                drawing_config,
-                extra_resolutions,
-                segment_outlines_coord,
-            ) {
-                ready_tiles.push((texture, tile_rect));
-            }
-        }
-
-        ready_tiles
-    }
-
-    fn get_or_create_tile_async(
-        &self,
-        ui: &Ui,
-        tile_x: i32,
-        tile_y: i32,
-        coord: [i32; 3],
-        world: &Volume,
-        //surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
-        zoom: f32,
-        drawing_config: &DrawingConfig,
-        extra_resolutions: u32,
-        segment_outlines_coord: Option<[i32; 3]>,
-    ) -> Option<egui::TextureHandle> {
-        // Calculate paint_zoom for cache key (same logic as in create_tile)
         let paint_zoom = if zoom >= 1.0 {
             1u8
         } else {
@@ -408,25 +374,38 @@ impl VolumePane {
             downsample_factor.clamp(1, 8) // Reasonable limits
         };
 
-        let cache_key = TileCacheKey::new(
-            self.pane_type,
-            tile_x,
-            tile_y,
-            coord,
-            paint_zoom,
-            drawing_config,
-            segment_outlines_coord,
-            extra_resolutions,
-            world,
-            //surface_volume,
-        );
+        for (tile_x, tile_y, tile_rect) in visible_tiles {
+            let key = TileCacheKey::new(
+                self.pane_type,
+                tile_x,
+                tile_y,
+                coord[self.pane_type.coordinates().2],
+                zoom,
+                paint_zoom,
+                drawing_config,
+                segment_outlines_coord,
+                extra_resolutions,
+                world,
+                //surface_volume,
+            );
+
+            if let Some(texture) = self.get_or_create_tile_async(ui, key, world) {
+                ready_tiles.push((texture, tile_rect));
+            }
+        }
+
+        ready_tiles
+    }
+
+    fn get_or_create_tile_async(&self, ui: &Ui, key: TileCacheKey, world: &Volume) -> Option<egui::TextureHandle> {
+        // Calculate paint_zoom for cache key (same logic as in create_tile)
 
         // Check if tile exists in cache
         let cached_value = ui.memory_mut(|mem| {
             let cache: &mut TileCache = mem.caches.cache::<TileCache>();
 
             // Clone the cached value to avoid borrow conflicts
-            cache.get(&cache_key).cloned()
+            cache.get(&key).cloned()
         });
         fn set(ui: &Ui, key: TileCacheKey, value: AsyncTexture) {
             ui.memory_mut(|mem| {
@@ -438,7 +417,7 @@ impl VolumePane {
         match cached_value {
             Some(AsyncTexture::Ready(texture)) => {
                 // Texture is ready, return it and refresh cache
-                set(ui, cache_key, AsyncTexture::Ready(texture.clone()));
+                set(ui, key, AsyncTexture::Ready(texture.clone()));
                 Some(texture)
             }
             Some(AsyncTexture::Loading(future_mutex)) => {
@@ -463,8 +442,8 @@ impl VolumePane {
                             format!(
                                 "{}_{}_{}_{}",
                                 self.pane_type.label(),
-                                tile_x,
-                                tile_y,
+                                key.tile_u,
+                                key.tile_v,
                                 self.pane_type.coordinates().2
                             ),
                             image.as_ref().clone(),
@@ -472,7 +451,7 @@ impl VolumePane {
                         );
                         // Store the ready texture and return it
                         drop(future_guard); // Release lock before cache operation
-                        set(ui, cache_key, AsyncTexture::Ready(texture.clone()));
+                        set(ui, key, AsyncTexture::Ready(texture.clone()));
                         Some(texture)
                     }
                     Poll::Pending => {
@@ -483,7 +462,7 @@ impl VolumePane {
                         // Still loading, refresh cache entry to keep it alive and request repaint
                         let future_clone = future_mutex.clone();
                         drop(future_guard); // Release lock before cache operation
-                        set(ui, cache_key, AsyncTexture::Loading(future_clone));
+                        set(ui, key, AsyncTexture::Loading(future_clone));
                         ui.ctx().request_repaint();
                         None
                     }
@@ -542,19 +521,9 @@ impl VolumePane {
             }
             None => {
                 // Start async rendering
-                let handle = self.create_tile_async(
-                    tile_x,
-                    tile_y,
-                    coord,
-                    world.shared(),
-                    //surface_volume.cloned(),
-                    zoom,
-                    drawing_config.clone(),
-                    extra_resolutions,
-                    segment_outlines_coord,
-                );
+                let handle = self.create_tile_async(&key, world);
 
-                set(ui, cache_key, AsyncTexture::Loading(handle));
+                set(ui, key, AsyncTexture::Loading(handle));
                 // Request repaint to check again later
                 ui.ctx().request_repaint();
                 None
@@ -564,18 +533,13 @@ impl VolumePane {
 
     fn create_tile_async(
         &self,
-        tile_x: i32,
-        tile_y: i32,
-        coord: [i32; 3],
-        world: VolumeCons,
-        //surface_volume: Option<Arc<dyn SurfaceVolume + Send + Sync>>,
-        zoom: f32,
-        drawing_config: DrawingConfig,
-        extra_resolutions: u32,
-        segment_outlines_coord: Option<[i32; 3]>,
+        key: &TileCacheKey,
+        world: &Volume,
     ) -> Arc<Mutex<Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>>>> {
         let pane_type = self.pane_type;
         let is_segment_pane = self.is_segment_pane;
+        let key_clone = key.clone();
+        let shared = world.shared();
 
         let handle = tokio::task::spawn_blocking(move || {
             /* println!(
@@ -583,17 +547,7 @@ impl VolumePane {
                 tile_x, tile_y, pane_type, coord, zoom
             ); */
             let volume_pane = VolumePane::new(pane_type, is_segment_pane);
-            let image = volume_pane.create_tile_sync(
-                tile_x,
-                tile_y,
-                coord,
-                &world(),
-                //surface_volume, //.as_ref().map(|sv| sv),
-                zoom,
-                &drawing_config,
-                extra_resolutions,
-                segment_outlines_coord,
-            );
+            let image = volume_pane.create_tile_sync(&key_clone, shared());
             /* println!(
                 "Finished creating tile ({}, {}) for pane {:?} at coord {:?} with zoom {:.2}",
                 tile_x, tile_y, pane_type, coord, zoom
@@ -601,12 +555,14 @@ impl VolumePane {
             Arc::new(image)
         });
 
+        let key = key.clone();
+
         // Map the JoinError to a default error image and box the future
         let future: Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>> = Box::pin(async move {
             match handle.await {
                 Ok(image) => image,
                 Err(_join_error) => {
-                    println!("Error loading tile ({}, {}): task failed", tile_x, tile_y);
+                    println!("Error loading tile ({}, {}): task failed", key.tile_u, key.tile_v);
                     // Return a simple error image
                     Arc::new(egui::ColorImage::example())
                 }
@@ -616,31 +572,14 @@ impl VolumePane {
         Arc::new(Mutex::new(future))
     }
 
-    fn create_tile_sync(
-        &self,
-        tile_x: i32,
-        tile_y: i32,
-        coord: [i32; 3],
-        world: &Volume,
-        //surface_volume: Option<Arc<dyn SurfaceVolume + Send + Sync>>,
-        zoom: f32,
-        drawing_config: &DrawingConfig,
-        extra_resolutions: u32,
-        segment_outlines_coord: Option<[i32; 3]>,
-    ) -> egui::ColorImage {
+    fn create_tile_sync(&self, key: &TileCacheKey, world: Volume) -> egui::ColorImage {
         use std::time::Instant;
         let _start = Instant::now();
 
         let (u_coord, v_coord, d_coord) = self.pane_type.coordinates();
 
         // Use integer paint zoom levels like the original code
-        let paint_zoom = if zoom >= 1.0 {
-            1u8
-        } else {
-            // For zoom < 1.0, use integer downsampling
-            let downsample_factor = (1.0 / zoom).ceil() as u8;
-            downsample_factor.clamp(1, 8) // Reasonable limits
-        };
+        let paint_zoom = key.paint_zoom;
 
         // Always use fixed tile size - let paint_zoom handle the scaling
         let tile_width = TILE_SIZE;
@@ -652,16 +591,17 @@ impl VolumePane {
         let effective_tile_size = TILE_SIZE as f32 * paint_zoom as f32;
 
         // tile_x corresponds to u_coord, tile_y corresponds to v_coord
-        let tile_world_u = tile_x as f32 * effective_tile_size;
-        let tile_world_v = tile_y as f32 * effective_tile_size;
+        let tile_world_u = key.tile_u as f32 * effective_tile_size;
+        let tile_world_v = key.tile_v as f32 * effective_tile_size;
 
         // Set tile center in world coordinates for this pane's coordinate system
-        let mut tile_coord = coord;
+        let mut tile_coord = [0, 0, 0];
         tile_coord[u_coord] = (tile_world_u + effective_tile_size / 2.0) as i32;
         tile_coord[v_coord] = (tile_world_v + effective_tile_size / 2.0) as i32;
+        tile_coord[d_coord] = key.w;
 
-        let min_level = (32 - ((ZOOM_RES_FACTOR / zoom) as u32).leading_zeros()).min(4).max(0);
-        let max_level: u32 = (min_level + extra_resolutions).min(4);
+        let min_level = key.min_level;
+        let max_level: u32 = (min_level + key.extra_resolutions).min(4);
 
         for level in (min_level..=max_level).rev() {
             let sfactor = 1 << level as u8;
@@ -674,7 +614,7 @@ impl VolumePane {
                 tile_height,
                 sfactor,
                 paint_zoom,
-                drawing_config,
+                &key.drawing_config,
                 &mut image,
             );
         }
