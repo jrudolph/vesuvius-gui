@@ -1,6 +1,6 @@
 use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume, VolumeCons};
 use egui::cache::FramePublisher;
-use egui::{ColorImage, PointerButton, Response, Ui, Vec2};
+use egui::{Color32, ColorImage, PointerButton, Response, Ui, Vec2};
 use futures::FutureExt;
 use std::ops::{Deref, RangeInclusive};
 use std::pin::Pin;
@@ -40,13 +40,14 @@ impl TileCacheKey {
         segment_outlines_coord: Option<[i32; 3]>,
         extra_resolutions: u32,
         world: &Volume,
-        //surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
+        //surface_volume: Option<Arc<dyn SurfaceVolume>>,
     ) -> Self {
         let volume_id = world as *const Volume as usize;
-        /* let surface_volume_id = surface_volume.map(|sv| {
+        /* let surface_volume_id = surface_volume.as_ref().map(|sv| {
             let ptr: *const dyn SurfaceVolume = sv.as_ref();
             ptr as *const () as usize
         }); */
+
         let min_level = (32 - ((ZOOM_RES_FACTOR / zoom) as u32).leading_zeros()).min(4).max(0);
 
         Self {
@@ -189,6 +190,7 @@ impl VolumePane {
                 tiles.push((tile_x, tile_y, screen_rect));
             }
         }
+
         tiles
     }
 
@@ -243,7 +245,7 @@ impl VolumePane {
         ui: &mut Ui,
         coord: &mut [i32; 3],
         world: &Volume,
-        //surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
+        surface_volume: Option<Arc<dyn SurfaceVolume>>,
         zoom: &mut f32,
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
@@ -259,7 +261,6 @@ impl VolumePane {
             ui,
             *coord,
             world,
-            //surface_volume,
             *zoom,
             frame_width,
             frame_height,
@@ -283,6 +284,51 @@ impl VolumePane {
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)),
                 egui::Color32::WHITE,
             );
+        }
+
+        // Add segment outlines if configured
+        if let (Some(surface_vol), Some(outlines_coord)) = (surface_volume, segment_outlines_coord) {
+            // paint segment outline on a new texture that is not cached or tiled
+            let (u_coord, v_coord, d_coord) = self.pane_type.coordinates();
+            let paint_zoom = if *zoom >= 1.0 {
+                1u8
+            } else {
+                let downsample_factor = ((1.0 / *zoom).ceil() as u8).clamp(1, 8);
+
+                downsample_factor
+            };
+
+            if !self.is_segment_pane && drawing_config.show_segment_outlines {
+                let scaling = *zoom * paint_zoom as f32;
+                let width = (frame_width as f32 / scaling) as usize;
+                let height = (frame_height as f32 / scaling) as usize;
+
+                let mut image = crate::volume::Image::new_from_color(width, height, Color32::TRANSPARENT);
+                surface_vol.paint_plane_intersection(
+                    *coord,
+                    u_coord,
+                    v_coord,
+                    d_coord,
+                    width,
+                    height,
+                    1,
+                    paint_zoom,
+                    Some(outlines_coord),
+                    drawing_config,
+                    &mut image,
+                );
+                let image: egui::ColorImage = image.into();
+                let texture = ui.ctx().load_texture(self.pane_type.label(), image, Default::default());
+                // Adjust rect to be relative to response.rect
+                let adjusted_rect = egui::Rect::from_min_size(response.rect.min, response.rect.size());
+                // Paint the segment outline texture
+                painter.image(
+                    texture.id(),
+                    adjusted_rect,
+                    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
         }
 
         // Handle interactions and return whether textures need clearing
@@ -355,7 +401,7 @@ impl VolumePane {
         ui: &Ui,
         coord: [i32; 3],
         world: &Volume,
-        //surface_volume: Option<&Arc<dyn SurfaceVolume + Send + Sync>>,
+        //surface_volume: Option<Arc<dyn SurfaceVolume>>,
         zoom: f32,
         frame_width: usize,
         frame_height: usize,
@@ -386,7 +432,7 @@ impl VolumePane {
                     segment_outlines_coord,
                     extra_resolutions,
                     world,
-                    //surface_volume,
+                    //surface_volume.clone(),
                 );
                 (key, *tile_rect)
             })
@@ -396,7 +442,7 @@ impl VolumePane {
             self.ensure_tile_async(ui, key.clone(), world);
         }
 
-        let millis = if self.pane_type == PaneType::UV { 10 } else { 20 };
+        let millis = 20; //if self.pane_type == PaneType::UV { 10 } else { 20 };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);
         let mut ready_tiles = Vec::new();
         for (key, tile_rect) in keys_and_rects {

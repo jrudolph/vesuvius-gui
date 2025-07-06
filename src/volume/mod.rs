@@ -146,10 +146,13 @@ pub struct Image {
 }
 impl Image {
     pub fn new(width: usize, height: usize) -> Self {
+        Self::new_from_color(width, height, Color32::BLACK)
+    }
+    pub fn new_from_color(width: usize, height: usize, color: Color32) -> Self {
         Self {
             width,
             height,
-            data: vec![Color32::BLACK; width * height],
+            data: vec![color; width * height],
         }
     }
 

@@ -17,7 +17,6 @@ use egui::{Response, Ui, Widget};
 use egui_extras::Column;
 use egui_extras::TableBuilder;
 use std::ops::RangeInclusive;
-use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -36,8 +35,8 @@ pub struct SegmentMode {
     world: Volume,
     // This is the same reference as `world`. We need to add it just because upcasting between SurfaceVolume and VoxelPaintVolume is so hard.
     // TODO: remove when there's a better way to upcast
-    //#[serde(skip)]
-    //surface_volume: Rc<dyn SurfaceVolume>,
+    #[serde(skip)]
+    surface_volume: Arc<dyn SurfaceVolume>,
     #[serde(skip)]
     uv_pane: VolumePane,
     #[serde(skip)]
@@ -54,7 +53,7 @@ impl Default for SegmentMode {
             height: 1000,
             ranges: [0..=1000, 0..=1000, -40..=40],
             world: EmptyVolume {}.into_volume(),
-            //surface_volume: Rc::new(EmptyVolume {}),
+            surface_volume: Arc::new(EmptyVolume {}),
             uv_pane: VolumePane::new(PaneType::UV, true),
             convert_to_world_coords: Box::new(|x| x),
         }
@@ -267,7 +266,7 @@ impl TemplateApp {
             segment.height = height as usize;
             segment.ranges = [0..=width, 0..=height, -40..=40];
             segment.world = Volume::from_ref(volume.clone());
-            //segment.surface_volume = volume;
+            segment.surface_volume = volume;
             segment.convert_to_world_coords = Box::new(move |coords| obj2.convert_to_volume_coords(coords));
 
             self.segment_mode = Some(segment)
@@ -761,7 +760,7 @@ impl TemplateApp {
             ui,
             &mut self.coord,
             &self.world,
-            //self.segment_mode.as_ref().map(|s| &s.surface_volume),
+            self.segment_mode.as_ref().map(|s| s.surface_volume.clone()),
             &mut self.zoom,
             &self.drawing_config,
             self.extra_resolutions,
@@ -776,7 +775,7 @@ impl TemplateApp {
                 ui,
                 &mut segment_mode.coord,
                 &segment_mode.world,
-                // Some(&segment_mode.surface_volume),
+                None,
                 &mut self.zoom,
                 &self.drawing_config,
                 self.extra_resolutions,
