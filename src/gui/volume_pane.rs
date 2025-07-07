@@ -5,6 +5,7 @@ use futures::FutureExt;
 use std::ops::{Deref, RangeInclusive};
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use tokio::runtime::Handle;
@@ -67,27 +68,31 @@ impl TileCacheKey {
 }
 
 struct HandleHolder {
-    handle: Option<JoinHandle<egui::ColorImage>>,
+    //handle: Option<JoinHandle<egui::ColorImage>>,
+    future: Arc<Mutex<Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>>>>,
+    is_cancelled: Arc<AtomicBool>,
 }
 impl HandleHolder {
-    fn is_finished(&self) -> bool {
+    /* fn is_finished(&self) -> bool {
         self.handle.as_ref().map_or(false, |h| h.is_finished())
     }
     fn now_or_never(mut self) -> Option<Result<egui::ColorImage, tokio::task::JoinError>> {
         self.handle.take().unwrap().now_or_never()
-    }
+    } */
 }
 impl Drop for HandleHolder {
     fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            //handle.abort();
-        }
+        // if let Some(handle) = self.handle.take() {
+        //     //handle.abort();
+        // }
+
+        self.is_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 #[derive(Clone)]
 enum AsyncTexture {
-    Loading(Arc<Mutex<Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>>>>),
+    Loading(Arc<HandleHolder>),
     Ready(egui::TextureHandle),
 }
 
@@ -504,8 +509,8 @@ impl VolumePane {
                 set(ui, key, AsyncTexture::Ready(texture.clone()));
                 Some(texture)
             }
-            Some(AsyncTexture::Loading(future_mutex)) => {
-                let mut future_guard = future_mutex.lock().unwrap();
+            Some(AsyncTexture::Loading(holder)) => {
+                let mut future_guard = holder.future.lock().unwrap();
 
                 // Create a waker that will work properly with tokio futures
                 let waker = futures::task::noop_waker();
@@ -546,7 +551,7 @@ impl VolumePane {
                 }
 
                 // Deadline exceeded, still loading
-                let future_clone = future_mutex.clone();
+                let future_clone = holder.clone();
                 drop(future_guard); // Release lock before cache operation
                 set(ui, key, AsyncTexture::Loading(future_clone));
                 ui.ctx().request_repaint();
@@ -564,17 +569,24 @@ impl VolumePane {
         }
     }
 
-    fn create_tile_async(
-        &self,
-        key: &TileCacheKey,
-        world: &Volume,
-    ) -> Arc<Mutex<Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>>>> {
+    fn create_tile_async(&self, key: &TileCacheKey, world: &Volume) -> Arc<HandleHolder> {
         let pane_type = self.pane_type;
         let is_segment_pane = self.is_segment_pane;
         let key_clone = key.clone();
         let shared = world.shared();
+        let is_cancelled = Arc::new(AtomicBool::new(false));
+        let is_cancelled_clone = is_cancelled.clone();
 
         let handle = tokio::task::spawn_blocking(move || {
+            // Check if the task was cancelled
+            if is_cancelled_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                println!(
+                    "Tile creation for ({}, {}) was cancelled",
+                    key_clone.tile_u, key_clone.tile_v
+                );
+                return Arc::new(egui::ColorImage::example());
+            }
+
             /* println!(
                 "Creating tile ({}, {}) for pane {:?} at coord {:?} with zoom {:.2}",
                 tile_x, tile_y, pane_type, coord, zoom
@@ -602,7 +614,10 @@ impl VolumePane {
             }
         });
 
-        Arc::new(Mutex::new(future))
+        Arc::new(HandleHolder {
+            future: Arc::new(Mutex::new(future)),
+            is_cancelled,
+        })
     }
 
     fn create_tile_sync(&self, key: &TileCacheKey, world: Volume) -> egui::ColorImage {
