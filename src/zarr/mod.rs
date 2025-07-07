@@ -19,9 +19,8 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 use std::{
-    ops::{Deref, DerefMut},
+    ops::Deref,
     sync::{Arc, Mutex},
 };
 
@@ -617,7 +616,7 @@ impl ZarrContext<3> {
                 // slow path goes through mutex
                 self.get_from_cache(chunk_no, idx); // prime last cache
             }
-            let mut state = self.state.borrow_mut();
+            let state = self.state.borrow_mut();
             match state.last_context {
                 Some(None) | None => return None,
                 _ => {}

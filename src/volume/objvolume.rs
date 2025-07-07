@@ -491,8 +491,6 @@ impl CompositionState for AlphaCompositionState {
             return true;
         }
 
-        let before_value = self.value;
-        let before_alpha = self.alpha;
         let weight = (1.0 - self.alpha) * (value * self.material).min(1.0);
         self.value += weight * value;
         self.alpha += weight;
