@@ -1,15 +1,11 @@
-use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume, VolumeCons};
+use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume};
 use egui::cache::FramePublisher;
 use egui::{Color32, ColorImage, PointerButton, Response, Ui, Vec2};
-use futures::FutureExt;
-use std::ops::{Deref, RangeInclusive};
+use std::ops::RangeInclusive;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
-use tokio::runtime::Handle;
-use tokio::task::JoinHandle;
+use std::task::{Context, Poll};
 
 const ZOOM_RES_FACTOR: f32 = 1.3;
 const TILE_SIZE: usize = 256;
@@ -26,7 +22,6 @@ struct TileCacheKey {
     segment_outlines_coord: Option<[i32; 3]>,
     extra_resolutions: u32,
     volume_id: usize,
-    //surface_volume_id: Option<usize>,
 }
 
 impl TileCacheKey {
@@ -41,13 +36,8 @@ impl TileCacheKey {
         segment_outlines_coord: Option<[i32; 3]>,
         extra_resolutions: u32,
         world: &Volume,
-        //surface_volume: Option<Arc<dyn SurfaceVolume>>,
     ) -> Self {
         let volume_id = world as *const Volume as usize;
-        /* let surface_volume_id = surface_volume.as_ref().map(|sv| {
-            let ptr: *const dyn SurfaceVolume = sv.as_ref();
-            ptr as *const () as usize
-        }); */
 
         let min_level = (32 - ((ZOOM_RES_FACTOR / zoom) as u32).leading_zeros()).min(4).max(0);
 
@@ -62,37 +52,23 @@ impl TileCacheKey {
             segment_outlines_coord,
             extra_resolutions,
             volume_id,
-            //surface_volume_id,
         }
     }
 }
 
-struct HandleHolder {
-    //handle: Option<JoinHandle<egui::ColorImage>>,
-    future: Arc<Mutex<Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>>>>,
+struct CancellableImageFuture {
+    future: Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>>,
     is_cancelled: Arc<AtomicBool>,
 }
-impl HandleHolder {
-    /* fn is_finished(&self) -> bool {
-        self.handle.as_ref().map_or(false, |h| h.is_finished())
-    }
-    fn now_or_never(mut self) -> Option<Result<egui::ColorImage, tokio::task::JoinError>> {
-        self.handle.take().unwrap().now_or_never()
-    } */
-}
-impl Drop for HandleHolder {
+impl Drop for CancellableImageFuture {
     fn drop(&mut self) {
-        // if let Some(handle) = self.handle.take() {
-        //     //handle.abort();
-        // }
-
         self.is_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 #[derive(Clone)]
 enum AsyncTexture {
-    Loading(Arc<HandleHolder>),
+    Loading(Arc<Mutex<CancellableImageFuture>>),
     Ready(egui::TextureHandle),
 }
 
@@ -406,7 +382,6 @@ impl VolumePane {
         ui: &Ui,
         coord: [i32; 3],
         world: &Volume,
-        //surface_volume: Option<Arc<dyn SurfaceVolume>>,
         zoom: f32,
         frame_width: usize,
         frame_height: usize,
@@ -437,7 +412,6 @@ impl VolumePane {
                     segment_outlines_coord,
                     extra_resolutions,
                     world,
-                    //surface_volume.clone(),
                 );
                 (key, *tile_rect)
             })
@@ -510,7 +484,7 @@ impl VolumePane {
                 Some(texture)
             }
             Some(AsyncTexture::Loading(holder)) => {
-                let mut future_guard = holder.future.lock().unwrap();
+                let future = &mut holder.lock().unwrap().future;
 
                 // Create a waker that will work properly with tokio futures
                 let waker = futures::task::noop_waker();
@@ -518,7 +492,7 @@ impl VolumePane {
 
                 // Poll repeatedly until deadline is reached or future is ready
                 loop {
-                    let poll_result = tokio::task::block_in_place(|| future_guard.as_mut().poll(&mut context));
+                    let poll_result = tokio::task::block_in_place(|| future.as_mut().poll(&mut context));
 
                     match poll_result {
                         Poll::Ready(image) => {
@@ -535,7 +509,6 @@ impl VolumePane {
                                 Default::default(),
                             );
                             // Store the ready texture and return it
-                            drop(future_guard); // Release lock before cache operation
                             set(ui, key, AsyncTexture::Ready(texture.clone()));
                             return Some(texture);
                         }
@@ -551,9 +524,7 @@ impl VolumePane {
                 }
 
                 // Deadline exceeded, still loading
-                let future_clone = holder.clone();
-                drop(future_guard); // Release lock before cache operation
-                set(ui, key, AsyncTexture::Loading(future_clone));
+                set(ui, key, AsyncTexture::Loading(holder.clone()));
                 ui.ctx().request_repaint();
                 None
             }
@@ -562,14 +533,13 @@ impl VolumePane {
                 let handle = self.create_tile_async(&key, world);
 
                 set(ui, key, AsyncTexture::Loading(handle));
-                // Request repaint to check again later
                 ui.ctx().request_repaint();
                 None
             }
         }
     }
 
-    fn create_tile_async(&self, key: &TileCacheKey, world: &Volume) -> Arc<HandleHolder> {
+    fn create_tile_async(&self, key: &TileCacheKey, world: &Volume) -> Arc<Mutex<CancellableImageFuture>> {
         let pane_type = self.pane_type;
         let is_segment_pane = self.is_segment_pane;
         let key_clone = key.clone();
@@ -578,25 +548,12 @@ impl VolumePane {
         let is_cancelled_clone = is_cancelled.clone();
 
         let handle = tokio::task::spawn_blocking(move || {
-            // Check if the task was cancelled
             if is_cancelled_clone.load(std::sync::atomic::Ordering::SeqCst) {
-                println!(
-                    "Tile creation for ({}, {}) was cancelled",
-                    key_clone.tile_u, key_clone.tile_v
-                );
                 return Arc::new(egui::ColorImage::example());
             }
 
-            /* println!(
-                "Creating tile ({}, {}) for pane {:?} at coord {:?} with zoom {:.2}",
-                tile_x, tile_y, pane_type, coord, zoom
-            ); */
             let volume_pane = VolumePane::new(pane_type, is_segment_pane);
             let image = volume_pane.create_tile_sync(&key_clone, shared());
-            /* println!(
-                "Finished creating tile ({}, {}) for pane {:?} at coord {:?} with zoom {:.2}",
-                tile_x, tile_y, pane_type, coord, zoom
-            ); */
             Arc::new(image)
         });
 
@@ -614,10 +571,10 @@ impl VolumePane {
             }
         });
 
-        Arc::new(HandleHolder {
-            future: Arc::new(Mutex::new(future)),
+        Arc::new(Mutex::new(CancellableImageFuture {
+            future: future,
             is_cancelled,
-        })
+        }))
     }
 
     fn create_tile_sync(&self, key: &TileCacheKey, world: Volume) -> egui::ColorImage {
@@ -666,25 +623,6 @@ impl VolumePane {
                 &mut image,
             );
         }
-
-        // Add segment outlines if configured
-        /* if let (Some(surface_vol), Some(outlines_coord)) = (surface_volume, segment_outlines_coord) {
-            if !self.is_segment_pane && drawing_config.show_segment_outlines {
-                surface_vol.paint_plane_intersection(
-                    tile_coord,
-                    u_coord,
-                    v_coord,
-                    d_coord,
-                    tile_width,
-                    tile_height,
-                    1,
-                    paint_zoom,
-                    Some(outlines_coord),
-                    drawing_config,
-                    &mut image,
-                );
-            }
-        } */
 
         let image: egui::ColorImage = image.into();
         image
