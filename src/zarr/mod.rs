@@ -253,16 +253,21 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
     fn load_array_def(&self) -> ZarrArrayDef {
         let target_file = format!("{}/.zarray", self.local_cache_dir);
         if !std::path::Path::new(&target_file).exists() {
-            let data = ehttp::fetch_blocking(&Request::get(&format!("{}/.zarray", self.url)))
-                .unwrap()
-                .bytes
-                .to_vec();
+            let zarray_url = format!("{}/.zarray", self.url);
+            let res = ehttp::fetch_blocking(&Request::get(&zarray_url)).unwrap();
+
+            if res.status != 200 {
+                panic!("Failed to download .zarray from {}, status: {}", zarray_url, res.status);
+            }
+            let data = res.bytes.to_vec();
+
             std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
             std::fs::write(&target_file, &data).unwrap();
         }
 
         let zarray = std::fs::read_to_string(&target_file).unwrap();
-        serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
+        serde_json::from_str::<ZarrArrayDef>(&zarray)
+            .expect(format!("Failed to parse .zarray from {}", target_file).as_str())
     }
 
     fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
