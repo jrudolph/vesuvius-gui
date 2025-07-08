@@ -528,8 +528,8 @@ impl TemplateApp {
                             );
                             slider(
                                 ui,
-                                "Material",
-                                &mut self.drawing_config.compositing.material,
+                                "Opacity",
+                                &mut self.drawing_config.compositing.opacity,
                                 0..=300,
                                 false,
                                 true,

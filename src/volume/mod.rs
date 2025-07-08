@@ -41,7 +41,7 @@ pub struct CompositingSettings {
     pub alpha_min: u8,
     pub alpha_max: u8,
     pub alpha_threshold: u16,
-    pub material: u16,
+    pub opacity: u16,
     pub reverse_direction: bool,
 }
 
@@ -97,7 +97,7 @@ impl Default for DrawingConfig {
                 alpha_min: (0.3 * 255.0) as u8,
                 alpha_max: (0.7 * 255.0) as u8,
                 alpha_threshold: 9500,
-                material: 1,
+                opacity: 1,
                 reverse_direction: false,
             },
         }

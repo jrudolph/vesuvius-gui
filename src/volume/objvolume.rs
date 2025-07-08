@@ -303,7 +303,7 @@ impl ObjVolume {
 
     pub fn load_obj(file_path: &str) -> ObjFile {
         let obj_file = std::fs::read_to_string(file_path).unwrap();
-        // filter out material definitions that wavefront_obj does not cope well with
+        // filter out opacity definitions that wavefront_obj does not cope well with
         let (not_faces, faces): (Vec<_>, Vec<_>) = obj_file
             .lines()
             .filter(|line| !line.starts_with("mtllib"))
@@ -466,17 +466,17 @@ struct AlphaCompositionState {
     min: f32,
     max: f32,
     alpha_cutoff: f32,
-    material: f32,
+    opacity: f32,
     value: f32,
     alpha: f32,
 }
 impl AlphaCompositionState {
-    fn new(min: f32, max: f32, alpha_cutoff: f32, material: f32) -> Self {
+    fn new(min: f32, max: f32, alpha_cutoff: f32, opacity: f32) -> Self {
         Self {
             min,
             max,
             alpha_cutoff,
-            material,
+            opacity: opacity,
             value: 0.0,
             alpha: 0.0,
         }
@@ -491,7 +491,7 @@ impl CompositionState for AlphaCompositionState {
             return true;
         }
 
-        let weight = (1.0 - self.alpha) * (value * self.material).min(1.0);
+        let weight = (1.0 - self.alpha) * (value * self.opacity).min(1.0);
         self.value += weight * value;
         self.alpha += weight;
 
@@ -535,7 +535,7 @@ impl PaintVolume for ObjVolume {
                 config.compositing.alpha_min as f32 / 255.0,
                 config.compositing.alpha_max as f32 / 255.0,
                 config.compositing.alpha_threshold as f32 / 10000.0,
-                config.compositing.material as f32 / 100.0,
+                config.compositing.opacity as f32 / 100.0,
             )),
             _ => Box::new(NoCompositionState {}),
         };
