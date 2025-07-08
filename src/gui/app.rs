@@ -622,66 +622,68 @@ impl TemplateApp {
             self.catalog_panel(ctx);
         }
 
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::F) {
-                self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
-            }
-            if self.overlay.is_some() && i.key_pressed(egui::Key::L) {
-                self.show_overlay = !self.show_overlay;
-            }
-            if self.is_segment_mode() {
-                if i.key_pressed(egui::Key::I) {
-                    self.drawing_config.trilinear_interpolation = !self.drawing_config.trilinear_interpolation;
+        if !ctx.wants_keyboard_input() {
+            ctx.input(|i| {
+                if i.key_pressed(egui::Key::F) {
+                    self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
                 }
-                if i.key_pressed(egui::Key::O) {
-                    self.drawing_config.show_segment_outlines = !self.drawing_config.show_segment_outlines;
+                if self.overlay.is_some() && i.key_pressed(egui::Key::L) {
+                    self.show_overlay = !self.show_overlay;
                 }
-                if i.key_pressed(egui::Key::P) {
-                    self.drawing_config.draw_outline_vertices = !self.drawing_config.draw_outline_vertices;
-                }
-                if i.key_pressed(egui::Key::S) {
-                    self.sync_coordinates = !self.sync_coordinates;
-                }
-                if i.key_pressed(egui::Key::X) {
-                    self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
-                }
-                if i.key_pressed(egui::Key::A) {
-                    if self.drawing_config.compositing.mode == CompositingMode::None {
-                        self.drawing_config.compositing.mode = CompositingMode::Alpha;
-                    } else {
-                        self.drawing_config.compositing.mode = CompositingMode::None;
+                if self.is_segment_mode() {
+                    if i.key_pressed(egui::Key::I) {
+                        self.drawing_config.trilinear_interpolation = !self.drawing_config.trilinear_interpolation;
+                    }
+                    if i.key_pressed(egui::Key::O) {
+                        self.drawing_config.show_segment_outlines = !self.drawing_config.show_segment_outlines;
+                    }
+                    if i.key_pressed(egui::Key::P) {
+                        self.drawing_config.draw_outline_vertices = !self.drawing_config.draw_outline_vertices;
+                    }
+                    if i.key_pressed(egui::Key::S) {
+                        self.sync_coordinates = !self.sync_coordinates;
+                    }
+                    if i.key_pressed(egui::Key::X) {
+                        self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
+                    }
+                    if i.key_pressed(egui::Key::A) {
+                        if self.drawing_config.compositing.mode == CompositingMode::None {
+                            self.drawing_config.compositing.mode = CompositingMode::Alpha;
+                        } else {
+                            self.drawing_config.compositing.mode = CompositingMode::None;
+                        }
+                    }
+                    if i.key_pressed(egui::Key::J) {
+                        let segment_mode = self.segment_mode.as_mut().unwrap();
+                        segment_mode.coord[2] = (segment_mode.coord[2] - 1).max(*segment_mode.ranges[2].start());
+                        self.sync_coords();
+                    }
+                    if i.key_pressed(egui::Key::K) {
+                        let segment_mode = self.segment_mode.as_mut().unwrap();
+                        segment_mode.coord[2] = (segment_mode.coord[2] + 1).min(*segment_mode.ranges[2].end());
+                        self.sync_coords();
+                    }
+                    if i.key_pressed(egui::Key::C) {
+                        self.catalog_panel_open = !self.catalog_panel_open;
+                    }
+                    if i.key_pressed(egui::Key::Num1) {
+                        self.layout = GuiLayout::Grid;
+                    }
+                    if i.key_pressed(egui::Key::Num2) {
+                        self.layout = GuiLayout::XY;
+                    }
+                    if i.key_pressed(egui::Key::Num3) {
+                        self.layout = GuiLayout::XZ;
+                    }
+                    if i.key_pressed(egui::Key::Num4) {
+                        self.layout = GuiLayout::YZ;
+                    }
+                    if i.key_pressed(egui::Key::Num5) {
+                        self.layout = GuiLayout::UV;
                     }
                 }
-                if i.key_pressed(egui::Key::J) {
-                    let segment_mode = self.segment_mode.as_mut().unwrap();
-                    segment_mode.coord[2] = (segment_mode.coord[2] - 1).max(*segment_mode.ranges[2].start());
-                    self.sync_coords();
-                }
-                if i.key_pressed(egui::Key::K) {
-                    let segment_mode = self.segment_mode.as_mut().unwrap();
-                    segment_mode.coord[2] = (segment_mode.coord[2] + 1).min(*segment_mode.ranges[2].end());
-                    self.sync_coords();
-                }
-                if i.key_pressed(egui::Key::C) {
-                    self.catalog_panel_open = !self.catalog_panel_open;
-                }
-                if i.key_pressed(egui::Key::Num1) {
-                    self.layout = GuiLayout::Grid;
-                }
-                if i.key_pressed(egui::Key::Num2) {
-                    self.layout = GuiLayout::XY;
-                }
-                if i.key_pressed(egui::Key::Num3) {
-                    self.layout = GuiLayout::XZ;
-                }
-                if i.key_pressed(egui::Key::Num4) {
-                    self.layout = GuiLayout::YZ;
-                }
-                if i.key_pressed(egui::Key::Num5) {
-                    self.layout = GuiLayout::UV;
-                }
-            }
-        });
+            });
+        }
 
         egui::Window::new("Controls").show(ctx, |ui| {
             self.controls(_frame, ui);
