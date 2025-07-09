@@ -1,4 +1,4 @@
-use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume};
+use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
 use egui::cache::FramePublisher;
 use egui::{Color32, ColorImage, PointerButton, Response, Ui, Vec2};
 use std::ops::RangeInclusive;
@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-const ZOOM_RES_FACTOR: f32 = 1.3;
+const ZOOM_RES_FACTOR: f32 = 1.;
 const TILE_SIZE: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -610,6 +610,7 @@ impl VolumePane {
 
         for level in (min_level..=max_level).rev() {
             let sfactor = 1 << level as u8;
+            world.reset_for_painting();
             world.paint(
                 tile_coord,
                 u_coord,
