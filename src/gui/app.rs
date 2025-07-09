@@ -630,6 +630,21 @@ impl TemplateApp {
                 if self.overlay.is_some() && i.key_pressed(egui::Key::L) {
                     self.show_overlay = !self.show_overlay;
                 }
+                if i.key_pressed(egui::Key::C) {
+                    self.catalog_panel_open = !self.catalog_panel_open;
+                }
+                if i.key_pressed(egui::Key::Num1) {
+                    self.layout = GuiLayout::Grid;
+                }
+                if i.key_pressed(egui::Key::Num2) {
+                    self.layout = GuiLayout::XY;
+                }
+                if i.key_pressed(egui::Key::Num3) {
+                    self.layout = GuiLayout::XZ;
+                }
+                if i.key_pressed(egui::Key::Num4) {
+                    self.layout = GuiLayout::YZ;
+                }
                 if self.is_segment_mode() {
                     if i.key_pressed(egui::Key::I) {
                         self.drawing_config.trilinear_interpolation = !self.drawing_config.trilinear_interpolation;
@@ -647,8 +662,15 @@ impl TemplateApp {
                         self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
                     }
                     if i.key_pressed(egui::Key::A) {
-                        if self.drawing_config.compositing.mode == CompositingMode::None {
+                        if self.drawing_config.compositing.mode != CompositingMode::Alpha {
                             self.drawing_config.compositing.mode = CompositingMode::Alpha;
+                        } else {
+                            self.drawing_config.compositing.mode = CompositingMode::None;
+                        }
+                    }
+                    if i.key_pressed(egui::Key::M) {
+                        if self.drawing_config.compositing.mode != CompositingMode::Max {
+                            self.drawing_config.compositing.mode = CompositingMode::Max;
                         } else {
                             self.drawing_config.compositing.mode = CompositingMode::None;
                         }
@@ -663,20 +685,10 @@ impl TemplateApp {
                         segment_mode.coord[2] = (segment_mode.coord[2] + 1).min(*segment_mode.ranges[2].end());
                         self.sync_coords();
                     }
-                    if i.key_pressed(egui::Key::C) {
-                        self.catalog_panel_open = !self.catalog_panel_open;
-                    }
-                    if i.key_pressed(egui::Key::Num1) {
-                        self.layout = GuiLayout::Grid;
-                    }
-                    if i.key_pressed(egui::Key::Num2) {
-                        self.layout = GuiLayout::XY;
-                    }
-                    if i.key_pressed(egui::Key::Num3) {
-                        self.layout = GuiLayout::XZ;
-                    }
-                    if i.key_pressed(egui::Key::Num4) {
-                        self.layout = GuiLayout::YZ;
+                    if i.key_pressed(egui::Key::Num0) {
+                        let segment_mode = self.segment_mode.as_mut().unwrap();
+                        segment_mode.coord[2] = 0;
+                        self.sync_coords();
                     }
                     if i.key_pressed(egui::Key::Num5) {
                         self.layout = GuiLayout::UV;
