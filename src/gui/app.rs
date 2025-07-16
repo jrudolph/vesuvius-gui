@@ -501,7 +501,9 @@ impl TemplateApp {
                             true,
                         );
 
-                        if self.drawing_config.compositing.mode == CompositingMode::Alpha {
+                        if self.drawing_config.compositing.mode == CompositingMode::Alpha
+                            || self.drawing_config.compositing.mode == CompositingMode::AlphaHeightMap
+                        {
                             slider(
                                 ui,
                                 "Alpha Min",
@@ -671,6 +673,13 @@ impl TemplateApp {
                     if i.key_pressed(egui::Key::M) {
                         if self.drawing_config.compositing.mode != CompositingMode::Max {
                             self.drawing_config.compositing.mode = CompositingMode::Max;
+                        } else {
+                            self.drawing_config.compositing.mode = CompositingMode::None;
+                        }
+                    }
+                    if i.key_pressed(egui::Key::H) {
+                        if self.drawing_config.compositing.mode != CompositingMode::AlphaHeightMap {
+                            self.drawing_config.compositing.mode = CompositingMode::AlphaHeightMap;
                         } else {
                             self.drawing_config.compositing.mode = CompositingMode::None;
                         }

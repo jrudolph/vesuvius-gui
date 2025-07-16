@@ -428,7 +428,7 @@ fn orient2d(u1: i32, v1: i32, u2: i32, v2: i32, u3: i32, v3: i32) -> i32 {
 
 trait CompositionState {
     fn update(&mut self, a: u8) -> bool;
-    fn result(&self) -> u8;
+    fn result(&self, num_layers: u32) -> u8;
     fn reset(&mut self);
 }
 struct MaxCompositionState {
@@ -444,7 +444,7 @@ impl CompositionState for MaxCompositionState {
         self.value = self.value.max(a);
         true
     }
-    fn result(&self) -> u8 {
+    fn result(&self, _num_layers: u32) -> u8 {
         self.value
     }
     fn reset(&mut self) {
@@ -456,7 +456,7 @@ impl CompositionState for NoCompositionState {
     fn update(&mut self, _a: u8) -> bool {
         false
     }
-    fn result(&self) -> u8 {
+    fn result(&self, _num_layers: u32) -> u8 {
         0
     }
     fn reset(&mut self) {}
@@ -497,11 +497,61 @@ impl CompositionState for AlphaCompositionState {
 
         return self.alpha < self.alpha_cutoff;
     }
-    fn result(&self) -> u8 {
+    fn result(&self, _num_layers: u32) -> u8 {
         (self.value * 255.0).clamp(0.0, 255.0) as u8
     }
     fn reset(&mut self) {
         self.value = 0.0;
+        self.alpha = 0.0;
+    }
+}
+
+struct AlphaHeightMapCompositionState {
+    min: f32,
+    max: f32,
+    alpha_cutoff: f32,
+    opacity: f32,
+    alpha: f32,
+    depth: f32,
+    weighted_depth: f32,
+}
+impl AlphaHeightMapCompositionState {
+    fn new(min: f32, max: f32, alpha_cutoff: f32, opacity: f32) -> Self {
+        Self {
+            min,
+            max,
+            alpha_cutoff,
+            opacity: opacity,
+            alpha: 0.0,
+            depth: 0.0,
+            weighted_depth: 0.0,
+        }
+    }
+}
+impl CompositionState for AlphaHeightMapCompositionState {
+    fn update(&mut self, a: u8) -> bool {
+        let value = ((a as f32 / 255.0 - self.min) / (self.max - self.min)).clamp(0.0, 1.0);
+
+        if value == 0.0 {
+            // speed through empty area
+            self.depth += 1.0;
+            return true;
+        }
+
+        let weight = (1.0 - self.alpha) * (value * self.opacity).min(1.0);
+        self.alpha += weight;
+        self.weighted_depth += weight * self.depth;
+        self.depth += 1.0;
+
+        return self.alpha < self.alpha_cutoff;
+    }
+    fn result(&self, num_layers: u32) -> u8 {
+        //((1.0 - self.weighted_depth * 4.0 / self.alpha / num_layers as f32) * 255.0).clamp(0.0, 255.0) as u8
+        (255.0 - self.weighted_depth / self.alpha * 255.0 / num_layers as f32).clamp(0.0, 255.0) as u8
+    }
+    fn reset(&mut self) {
+        self.depth = 0.0;
+        self.weighted_depth = 0.0;
         self.alpha = 0.0;
     }
 }
@@ -528,6 +578,7 @@ impl PaintVolume for ObjVolume {
         let composite = config.compositing.mode != CompositingMode::None;
         let composite_layers_in_front = config.compositing.layers_in_front as i32;
         let composite_layers_behind = config.compositing.layers_behind as i32;
+        let composite_total_layers = composite_layers_in_front + composite_layers_behind + 1; // +1 for the current layer
         let mut composition: Box<dyn CompositionState> = match config.compositing.mode {
             CompositingMode::Max => Box::new(MaxCompositionState::new()),
             CompositingMode::Alpha => Box::new(AlphaCompositionState::new(
@@ -536,7 +587,13 @@ impl PaintVolume for ObjVolume {
                 config.compositing.alpha_threshold as f32 / 10000.0,
                 config.compositing.opacity as f32 / 100.0,
             )),
-            _ => Box::new(NoCompositionState {}),
+            CompositingMode::AlphaHeightMap => Box::new(AlphaHeightMapCompositionState::new(
+                config.compositing.alpha_min as f32 / 255.0,
+                config.compositing.alpha_max as f32 / 255.0,
+                config.compositing.alpha_threshold as f32 / 10000.0,
+                config.compositing.opacity as f32 / 100.0,
+            )),
+            CompositingMode::None => Box::new(NoCompositionState {}),
         };
         let composite_direction = if config.compositing.reverse_direction { -1 } else { 1 };
 
@@ -762,7 +819,7 @@ impl PaintVolume for ObjVolume {
 
                                                 w += step;
                                             }
-                                            composition.result()
+                                            composition.result(composite_total_layers as u32)
                                         };
 
                                         buffer.set_gray(

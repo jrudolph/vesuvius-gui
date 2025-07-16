@@ -22,6 +22,7 @@ pub enum CompositingMode {
     None,
     Max,
     Alpha,
+    AlphaHeightMap,
 }
 impl CompositingMode {
     pub fn label(&self) -> &str {
@@ -29,9 +30,15 @@ impl CompositingMode {
             CompositingMode::None => "None",
             CompositingMode::Max => "Max",
             CompositingMode::Alpha => "Alpha",
+            CompositingMode::AlphaHeightMap => "Alpha Height Map",
         }
     }
-    pub const VALUES: [CompositingMode; 3] = [CompositingMode::None, CompositingMode::Max, CompositingMode::Alpha];
+    pub const VALUES: [CompositingMode; 4] = [
+        CompositingMode::None,
+        CompositingMode::Max,
+        CompositingMode::Alpha,
+        CompositingMode::AlphaHeightMap,
+    ];
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct CompositingSettings {
