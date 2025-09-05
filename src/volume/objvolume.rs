@@ -231,7 +231,26 @@ pub struct ObjFile {
     xyz_index: XYZIndex,
 }
 impl ObjFile {
-    pub fn new(object: Object) -> Self {
+    pub fn new(mut object: Object) -> Self {
+        // rescale tex to 0..1
+        let min_u = object.tex_vertices.iter().map(|v| v.u).fold(f64::INFINITY, f64::min);
+        let max_u = object
+            .tex_vertices
+            .iter()
+            .map(|v| v.u)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let du = max_u - min_u;
+        let min_v = object.tex_vertices.iter().map(|v| v.v).fold(f64::INFINITY, f64::min);
+        let max_v = object
+            .tex_vertices
+            .iter()
+            .map(|v| v.v)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let dv = max_v - min_v;
+        object.tex_vertices.iter_mut().for_each(|tex| {
+            tex.u = (tex.u - min_u) / du;
+            tex.v = (tex.v - min_v) / dv;
+        });
         let has_inverted_uv_tris = Self::has_inverted_uv_tris(object.clone());
         let target_cell_num = 100.;
         let num_tris = object.geometry[0].shapes.len() as f64;
