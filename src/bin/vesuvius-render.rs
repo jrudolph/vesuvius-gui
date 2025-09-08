@@ -225,7 +225,7 @@ const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
 
 impl Rendering {
     fn new(params: RenderParams, download_settings: DownloadSettings) -> Self {
-        let obj = Arc::new(ObjVolume::load_obj(&params.obj_file));
+        let obj = Arc::new(ObjVolume::load_obj(&params.obj_file, None));
 
         Self {
             params,

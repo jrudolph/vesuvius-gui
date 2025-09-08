@@ -1,5 +1,5 @@
 use super::{Image, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
-use crate::volume::{CompositingMode, VoxelPaintVolume};
+use crate::volume::{AffineTransform, CompositingMode, VoxelPaintVolume};
 use libm::{pow, sqrt};
 use std::sync::Arc;
 use wavefront_obj::obj::{self, Object, Primitive, Vertex};
@@ -231,7 +231,28 @@ pub struct ObjFile {
     xyz_index: XYZIndex,
 }
 impl ObjFile {
-    pub fn new(mut object: Object) -> Self {
+    pub fn new(mut object: Object, transform: Option<AffineTransform>) -> Self {
+        if let Some(AffineTransform { matrix: affine }) = transform {
+            object.vertices.iter_mut().for_each(|v| {
+                let x = affine[0][0] * v.x + affine[0][1] * v.y + affine[0][2] * v.z + affine[0][3];
+                let y = affine[1][0] * v.x + affine[1][1] * v.y + affine[1][2] * v.z + affine[1][3];
+                let z = affine[2][0] * v.x + affine[2][1] * v.y + affine[2][2] * v.z + affine[2][3];
+                v.x = x;
+                v.y = y;
+                v.z = z;
+            });
+            object.normals.iter_mut().for_each(|n| {
+                let nx = affine[0][0] * n.x + affine[0][1] * n.y + affine[0][2] * n.z;
+                let ny = affine[1][0] * n.x + affine[1][1] * n.y + affine[1][2] * n.z;
+                let nz = affine[2][0] * n.x + affine[2][1] * n.y + affine[2][2] * n.z;
+
+                let norm = sqrt(nx * nx + ny * ny + nz * nz);
+                n.x = nx / norm;
+                n.y = ny / norm;
+                n.z = nz / norm;
+            });
+        }
+
         // rescale tex to 0..1
         let min_u = object.tex_vertices.iter().map(|v| v.u).fold(f64::INFINITY, f64::min);
         let max_u = object
@@ -308,8 +329,19 @@ pub struct ObjVolume {
     height: usize,
 }
 impl ObjVolume {
-    pub fn load_from_obj(obj_file_path: &str, base_volume: Volume, width: usize, height: usize) -> Self {
-        Self::new(Arc::new(Self::load_obj(obj_file_path)), base_volume, width, height)
+    pub fn load_from_obj(
+        obj_file_path: &str,
+        base_volume: Volume,
+        width: usize,
+        height: usize,
+        transform: Option<AffineTransform>,
+    ) -> Self {
+        Self::new(
+            Arc::new(Self::load_obj(obj_file_path, transform)),
+            base_volume,
+            width,
+            height,
+        )
     }
     pub fn new(obj: Arc<ObjFile>, base_volume: Volume, width: usize, height: usize) -> Self {
         Self {
@@ -320,7 +352,7 @@ impl ObjVolume {
         }
     }
 
-    pub fn load_obj(file_path: &str) -> ObjFile {
+    pub fn load_obj(file_path: &str, transform: Option<AffineTransform>) -> ObjFile {
         let obj_file = std::fs::read_to_string(file_path).unwrap();
         // filter out opacity definitions that wavefront_obj does not cope well with
         let (not_faces, faces): (Vec<_>, Vec<_>) = obj_file
@@ -349,7 +381,7 @@ impl ObjVolume {
         } */
 
         let object = objects.remove(0);
-        ObjFile::new(object)
+        ObjFile::new(object, transform)
     }
 
     pub fn width(&self) -> usize {

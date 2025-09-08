@@ -17,6 +17,11 @@ pub use ppmvolume::PPMVolume;
 use std::sync::Arc;
 pub use volume64x4::VolumeGrid64x4Mapped;
 
+pub struct AffineTransform {
+    /// 3x4 affine transformation matrix in xyz coordinate order
+    matrix: [[f64; 4]; 3],
+}
+
 #[derive(Copy, Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub enum CompositingMode {
     None,
