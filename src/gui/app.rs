@@ -249,7 +249,7 @@ impl TemplateApp {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old = self.world.clone();
             let base = old;
-            let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height, None);
+            let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height, transform);
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
 
