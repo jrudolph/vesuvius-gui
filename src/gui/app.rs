@@ -937,7 +937,7 @@ impl eframe::App for TemplateApp {
     }
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("op_bar")
-            .frame(egui::Frame::none().inner_margin(4.0))
+            .frame(egui::Frame::NONE.inner_margin(4.0))
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.visuals_mut().button_frame = false;
