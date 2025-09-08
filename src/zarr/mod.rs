@@ -3,10 +3,13 @@ mod ome;
 #[cfg(test)]
 mod test;
 
-use crate::volume::{PaintVolume, VoxelVolume};
+use crate::volume::{PaintVolume, VoxelPaintVolume, VoxelVolume};
 use blosc::BloscChunk;
+use dashmap::DashMap;
 use derive_more::Debug;
+use directories::BaseDirs;
 use ehttp::Request;
+use fxhash::{FxHashMap, FxHashSet};
 use libm::modf;
 pub use ome::OmeZarrContext;
 pub use ome::{ColorScheme, FourColors, GrayScale};
@@ -15,12 +18,14 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
 use std::cell::RefCell;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
-    collections::{HashMap, HashSet},
-    ops::{Deref, DerefMut},
+    ops::Deref,
     sync::{Arc, Mutex},
 };
+
+type HashMap<K, V> = FxHashMap<K, V>;
+type HashSet<K> = FxHashSet<K>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum ZarrDataType {
@@ -137,7 +142,7 @@ impl SimpleDownloader {
     fn new() -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
         std::thread::spawn(move || {
-            let mut ongoing: HashSet<String> = HashSet::new();
+            let mut ongoing: HashSet<String> = HashSet::default();
             let downloading = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             for (from, to) in rx {
                 if ongoing.contains(&from.to_string()) {
@@ -239,7 +244,7 @@ impl BlockingRemoteZarrDirectory {
         Self {
             url: url.to_string(),
             local_cache_dir: local_cache_dir.to_string(),
-            downloading: Arc::new(Mutex::new(HashMap::new())),
+            downloading: Arc::new(Mutex::new(HashMap::default())),
             client,
         }
     }
@@ -248,16 +253,21 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
     fn load_array_def(&self) -> ZarrArrayDef {
         let target_file = format!("{}/.zarray", self.local_cache_dir);
         if !std::path::Path::new(&target_file).exists() {
-            let data = ehttp::fetch_blocking(&Request::get(&format!("{}/.zarray", self.url)))
-                .unwrap()
-                .bytes
-                .to_vec();
+            let zarray_url = format!("{}/.zarray", self.url);
+            let res = ehttp::fetch_blocking(&Request::get(&zarray_url)).unwrap();
+
+            if res.status != 200 {
+                panic!("Failed to download .zarray from {}, status: {}", zarray_url, res.status);
+            }
+            let data = res.bytes.to_vec();
+
             std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
             std::fs::write(&target_file, &data).unwrap();
         }
 
         let zarray = std::fs::read_to_string(&target_file).unwrap();
-        serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
+        serde_json::from_str::<ZarrArrayDef>(&zarray)
+            .expect(format!("Failed to parse .zarray from {}", target_file).as_str())
     }
 
     fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
@@ -270,6 +280,13 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
         if std::path::Path::new(&target_file).exists() {
             Some(target_file)
         } else {
+            let missing_marker_file = format!("{}.missing", target_file);
+            if std::path::Path::new(&missing_marker_file).exists() {
+                //TODO: and not older than negative TTL
+                //println!("Chunk {} is missing, skipping download", target_file);
+                return None;
+            }
+
             let chunk_str = chunk_no
                 .iter()
                 .map(|i| i.to_string())
@@ -298,6 +315,10 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
                     "Failed to download chunk from {}, status {}",
                     target_url, response.status
                 ); */
+                let missing_tmp = format!("{}.missing.tmp", target_file);
+                std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
+                std::fs::write(&missing_tmp, "").unwrap(); // create missing marker file
+                std::fs::rename(&missing_tmp, &missing_marker_file).unwrap();
                 return None;
             }
             let data = response.bytes().unwrap().to_vec();
@@ -325,6 +346,20 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
     }
 }
 
+pub fn default_cache_dir_for_url(url: &str) -> String {
+    let canonical_url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
+    let sha256 = format!("{:x}", Sha256::digest(canonical_url.as_bytes()));
+    BaseDirs::new()
+        .unwrap()
+        .cache_dir()
+        .join("vesuvius-gui")
+        .join("zarr")
+        .join(sha256)
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
 impl<const N: usize> ZarrArray<N, u8> {
     fn load_chunk_context(&self, chunk_no: [usize; N]) -> Option<ChunkContext> {
         self.access
@@ -346,7 +381,7 @@ impl<const N: usize> ZarrArray<N, u8> {
         Self::from_access(Arc::new(BlockingRemoteZarrDirectory::new(url, local_cache_dir, client)))
     }
     pub fn from_url_to_default_cache_dir_blocking(url: &str, client: Client) -> Self {
-        Self::from_url_blocking(url, Self::default_cache_dir(&url).as_str(), client)
+        Self::from_url_blocking(url, default_cache_dir_for_url(&url).as_str(), client)
     }
     pub fn from_url(url: &str, local_cache_dir: &str) -> Self {
         //println!("Loading ZarrArray from url: {} to: {} ", url, local_cache_dir);
@@ -357,17 +392,7 @@ impl<const N: usize> ZarrArray<N, u8> {
         }))
     }
     pub fn from_url_to_default_cache_dir(url: &str) -> Self {
-        Self::from_url(url, &Self::default_cache_dir(url))
-    }
-    fn default_cache_dir(url: &str) -> String {
-        let canonical_url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
-        let sha256 = format!("{:x}", Sha256::digest(canonical_url.as_bytes()));
-        std::env::temp_dir()
-            .join("vesuvius-gui")
-            .join(sha256)
-            .to_str()
-            .unwrap()
-            .to_string()
+        Self::from_url(url, &default_cache_dir_for_url(url))
     }
     fn from_access(access: Arc<dyn ZarrFileAccess>) -> Self {
         let def = access.load_array_def();
@@ -379,7 +404,7 @@ impl<const N: usize> ZarrArray<N, u8> {
     }
 
     pub fn into_ctx(self) -> ZarrContextBase<N> {
-        let cache = Arc::new(Mutex::new(ZarrContextCache::new(&self.def)));
+        let cache = Arc::new(ZarrContextCache::new(&self.def));
         let cache_missing = self.access.cache_missing();
         ZarrContextBase {
             array: self,
@@ -391,7 +416,7 @@ impl<const N: usize> ZarrArray<N, u8> {
 
 pub struct ZarrContextBase<const N: usize> {
     array: ZarrArray<N, u8>,
-    cache: Arc<Mutex<ZarrContextCache<N>>>,
+    cache: Arc<ZarrContextCache<N>>,
     cache_missing: bool,
 }
 impl<const N: usize> ZarrContextBase<N> {
@@ -428,7 +453,7 @@ enum ChunkContext {
     Raw(RawContext),
 }
 impl ChunkContext {
-    fn get(&mut self, idx: usize) -> u8 {
+    fn get(&self, idx: usize) -> u8 {
         match self {
             ChunkContext::Heap(data) => data[idx],
             ChunkContext::Raw(raw) => raw.get(idx),
@@ -437,8 +462,8 @@ impl ChunkContext {
 }
 
 struct ZarrContextCacheEntry {
-    ctx: ChunkContext,
-    last_access: u64,
+    ctx: Arc<ChunkContext>,
+    last_access: AtomicU64,
 }
 impl Deref for ZarrContextCacheEntry {
     type Target = ChunkContext;
@@ -446,35 +471,36 @@ impl Deref for ZarrContextCacheEntry {
         &self.ctx
     }
 }
-impl DerefMut for ZarrContextCacheEntry {
+/* impl DerefMut for ZarrContextCacheEntry {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.ctx
     }
-}
+} */
 
 struct ZarrContextCache<const N: usize> {
-    cache: HashMap<[usize; N], Option<ZarrContextCacheEntry>>,
-    access_counter: u64,
-    non_empty_entries: usize,
+    cache: DashMap<[usize; N], Option<ZarrContextCacheEntry>>,
+    access_counter: AtomicU64,
+    non_empty_entries: AtomicU64,
     max_entries: usize,
 }
 impl<const N: usize> ZarrContextCache<N> {
     fn new(def: &ZarrArrayDef) -> Self {
         ZarrContextCache {
-            cache: HashMap::new(),
-            access_counter: 0,
-            non_empty_entries: 0,
+            cache: DashMap::with_shard_amount(1024),
+            access_counter: AtomicU64::new(0),
+            non_empty_entries: AtomicU64::new(0),
             max_entries: 2000000000 / def.chunks.iter().product::<usize>(), // FIXME: make configurable
         }
     }
     fn entry(&self, ctx: Option<ChunkContext>) -> Option<ZarrContextCacheEntry> {
-        ctx.map(|ctx| ZarrContextCacheEntry {
+        /* ctx.map(|ctx| ZarrContextCacheEntry {
             ctx,
             last_access: self.access_counter,
-        })
+        }) */
+        todo!()
     }
     fn cleanup(&mut self) {
-        if self.non_empty_entries > self.max_entries {
+        /* if self.non_empty_entries > self.max_entries {
             // FIXME: make configurable
             // purge oldest n% of entries
             let mut entries = self
@@ -495,22 +521,43 @@ impl<const N: usize> ZarrContextCache<N> {
                 "Purged {} entries {}/{} from {} (sorted: {})",
                 n, self.non_empty_entries, self.max_entries, before, sorted_entries_len
             ); */
+        } */
+    }
+    fn get(&self, array: &ZarrArray<N, u8>, chunk_no: [usize; N]) -> Option<Arc<ChunkContext>> {
+        let mut entry = self.cache.entry(chunk_no).or_insert_with(|| {
+            let ctx = array.load_chunk_context(chunk_no);
+            if ctx.is_none() {
+                None
+            } else {
+                self.non_empty_entries.fetch_add(1, Ordering::Relaxed);
+                Some(ZarrContextCacheEntry {
+                    ctx: Arc::new(ctx.unwrap()),
+                    last_access: AtomicU64::new(0),
+                })
+            }
+        });
+        let counter = self.access_counter.fetch_add(1, Ordering::Relaxed);
+        if let Some(e) = entry.value_mut() {
+            e.last_access.store(counter, Ordering::Relaxed);
+            Some(e.ctx.clone())
+        } else {
+            None
         }
     }
-    fn purge_missing(&mut self) {
+    fn purge_missing(&self) {
         self.cache.retain(|_, e| if e.is_none() { false } else { true });
     }
 }
 
 struct ZarrContextState<const N: usize> {
     last_chunk_no: [usize; N],
-    last_context: Option<Option<ChunkContext>>,
+    last_context: Option<Option<Arc<ChunkContext>>>,
 }
 
 pub struct ZarrContext<const N: usize> {
     array: ZarrArray<N, u8>,
     cache_missing: bool,
-    cache: Arc<Mutex<ZarrContextCache<N>>>,
+    cache: Arc<ZarrContextCache<N>>,
     state: RefCell<ZarrContextState<N>>,
 }
 
@@ -537,28 +584,20 @@ impl ZarrContext<3> {
             + chunk_offset[2];
 
         // fast path
-        let last_chunk_no = self.state.borrow().last_chunk_no;
+        let state = self.state.borrow();
+        let last_chunk_no = state.last_chunk_no;
         if chunk_no == last_chunk_no {
-            let mut state = self.state.borrow_mut();
-            if let Some(last) = state.last_context.as_mut().unwrap() {
+            if let Some(last) = state.last_context.as_ref().unwrap() {
                 Some(last.get(idx))
             } else {
                 None
             }
         } else {
-            // slow path goes through mutex
+            drop(state); // release borrow before acquiring mutex
             self.get_from_cache(chunk_no, idx)
         }
     }
-    /// Get interpolated value at index
     fn get_interpolated(&self, xyz: [f64; 3]) -> Option<u8> {
-        /* if xyz[0] > self.array.def.shape[0] as f64
-            || xyz[1] > self.array.def.shape[1] as f64
-            || xyz[2] > self.array.def.shape[2] as f64
-        {
-            return None; // FIXME: or just return 0?
-        } */
-
         let (dx, x0) = modf(xyz[0]);
         let x0 = x0 as usize;
         let x1 = x0 + 1;
@@ -593,13 +632,13 @@ impl ZarrContext<3> {
                 // slow path goes through mutex
                 self.get_from_cache(chunk_no, idx); // prime last cache
             }
-            let mut state = self.state.borrow_mut();
+            let state = self.state.borrow_mut();
             match state.last_context {
                 Some(None) | None => return None,
                 _ => {}
             }
 
-            let last = state.last_context.as_mut().unwrap().as_mut().unwrap();
+            let last = state.last_context.as_ref().unwrap().as_ref().unwrap().as_ref();
 
             if let ChunkContext::Raw(raw) = last {
                 let p000 = raw.get(idx);
@@ -655,9 +694,17 @@ impl ZarrContext<3> {
     }
 
     fn get_from_cache(&self, chunk_no: [usize; 3], idx: usize) -> Option<u8> {
-        let mut access = self.cache.lock().unwrap();
-        let state = &mut *self.state.borrow_mut();
+        let chunk = self.cache.get(&self.array, chunk_no);
+
+        let mut state = self.state.borrow_mut();
+        state.last_chunk_no = chunk_no;
+        state.last_context = Some(chunk.clone());
+        chunk.map(|c| c.get(idx))
+
+        /* TODO
         access.access_counter += 1;
+
+
 
         if let Some(last) = state.last_context.take() {
             let entry = access.entry(last);
@@ -696,6 +743,36 @@ impl ZarrContext<3> {
                 state.last_context = Some(None);
                 None
             }
+        } */
+    }
+    fn shareable(&self) -> Box<dyn (FnOnce() -> ZarrContext<3>) + Send + Sync> {
+        let array = self.array.clone();
+        let cache = self.cache.clone();
+        let cache_missing = self.cache_missing;
+        Box::new(move || ZarrContext {
+            array,
+            cache_missing,
+            cache,
+            state: ZarrContextState {
+                last_chunk_no: [usize::MAX; 3],
+                last_context: None,
+            }
+            .into(),
+        })
+    }
+}
+
+impl Clone for ZarrContext<3> {
+    fn clone(&self) -> Self {
+        ZarrContext {
+            array: self.array.clone(),
+            cache_missing: self.cache_missing,
+            cache: self.cache.clone(),
+            state: ZarrContextState {
+                last_chunk_no: [usize::MAX; 3],
+                last_context: None,
+            }
+            .into(),
         }
     }
 }
@@ -718,8 +795,7 @@ impl PaintVolume for ZarrContext<3> {
         let _sfactor = 1;
         if !self.cache_missing {
             // clean missing entries from cache
-            let mut access = self.cache.lock().unwrap();
-            access.purge_missing();
+            self.cache.purge_missing();
         }
 
         let fi32 = _sfactor as f64;
@@ -755,6 +831,25 @@ impl PaintVolume for ZarrContext<3> {
             }
         }
     }
+
+    fn shared(&self) -> crate::volume::VolumeCons {
+        let array = self.array.clone();
+        let cache = self.cache.clone();
+        let cache_missing = self.cache_missing;
+        Box::new(move || {
+            ZarrContext {
+                array,
+                cache_missing,
+                cache,
+                state: ZarrContextState {
+                    last_chunk_no: [usize::MAX; 3],
+                    last_context: None,
+                }
+                .into(),
+            }
+            .into_volume()
+        })
+    }
 }
 impl VoxelVolume for ZarrContext<3> {
     fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
@@ -764,5 +859,16 @@ impl VoxelVolume for ZarrContext<3> {
             (xyz[0] * downsampling as f64) as usize,
         ])
         .unwrap_or(0)
+    }
+    fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        self.get_interpolated([
+            (xyz[2] * downsampling as f64) as f64,
+            (xyz[1] * downsampling as f64) as f64,
+            (xyz[0] * downsampling as f64) as f64,
+        ])
+        .unwrap_or(0)
+    }
+    fn reset_for_painting(&self) {
+        self.cache.purge_missing();
     }
 }

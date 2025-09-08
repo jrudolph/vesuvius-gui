@@ -4,6 +4,7 @@ mod grid500;
 mod layers;
 mod objvolume;
 mod ppmvolume;
+mod transform;
 mod volume64x4;
 
 use egui::{Color32, ColorImage};
@@ -14,10 +15,46 @@ pub use layers::LayersMappedVolume;
 use libm::modf;
 pub use objvolume::{ObjFile, ObjVolume};
 pub use ppmvolume::PPMVolume;
-use std::rc::Rc;
+use std::sync::Arc;
+pub use transform::AffineTransform;
 pub use volume64x4::VolumeGrid64x4Mapped;
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Copy, Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum CompositingMode {
+    None,
+    Max,
+    Alpha,
+    AlphaHeightMap,
+}
+impl CompositingMode {
+    pub fn label(&self) -> &str {
+        match self {
+            CompositingMode::None => "None",
+            CompositingMode::Max => "Max",
+            CompositingMode::Alpha => "Alpha",
+            CompositingMode::AlphaHeightMap => "Alpha Height Map",
+        }
+    }
+    pub const VALUES: [CompositingMode; 4] = [
+        CompositingMode::None,
+        CompositingMode::Max,
+        CompositingMode::Alpha,
+        CompositingMode::AlphaHeightMap,
+    ];
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct CompositingSettings {
+    pub mode: CompositingMode,
+    pub layers_in_front: u8,
+    pub layers_behind: u8,
+    pub alpha_min: u8,
+    pub alpha_max: u8,
+    pub alpha_threshold: u16,
+    pub opacity: u16,
+    pub reverse_direction: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct DrawingConfig {
     pub enable_filters: bool,
@@ -29,6 +66,7 @@ pub struct DrawingConfig {
     pub draw_xyz_outlines: bool,
     pub show_segment_outlines: bool,
     pub draw_outline_vertices: bool,
+    pub compositing: CompositingSettings,
 }
 impl DrawingConfig {
     pub fn filters_active(&self) -> bool {
@@ -61,11 +99,23 @@ impl Default for DrawingConfig {
             draw_xyz_outlines: false,
             show_segment_outlines: true,
             draw_outline_vertices: false,
+            compositing: CompositingSettings {
+                mode: CompositingMode::None,
+                layers_in_front: 6,
+                layers_behind: 6,
+                alpha_min: (0.3 * 255.0) as u8,
+                alpha_max: (0.7 * 255.0) as u8,
+                alpha_threshold: 9500,
+                opacity: 1,
+                reverse_direction: false,
+            },
         }
     }
 }
 
 pub trait VoxelVolume {
+    fn reset_for_painting(&self) {}
+
     fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8;
 
     fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
@@ -105,10 +155,13 @@ pub struct Image {
 }
 impl Image {
     pub fn new(width: usize, height: usize) -> Self {
+        Self::new_from_color(width, height, Color32::BLACK)
+    }
+    pub fn new_from_color(width: usize, height: usize, color: Color32) -> Self {
         Self {
             width,
             height,
-            data: vec![Color32::BLACK; width * height],
+            data: vec![color; width * height],
         }
     }
 
@@ -131,6 +184,8 @@ impl From<Image> for ColorImage {
     }
 }
 
+pub type VolumeCons = Box<dyn (FnOnce() -> Volume) + Send + Sync>;
+
 pub trait PaintVolume {
     fn paint(
         &self,
@@ -145,6 +200,8 @@ pub trait PaintVolume {
         config: &DrawingConfig,
         buffer: &mut Image,
     );
+
+    fn shared(&self) -> VolumeCons;
 }
 
 pub trait VoxelPaintVolume: PaintVolume + VoxelVolume {
@@ -176,15 +233,15 @@ pub trait SurfaceVolume: PaintVolume + VoxelVolume {
 
 #[derive(Clone)]
 pub struct Volume {
-    pub volume: Rc<dyn VoxelPaintVolume>,
+    pub volume: Arc<dyn VoxelPaintVolume>,
 }
 impl Volume {
     pub fn new(volume: impl VoxelPaintVolume + 'static) -> Self {
         Self {
-            volume: Rc::new(volume),
+            volume: Arc::new(volume),
         }
     }
-    pub fn from_ref(volume: Rc<dyn VoxelPaintVolume>) -> Self {
+    pub fn from_ref(volume: Arc<dyn VoxelPaintVolume>) -> Self {
         Self { volume }
     }
 }
@@ -215,6 +272,10 @@ impl PaintVolume for Volume {
             buffer,
         );
     }
+
+    fn shared(&self) -> VolumeCons {
+        self.volume.shared()
+    }
 }
 impl VoxelVolume for Volume {
     fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
@@ -222,5 +283,8 @@ impl VoxelVolume for Volume {
     }
     fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
         self.volume.get_interpolated(xyz, downsampling)
+    }
+    fn reset_for_painting(&self) {
+        self.volume.reset_for_painting();
     }
 }

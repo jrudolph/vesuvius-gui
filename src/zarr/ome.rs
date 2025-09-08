@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 use super::{ZarrArray, ZarrContext};
 use crate::volume::PaintVolume;
+use crate::volume::VoxelPaintVolume;
 use crate::volume::VoxelVolume;
+use crate::zarr::default_cache_dir_for_url;
 use egui::Color32;
 use ehttp::Request;
 use serde::Deserialize;
-use sha2::Digest;
-use sha2::Sha256;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OmeMultiScale {
@@ -53,6 +53,7 @@ impl OmeZarrAttrs {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct OmeZarr {
     attrs: OmeZarrAttrs,
 }
@@ -109,10 +110,8 @@ impl<C: ColorScheme> OmeZarrContext<C> {
         }
     }
     pub fn from_url_to_default_cache_dir(url: &str) -> Self {
-        let canonical_url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
-        let sha256 = format!("{:x}", Sha256::digest(canonical_url.as_bytes()));
-        let local_cache_dir = std::env::temp_dir().join("vesuvius-gui").join(sha256);
-        Self::from_url(url, local_cache_dir.to_str().unwrap())
+        let url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
+        Self::from_url(url, &default_cache_dir_for_url(url))
     }
     pub fn from_path(path: &str) -> Self {
         let attrs = {
@@ -189,7 +188,7 @@ impl<C: ColorScheme> OmeZarrContext<C> {
     }
 }
 
-impl<C: ColorScheme> PaintVolume for OmeZarrContext<C> {
+impl<C: ColorScheme + 'static + Send + Sync> PaintVolume for OmeZarrContext<C> {
     fn paint(
         &self,
         xyz: [i32; 3],
@@ -206,8 +205,7 @@ impl<C: ColorScheme> PaintVolume for OmeZarrContext<C> {
         if !self.cache_missing {
             self.zarr_contexts.iter().for_each(|ctx| {
                 // clean missing entries from cache
-                let mut access = ctx.cache.lock().unwrap();
-                access.purge_missing();
+                ctx.cache.purge_missing();
             });
         }
 
@@ -236,6 +234,21 @@ impl<C: ColorScheme> PaintVolume for OmeZarrContext<C> {
             }
         }
     }
+    fn shared(&self) -> crate::volume::VolumeCons {
+        let ome_zarr = self.ome_zarr.clone();
+        let cache_missing = self.cache_missing;
+        let zarr_contexts = self.zarr_contexts.iter().map(|ctx| ctx.shareable()).collect::<Vec<_>>();
+
+        Box::new(move || {
+            OmeZarrContext {
+                ome_zarr: ome_zarr.clone(),
+                cache_missing,
+                zarr_contexts: zarr_contexts.into_iter().map(|ctx| ctx()).collect(),
+                phantom: std::marker::PhantomData::<C>,
+            }
+            .into_volume()
+        })
+    }
 }
 
 impl<C: ColorScheme> VoxelVolume for OmeZarrContext<C> {
@@ -260,5 +273,10 @@ impl<C: ColorScheme> VoxelVolume for OmeZarrContext<C> {
             ],
             scale,
         )
+    }
+    fn reset_for_painting(&self) {
+        self.zarr_contexts.iter().for_each(|ctx| {
+            ctx.reset_for_painting();
+        });
     }
 }

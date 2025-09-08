@@ -1,4 +1,5 @@
 use super::{Image, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
+use crate::volume::{AffineTransform, CompositingMode, VoxelPaintVolume};
 use libm::{pow, sqrt};
 use std::sync::Arc;
 use wavefront_obj::obj::{self, Object, Primitive, Vertex};
@@ -230,7 +231,47 @@ pub struct ObjFile {
     xyz_index: XYZIndex,
 }
 impl ObjFile {
-    pub fn new(object: Object) -> Self {
+    pub fn new(mut object: Object, transform: &Option<AffineTransform>) -> Self {
+        if let Some(AffineTransform { matrix: affine }) = transform {
+            object.vertices.iter_mut().for_each(|v| {
+                let x = affine[0][0] * v.x + affine[0][1] * v.y + affine[0][2] * v.z + affine[0][3];
+                let y = affine[1][0] * v.x + affine[1][1] * v.y + affine[1][2] * v.z + affine[1][3];
+                let z = affine[2][0] * v.x + affine[2][1] * v.y + affine[2][2] * v.z + affine[2][3];
+                v.x = x;
+                v.y = y;
+                v.z = z;
+            });
+            object.normals.iter_mut().for_each(|n| {
+                let nx = affine[0][0] * n.x + affine[0][1] * n.y + affine[0][2] * n.z;
+                let ny = affine[1][0] * n.x + affine[1][1] * n.y + affine[1][2] * n.z;
+                let nz = affine[2][0] * n.x + affine[2][1] * n.y + affine[2][2] * n.z;
+
+                let norm = sqrt(nx * nx + ny * ny + nz * nz);
+                n.x = nx / norm;
+                n.y = ny / norm;
+                n.z = nz / norm;
+            });
+        }
+
+        // rescale tex to 0..1
+        let min_u = object.tex_vertices.iter().map(|v| v.u).fold(f64::INFINITY, f64::min);
+        let max_u = object
+            .tex_vertices
+            .iter()
+            .map(|v| v.u)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let du = max_u - min_u;
+        let min_v = object.tex_vertices.iter().map(|v| v.v).fold(f64::INFINITY, f64::min);
+        let max_v = object
+            .tex_vertices
+            .iter()
+            .map(|v| v.v)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let dv = max_v - min_v;
+        object.tex_vertices.iter_mut().for_each(|tex| {
+            tex.u = (tex.u - min_u) / du;
+            tex.v = (tex.v - min_v) / dv;
+        });
         let has_inverted_uv_tris = Self::has_inverted_uv_tris(object.clone());
         let target_cell_num = 100.;
         let num_tris = object.geometry[0].shapes.len() as f64;
@@ -288,8 +329,19 @@ pub struct ObjVolume {
     height: usize,
 }
 impl ObjVolume {
-    pub fn load_from_obj(obj_file_path: &str, base_volume: Volume, width: usize, height: usize) -> Self {
-        Self::new(Arc::new(Self::load_obj(obj_file_path)), base_volume, width, height)
+    pub fn load_from_obj(
+        obj_file_path: &str,
+        base_volume: Volume,
+        width: usize,
+        height: usize,
+        transform: &Option<AffineTransform>,
+    ) -> Self {
+        Self::new(
+            Arc::new(Self::load_obj(obj_file_path, transform)),
+            base_volume,
+            width,
+            height,
+        )
     }
     pub fn new(obj: Arc<ObjFile>, base_volume: Volume, width: usize, height: usize) -> Self {
         Self {
@@ -300,9 +352,9 @@ impl ObjVolume {
         }
     }
 
-    pub fn load_obj(file_path: &str) -> ObjFile {
+    pub fn load_obj(file_path: &str, transform: &Option<AffineTransform>) -> ObjFile {
         let obj_file = std::fs::read_to_string(file_path).unwrap();
-        // filter out material definitions that wavefront_obj does not cope well with
+        // filter out opacity definitions that wavefront_obj does not cope well with
         let (not_faces, faces): (Vec<_>, Vec<_>) = obj_file
             .lines()
             .filter(|line| !line.starts_with("mtllib"))
@@ -329,7 +381,7 @@ impl ObjVolume {
         } */
 
         let object = objects.remove(0);
-        ObjFile::new(object)
+        ObjFile::new(object, transform)
     }
 
     pub fn width(&self) -> usize {
@@ -425,6 +477,136 @@ fn orient2d(u1: i32, v1: i32, u2: i32, v2: i32, u3: i32, v3: i32) -> i32 {
     (u2 - u1) * (v3 - v1) - (v2 - v1) * (u3 - u1)
 }
 
+trait CompositionState {
+    fn update(&mut self, a: u8) -> bool;
+    fn result(&self, num_layers: u32) -> u8;
+    fn reset(&mut self);
+}
+struct MaxCompositionState {
+    value: u8,
+}
+impl MaxCompositionState {
+    fn new() -> Self {
+        Self { value: 0 }
+    }
+}
+impl CompositionState for MaxCompositionState {
+    fn update(&mut self, a: u8) -> bool {
+        self.value = self.value.max(a);
+        true
+    }
+    fn result(&self, _num_layers: u32) -> u8 {
+        self.value
+    }
+    fn reset(&mut self) {
+        self.value = 0;
+    }
+}
+struct NoCompositionState;
+impl CompositionState for NoCompositionState {
+    fn update(&mut self, _a: u8) -> bool {
+        false
+    }
+    fn result(&self, _num_layers: u32) -> u8 {
+        0
+    }
+    fn reset(&mut self) {}
+}
+
+struct AlphaCompositionState {
+    min: f32,
+    max: f32,
+    alpha_cutoff: f32,
+    opacity: f32,
+    value: f32,
+    alpha: f32,
+}
+impl AlphaCompositionState {
+    fn new(min: f32, max: f32, alpha_cutoff: f32, opacity: f32) -> Self {
+        Self {
+            min,
+            max,
+            alpha_cutoff,
+            opacity: opacity,
+            value: 0.0,
+            alpha: 0.0,
+        }
+    }
+}
+impl CompositionState for AlphaCompositionState {
+    fn update(&mut self, a: u8) -> bool {
+        let value = ((a as f32 / 255.0 - self.min) / (self.max - self.min)).clamp(0.0, 1.0);
+
+        if value == 0.0 {
+            // speed through empty area
+            return true;
+        }
+
+        let weight = (1.0 - self.alpha) * (value * self.opacity).min(1.0);
+        self.value += weight * value;
+        self.alpha += weight;
+
+        return self.alpha < self.alpha_cutoff;
+    }
+    fn result(&self, _num_layers: u32) -> u8 {
+        (self.value * 255.0).clamp(0.0, 255.0) as u8
+    }
+    fn reset(&mut self) {
+        self.value = 0.0;
+        self.alpha = 0.0;
+    }
+}
+
+struct AlphaHeightMapCompositionState {
+    min: f32,
+    max: f32,
+    alpha_cutoff: f32,
+    opacity: f32,
+    alpha: f32,
+    depth: f32,
+    weighted_depth: f32,
+}
+impl AlphaHeightMapCompositionState {
+    fn new(min: f32, max: f32, alpha_cutoff: f32, opacity: f32) -> Self {
+        Self {
+            min,
+            max,
+            alpha_cutoff,
+            opacity: opacity,
+            alpha: 0.0,
+            depth: 0.0,
+            weighted_depth: 0.0,
+        }
+    }
+}
+impl CompositionState for AlphaHeightMapCompositionState {
+    fn update(&mut self, a: u8) -> bool {
+        let value = ((a as f32 / 255.0 - self.min) / (self.max - self.min)).clamp(0.0, 1.0);
+
+        if value == 0.0 {
+            // speed through empty area
+            self.depth += 1.0;
+            return true;
+        }
+
+        let weight = (1.0 - self.alpha) * (value * self.opacity).min(1.0);
+        self.alpha += weight;
+        self.weighted_depth += weight * self.depth;
+        self.depth += 1.0;
+
+        return self.alpha < self.alpha_cutoff;
+    }
+    fn result(&self, num_layers: u32) -> u8 {
+        //((1.0 - self.weighted_depth * 4.0 / self.alpha / num_layers as f32) * 255.0).clamp(0.0, 255.0) as u8
+        (255.0 - self.weighted_depth / self.alpha * 255.0 / num_layers as f32).clamp(0.0, 255.0) as u8
+    }
+    fn reset(&mut self) {
+        self.depth = 0.0;
+        self.weighted_depth = 0.0;
+        self.alpha = 0.0;
+    }
+}
+
 impl PaintVolume for ObjVolume {
     fn paint(
         &self,
@@ -444,6 +626,27 @@ impl PaintVolume for ObjVolume {
         assert!(plane_coord == 2);
 
         let draw_outlines = config.draw_xyz_outlines;
+        let composite = config.compositing.mode != CompositingMode::None;
+        let composite_layers_in_front = config.compositing.layers_in_front as i32;
+        let composite_layers_behind = config.compositing.layers_behind as i32;
+        let composite_total_layers = composite_layers_in_front + composite_layers_behind + 1; // +1 for the current layer
+        let mut composition: Box<dyn CompositionState> = match config.compositing.mode {
+            CompositingMode::Max => Box::new(MaxCompositionState::new()),
+            CompositingMode::Alpha => Box::new(AlphaCompositionState::new(
+                config.compositing.alpha_min as f32 / 255.0,
+                config.compositing.alpha_max as f32 / 255.0,
+                config.compositing.alpha_threshold as f32 / 10000.0,
+                config.compositing.opacity as f32 / 100.0,
+            )),
+            CompositingMode::AlphaHeightMap => Box::new(AlphaHeightMapCompositionState::new(
+                config.compositing.alpha_min as f32 / 255.0,
+                config.compositing.alpha_max as f32 / 255.0,
+                config.compositing.alpha_threshold as f32 / 10000.0,
+                config.compositing.opacity as f32 / 100.0,
+            )),
+            CompositingMode::None => Box::new(NoCompositionState {}),
+        };
+        let composite_direction = if config.compositing.reverse_direction { -1 } else { 1 };
 
         let real_xyz = if draw_outlines {
             self.convert_to_volume_coords(xyz)
@@ -579,7 +782,6 @@ impl PaintVolume for ObjVolume {
                             "tmin_u: {}, tmax_u: {}, tmin_v: {}, tmax_v: {}",
                             tmin_u, tmax_u, tmin_v, tmax_v
                         ); */
-
                         // TODO: would probably better to operate in paint coordinates instead
                         for v in (tmin_v..=tmax_v).step_by(paint_zoom as usize) {
                             for u in (tmin_u..=tmax_u).step_by(paint_zoom as usize) {
@@ -608,7 +810,7 @@ impl PaintVolume for ObjVolume {
                                         let z =
                                             (w0 as f64 * xyz1.z + w1 as f64 * xyz2.z + w2 as f64 * xyz3.z) * invwsum;
 
-                                        let (nx, ny, nz) = if xyz[2] == 0 {
+                                        let (nx, ny, nz) = if xyz[2] == 0 && !composite {
                                             (0.0, 0.0, 0.0)
                                         } else {
                                             let nxyz1 = &obj.normals[i1.2.unwrap()];
@@ -625,17 +827,50 @@ impl PaintVolume for ObjVolume {
                                             (nx, ny, nz)
                                         };
 
-                                        let x = x + w_factor * nx;
-                                        let y = y + w_factor * ny;
-                                        let z = z + w_factor * nz;
+                                        let value = if !composite {
+                                            let x = x + w_factor * nx;
+                                            let y = y + w_factor * ny;
+                                            let z = z + w_factor * nz;
 
-                                        let value = if config.trilinear_interpolation {
-                                            volume.get_interpolated(
-                                                [x / ffactor, y / ffactor, z / ffactor],
-                                                sfactor as i32,
-                                            )
+                                            if config.trilinear_interpolation {
+                                                volume.get_interpolated(
+                                                    [x / ffactor, y / ffactor, z / ffactor],
+                                                    sfactor as i32,
+                                                )
+                                            } else {
+                                                volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32)
+                                            }
                                         } else {
-                                            volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32)
+                                            composition.reset();
+                                            let start = xyz[2] + composite_direction * composite_layers_in_front;
+                                            let end = xyz[2] - composite_direction * (composite_layers_behind + 1);
+
+                                            let step = if start < end { 1 } else { -1 };
+
+                                            let mut w = start;
+                                            while w != end {
+                                                let w_factor = w as f64;
+
+                                                let x = x + w_factor * nx;
+                                                let y = y + w_factor * ny;
+                                                let z = z + w_factor * nz;
+
+                                                let new_value = if config.trilinear_interpolation {
+                                                    volume.get_interpolated(
+                                                        [x / ffactor, y / ffactor, z / ffactor],
+                                                        sfactor as i32,
+                                                    )
+                                                } else {
+                                                    volume.get([x / ffactor, y / ffactor, z / ffactor], sfactor as i32)
+                                                };
+
+                                                if !composition.update(new_value) {
+                                                    break;
+                                                }
+
+                                                w += step;
+                                            }
+                                            composition.result(composite_total_layers as u32)
                                         };
 
                                         buffer.set_gray(
@@ -680,6 +915,22 @@ impl PaintVolume for ObjVolume {
                 _ => todo!(),
             }
         }
+    }
+    fn shared(&self) -> super::VolumeCons {
+        let obj = self.obj.clone();
+        let width = self.width;
+        let height = self.height;
+        let volume = self.volume.shared();
+
+        Box::new(move || {
+            ObjVolume {
+                volume: volume(),
+                obj,
+                width,
+                height,
+            }
+            .into_volume()
+        })
     }
 }
 
@@ -903,5 +1154,8 @@ fn point(x0: i32, y0: i32, buffer: &mut Image, width: usize, r: u8, g: u8, b: u8
 impl VoxelVolume for ObjVolume {
     fn get(&self, _xyz: [f64; 3], _downsampling: i32) -> u8 {
         todo!()
+    }
+    fn reset_for_painting(&self) {
+        self.volume.reset_for_painting();
     }
 }

@@ -1,102 +1,144 @@
 use super::{DrawingConfig, Image, VoxelVolume};
 use crate::downloader::*;
 use crate::model::Quality;
-use crate::volume::PaintVolume;
+use crate::volume::{PaintVolume, VoxelPaintVolume};
+use dashmap::DashMap;
 use libm::modf;
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug)]
 pub(crate) enum TileState {
-    Unknown,
     Missing,
     Loaded(memmap::Mmap),
     Downloading(Arc<Mutex<DownloadState>>),
     TryLater(SystemTime),
 }
 
-struct State {
-    data: HashMap<(usize, usize, usize, usize), Rc<TileState>>,
-    last_tile_key: (usize, usize, usize, usize),
-    last_tile: Weak<TileState>,
+struct TileStateEntry {
+    state: Arc<TileState>,
+    last_access: AtomicU64,
 }
-impl State {
-    pub(crate) fn try_loading_tile(
-        &mut self,
+
+struct TileCache {
+    cache: DashMap<(usize, usize, usize, usize), Option<TileStateEntry>>,
+    access_counter: AtomicU64,
+}
+
+struct LocalState {
+    last_tile_key: (usize, usize, usize, usize),
+    last_tile: Option<Arc<TileState>>,
+}
+impl TileCache {
+    fn new() -> Self {
+        Self {
+            cache: DashMap::new(),
+            access_counter: AtomicU64::new(0),
+        }
+    }
+
+    fn try_loading_tile(
+        &self,
         volume: &VolumeGrid64x4Mapped,
         x: usize,
         y: usize,
         z: usize,
         quality: Quality,
-    ) -> Rc<TileState> {
+    ) -> Option<Arc<TileState>> {
         let key = (x, y, z, quality.downsampling_factor as usize);
-        if !self.data.contains_key(&key) {
-            self.data.insert(key, TileState::Unknown.into());
-        }
-        let tile_state = Rc::get_mut(self.data.get_mut(&key).expect("expected tile state data"))
-            .expect("concurrent access to tile state");
-        match tile_state {
-            TileState::Unknown => {
-                // println!("trying to load tile {}/{}/{} q{}", x, y, z, quality.downsampling_factor);
-                if let Some(state) = VolumeGrid64x4Mapped::map_for(&volume.data_dir, x, y, z, quality) {
-                    *tile_state = state;
-                } else {
-                    let state = Arc::new(Mutex::new(DownloadState::Queuing));
-                    volume.downloader.queue((state.clone(), x, y, z, quality));
-                    *tile_state = TileState::Downloading(state);
-                }
+        let counter = self.access_counter.fetch_add(1, Ordering::Relaxed);
+
+        let mut entry = self.cache.entry(key).or_insert_with(|| {
+            // Try to load from disk first
+            if let Some(state) = VolumeGrid64x4Mapped::map_for(&volume.data_dir, x, y, z, quality) {
+                Some(TileStateEntry {
+                    state: Arc::new(state),
+                    last_access: AtomicU64::new(counter),
+                })
+            } else {
+                // Queue for download
+                let download_state = Arc::new(Mutex::new(DownloadState::Queuing));
+                volume.downloader.queue((download_state.clone(), x, y, z, quality));
+                Some(TileStateEntry {
+                    state: Arc::new(TileState::Downloading(download_state)),
+                    last_access: AtomicU64::new(counter),
+                })
             }
-            TileState::TryLater(at) => {
-                if at.elapsed().unwrap() > Duration::from_secs(10) {
-                    println!(
-                        "resetting tile {}/{}/{} q{} again",
-                        x, y, z, quality.downsampling_factor
-                    );
-                    *tile_state = TileState::Unknown; // reset
-                    self.try_loading_tile(volume, x, y, z, quality);
-                }
-            }
-            TileState::Downloading(state) => {
-                match *state.clone().lock().unwrap() {
-                    DownloadState::Done => {
-                        if let Some(state) = VolumeGrid64x4Mapped::map_for(&volume.data_dir, x, y, z, quality) {
-                            *tile_state = state;
-                        } else {
-                            // set to missing permanently
-                            println!(
-                                "failed to load tile from map {}/{}/{} q{}",
-                                x, y, z, quality.downsampling_factor
-                            );
-                            *tile_state = TileState::Missing;
+        });
+
+        if let Some(tile_entry) = entry.value_mut() {
+            tile_entry.last_access.store(counter, Ordering::Relaxed);
+
+            // Check if we need to update the state
+            let current_state = tile_entry.state.clone();
+            let new_state = match current_state.as_ref() {
+                TileState::Downloading(download_state) => {
+                    match *download_state.lock().unwrap() {
+                        DownloadState::Done => {
+                            if let Some(new_state) = VolumeGrid64x4Mapped::map_for(&volume.data_dir, x, y, z, quality) {
+                                Some(Arc::new(new_state))
+                            } else {
+                                println!(
+                                    "failed to load tile from map {}/{}/{} q{}",
+                                    x, y, z, quality.downsampling_factor
+                                );
+                                Some(Arc::new(TileState::Missing))
+                            }
                         }
+                        DownloadState::Delayed => Some(Arc::new(TileState::TryLater(SystemTime::now()))),
+                        DownloadState::Failed => Some(Arc::new(TileState::Missing)),
+                        DownloadState::Pruned => {
+                            // Reset to try loading again
+                            if let Some(new_state) = VolumeGrid64x4Mapped::map_for(&volume.data_dir, x, y, z, quality) {
+                                Some(Arc::new(new_state))
+                            } else {
+                                let download_state = Arc::new(Mutex::new(DownloadState::Queuing));
+                                volume.downloader.queue((download_state.clone(), x, y, z, quality));
+                                Some(Arc::new(TileState::Downloading(download_state)))
+                            }
+                        }
+                        DownloadState::Queuing | DownloadState::Downloading => None,
                     }
-                    DownloadState::Delayed => {
-                        *tile_state = TileState::TryLater(SystemTime::now());
+                }
+                TileState::TryLater(at) => {
+                    if at.elapsed().unwrap() > Duration::from_secs(10) {
+                        println!(
+                            "resetting tile {}/{}/{} q{} again",
+                            x, y, z, quality.downsampling_factor
+                        );
+                        // Reset to try loading again
+                        if let Some(new_state) = VolumeGrid64x4Mapped::map_for(&volume.data_dir, x, y, z, quality) {
+                            Some(Arc::new(new_state))
+                        } else {
+                            let download_state = Arc::new(Mutex::new(DownloadState::Queuing));
+                            volume.downloader.queue((download_state.clone(), x, y, z, quality));
+                            Some(Arc::new(TileState::Downloading(download_state)))
+                        }
+                    } else {
+                        None
                     }
-                    DownloadState::Failed => {
-                        *tile_state = TileState::Missing;
-                    }
-                    DownloadState::Pruned => {
-                        *tile_state = TileState::Unknown;
-                    }
-                    DownloadState::Queuing => {}
-                    DownloadState::Downloading => {}
-                };
+                }
+                _ => None,
+            };
+
+            if let Some(new_state) = new_state {
+                tile_entry.state = new_state;
             }
-            _ => {}
+
+            Some(tile_entry.state.clone())
+        } else {
+            None
         }
-        self.data.get(&key).unwrap().clone()
     }
 }
 
 pub struct VolumeGrid64x4Mapped {
     data_dir: String,
-    downloader: Box<dyn Downloader>,
-    state: RefCell<State>,
+    downloader: Arc<dyn Downloader>,
+    tile_cache: Arc<TileCache>,
+    local_state: RefCell<LocalState>,
 }
 impl VolumeGrid64x4Mapped {
     fn map_for(data_dir: &str, x: usize, y: usize, z: usize, quality: Quality) -> Option<TileState> {
@@ -122,11 +164,11 @@ impl VolumeGrid64x4Mapped {
         .map(|x| TileState::Loaded(x))
     }
 
-    pub(crate) fn try_loading_tile(&self, x: usize, y: usize, z: usize, quality: Quality) -> Rc<TileState> {
-        self.state.borrow_mut().try_loading_tile(&self, x, y, z, quality)
+    pub(crate) fn try_loading_tile(&self, x: usize, y: usize, z: usize, quality: Quality) -> Option<Arc<TileState>> {
+        self.tile_cache.try_loading_tile(&self, x, y, z, quality)
     }
 
-    pub fn from_data_dir(data_dir: &str, downloader: Box<dyn Downloader>) -> VolumeGrid64x4Mapped {
+    pub fn from_data_dir(data_dir: &str, downloader: Arc<dyn Downloader>) -> VolumeGrid64x4Mapped {
         if !std::path::Path::new(data_dir).exists() {
             panic!("Data directory {} does not exist", data_dir);
         }
@@ -134,41 +176,51 @@ impl VolumeGrid64x4Mapped {
         VolumeGrid64x4Mapped {
             data_dir: data_dir.to_string(),
             downloader,
-            state: State {
-                data: HashMap::new(),
+            tile_cache: Arc::new(TileCache::new()),
+            local_state: RefCell::new(LocalState {
                 last_tile_key: (0, 0, 0, 0),
-                last_tile: Weak::new(),
-            }
-            .into(),
+                last_tile: None,
+            }),
         }
     }
-    fn tile_at(&self, x: usize, y: usize, z: usize, downsampling: usize) -> Option<Rc<TileState>> {
+    fn tile_at(&self, x: usize, y: usize, z: usize, downsampling: usize) -> Option<Arc<TileState>> {
         let tile_x = x / 64;
         let tile_y = y / 64;
         let tile_z = z / 64;
         let key = (tile_x, tile_y, tile_z, downsampling as usize);
-        if key != self.state.borrow().last_tile_key {
-            let tile = self.try_loading_tile(
-                tile_x,
-                tile_y,
-                tile_z,
-                Quality {
-                    downsampling_factor: downsampling as u8,
-                    bit_mask: 0xff,
-                },
-            );
-            let mut state = self.state.borrow_mut();
-            state.last_tile_key = key;
-            state.last_tile = Rc::downgrade(&tile);
-            Some(tile)
-        } else {
-            self.state.borrow().last_tile.upgrade()
+
+        // Check local cache first
+        {
+            let state = self.local_state.borrow();
+            if key == state.last_tile_key {
+                return state.last_tile.clone();
+            }
         }
+
+        // Load from shared cache
+        let tile = self.try_loading_tile(
+            tile_x,
+            tile_y,
+            tile_z,
+            Quality {
+                downsampling_factor: downsampling as u8,
+                bit_mask: 0xff,
+            },
+        );
+
+        // Update local cache
+        {
+            let mut state = self.local_state.borrow_mut();
+            state.last_tile_key = key;
+            state.last_tile = tile.clone();
+        }
+
+        tile
     }
     fn drop_last_cached(&self) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.local_state.borrow_mut();
         state.last_tile_key = (0, 0, 0, 0);
-        state.last_tile = Weak::new();
+        state.last_tile = None;
     }
 }
 
@@ -179,7 +231,7 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
         let z = xyz[2] as usize;
 
         if let Some(r) = self.tile_at(x, y, z, downsampling as usize) {
-            if let TileState::Loaded(tile) = r.deref() {
+            if let TileState::Loaded(tile) = r.as_ref() {
                 let tx = x & 63;
                 let ty = y & 63;
                 let tz = z & 63;
@@ -197,7 +249,7 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
                 let index = off_x + off_y * 4 + off_z * 16 + block * 64;
 
                 tile[index]
-            } else if let TileState::Downloading(_state) = r.deref() {
+            } else if let TileState::Downloading(_state) = r.as_ref() {
                 /* match *_state.lock().unwrap() {
                     DownloadState::Downloading => 255,
                     DownloadState::Queuing => 160,
@@ -229,7 +281,7 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
             let z = z0 as usize;
 
             if let Some(r) = self.tile_at(x, y, z, downsampling as usize) {
-                if let TileState::Loaded(tile) = r.deref() {
+                if let TileState::Loaded(tile) = r.as_ref() {
                     let tx = x & 63;
                     let ty = y & 63;
                     let tz = z & 63;
@@ -291,7 +343,7 @@ impl VoxelVolume for VolumeGrid64x4Mapped {
                         tile[index011] as f64,
                         tile[index111] as f64,
                     )
-                } else if let TileState::Downloading(_state) = r.deref() {
+                } else if let TileState::Downloading(_state) = r.as_ref() {
                     /* match *_state.lock().unwrap() {
                         DownloadState::Downloading => 255,
                         DownloadState::Queuing => 160,
@@ -354,9 +406,6 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         let mask = config.bit_mask();
         let filters_active = config.filters_active();
 
-        let center_u = canvas_width as i32 / 2;
-        let center_v = canvas_height as i32 / 2;
-
         let sfactor = _sfactor as i32;
         let tilesize = 64 * sfactor as i32;
         let blocksize = 4 * sfactor as i32;
@@ -385,7 +434,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                 tile_i[v_coord] = tile_vc as usize;
                 tile_i[plane_coord] = tile_pc as usize;
 
-                let state = self.try_loading_tile(
+                if let Some(state) = self.try_loading_tile(
                     tile_i[0],
                     tile_i[1],
                     tile_i[2],
@@ -393,75 +442,74 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                         bit_mask: 0xff,
                         downsampling_factor: sfactor as u8,
                     },
-                );
+                ) {
+                    if let TileState::Loaded(tile) = state.as_ref() {
+                        // iterate over blocks in tile
+                        let min_tile_uc = (tile_uc * tilesize).max(min_uc) - tile_uc * tilesize;
+                        let max_tile_uc = (tile_uc * tilesize + tilesize).min(max_uc) - tile_uc * tilesize;
+                        let min_tile_vc = (tile_vc * tilesize).max(min_vc) - tile_vc * tilesize;
+                        let max_tile_vc = (tile_vc * tilesize + tilesize).min(max_vc) - tile_vc * tilesize;
 
-                if let TileState::Loaded(tile) = state.deref() {
-                    // iterate over blocks in tile
-                    let min_tile_uc = (tile_uc * tilesize).max(min_uc) - tile_uc * tilesize;
-                    let max_tile_uc = (tile_uc * tilesize + tilesize).min(max_uc) - tile_uc * tilesize;
-                    let min_tile_vc = (tile_vc * tilesize).max(min_vc) - tile_vc * tilesize;
-                    let max_tile_vc = (tile_vc * tilesize + tilesize).min(max_vc) - tile_vc * tilesize;
+                        let min_block_uc = min_tile_uc / blocksize;
+                        let max_block_uc = (max_tile_uc + blocksize - 1) / blocksize;
+                        let min_block_vc = min_tile_vc / blocksize;
+                        let max_block_vc = (max_tile_vc + (blocksize - 1)) / blocksize;
 
-                    let min_block_uc = min_tile_uc / blocksize;
-                    let max_block_uc = (max_tile_uc + blocksize - 1) / blocksize;
-                    let min_block_vc = min_tile_vc / blocksize;
-                    let max_block_vc = (max_tile_vc + (blocksize - 1)) / blocksize;
+                        //println!("min_tile_x: {} max_tile_x: {} min_tile_y: {} max_tile_y: {}", min_tile_x, max_tile_x, min_tile_y, max_tile_y);
+                        //println!("min_block_x: {} max_block_x: {} min_block_y: {} max_block_y: {}", min_block_x, max_block_x, min_block_y, max_block_y);
 
-                    //println!("min_tile_x: {} max_tile_x: {} min_tile_y: {} max_tile_y: {}", min_tile_x, max_tile_x, min_tile_y, max_tile_y);
-                    //println!("min_block_x: {} max_block_x: {} min_block_y: {} max_block_y: {}", min_block_x, max_block_x, min_block_y, max_block_y);
+                        for block_vc in min_block_vc..max_block_vc {
+                            for block_uc in min_block_uc..max_block_uc {
+                                let mut block_i = [0; 3];
+                                block_i[u_coord] = block_uc as usize;
+                                block_i[v_coord] = block_vc as usize;
+                                block_i[plane_coord] = block_pc as usize;
+                                let boff = (block_i[2] << 8) + (block_i[1] << 4) + block_i[0];
 
-                    for block_vc in min_block_vc..max_block_vc {
-                        for block_uc in min_block_uc..max_block_uc {
-                            let mut block_i = [0; 3];
-                            block_i[u_coord] = block_uc as usize;
-                            block_i[v_coord] = block_vc as usize;
-                            block_i[plane_coord] = block_pc as usize;
-                            let boff = (block_i[2] << 8) + (block_i[1] << 4) + block_i[0];
-
-                            // iterate over pixels in block
-                            for vc in (0..blocksize).step_by(paint_zoom as usize) {
-                                for uc in (0..blocksize).step_by(paint_zoom as usize) {
-                                    let u = ((tile_uc * tilesize + block_uc * blocksize + uc) as i32 - min_uc)
-                                        / paint_zoom as i32;
-                                    let v = ((tile_vc * tilesize + block_vc * blocksize + vc) as i32 - min_vc)
-                                        / paint_zoom as i32;
-                                    if uc == 0 && vc == 0 {
-                                        //println!("block_x: {} block_y: {}", block_x, block_y);
-                                        //println!("u: {} v: {}", u, v);
-                                    }
-                                    let mut offs_i = [0; 3];
-                                    //if (u / tilesize) % 2 == 0 {
-                                    offs_i[u_coord] = uc as usize / sfactor as usize;
-                                    offs_i[v_coord] = vc as usize / sfactor as usize;
-                                    offs_i[plane_coord] = block_pc_off as usize / sfactor as usize;
-                                    /* } else {
-                                        let fac = 2;
-                                        offs_i[u_coord] = (uc as usize) / fac * fac;
-                                        offs_i[v_coord] = (vc as usize) / fac * fac;
-                                        offs_i[plane_coord] = (block_pc_off as usize) / fac * fac;
-                                    } */
-                                    //let factor = quality.downsampling_factor as usize * quality.downsampling_factor as usize * quality.downsampling_factor as usize;
-
-                                    if u >= 0 && u < canvas_width as i32 && v >= 0 && v < canvas_height as i32 {
-                                        let off = boff * 64 + offs_i[2] * 16 + offs_i[1] * 4 + offs_i[0];
-                                        if off > tile.len() {
-                                            panic!("off: {} tile.len(): {}", off, tile.len());
+                                // iterate over pixels in block
+                                for vc in (0..blocksize).step_by(paint_zoom as usize) {
+                                    for uc in (0..blocksize).step_by(paint_zoom as usize) {
+                                        let u = ((tile_uc * tilesize + block_uc * blocksize + uc) as i32 - min_uc)
+                                            / paint_zoom as i32;
+                                        let v = ((tile_vc * tilesize + block_vc * blocksize + vc) as i32 - min_vc)
+                                            / paint_zoom as i32;
+                                        if uc == 0 && vc == 0 {
+                                            //println!("block_x: {} block_y: {}", block_x, block_y);
+                                            //println!("u: {} v: {}", u, v);
                                         }
-                                        let value = tile[off as usize];
+                                        let mut offs_i = [0; 3];
+                                        //if (u / tilesize) % 2 == 0 {
+                                        offs_i[u_coord] = uc as usize / sfactor as usize;
+                                        offs_i[v_coord] = vc as usize / sfactor as usize;
+                                        offs_i[plane_coord] = block_pc_off as usize / sfactor as usize;
+                                        /* } else {
+                                            let fac = 2;
+                                            offs_i[u_coord] = (uc as usize) / fac * fac;
+                                            offs_i[v_coord] = (vc as usize) / fac * fac;
+                                            offs_i[plane_coord] = (block_pc_off as usize) / fac * fac;
+                                        } */
+                                        //let factor = quality.downsampling_factor as usize * quality.downsampling_factor as usize * quality.downsampling_factor as usize;
 
-                                        let value = if u == center_u || v == center_v {
-                                            0
-                                        } else if filters_active {
-                                            let pluscon = ((value as i32 - config.threshold_min as i32).max(0) * 255
-                                                / (255 - (config.threshold_min + config.threshold_max) as i32))
-                                                .min(255)
-                                                as u8;
+                                        if u >= 0 && u < canvas_width as i32 && v >= 0 && v < canvas_height as i32 {
+                                            let off = boff * 64 + offs_i[2] * 16 + offs_i[1] * 4 + offs_i[0];
+                                            if off > tile.len() {
+                                                panic!("off: {} tile.len(): {}", off, tile.len());
+                                            }
+                                            let value = tile[off as usize];
 
-                                            (((pluscon & mask) as f32) / (mask as f32) * 255.0) as u8
-                                        } else {
-                                            value
-                                        };
-                                        buffer.set_gray(u as usize, v as usize, value);
+                                            if filters_active {
+                                                let pluscon = ((value as i32 - config.threshold_min as i32).max(0)
+                                                    * 255
+                                                    / (255 - (config.threshold_min + config.threshold_max) as i32))
+                                                    .min(255)
+                                                    as u8;
+
+                                                (((pluscon & mask) as f32) / (mask as f32) * 255.0) as u8
+                                            } else {
+                                                value
+                                            };
+                                            buffer.set_gray(u as usize, v as usize, value);
+                                        }
                                     }
                                 }
                             }
@@ -470,5 +518,22 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                 }
             }
         }
+    }
+    fn shared(&self) -> super::VolumeCons {
+        let data_dir = self.data_dir.clone();
+        let downloader = self.downloader.clone();
+        let tile_cache = self.tile_cache.clone();
+        Box::new(move || {
+            VolumeGrid64x4Mapped {
+                data_dir,
+                downloader,
+                tile_cache,
+                local_state: RefCell::new(LocalState {
+                    last_tile_key: (0, 0, 0, 0),
+                    last_tile: None,
+                }),
+            }
+            .into_volume()
+        })
     }
 }

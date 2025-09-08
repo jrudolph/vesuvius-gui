@@ -5,7 +5,6 @@ use directories::BaseDirs;
 use futures::{stream, StreamExt};
 use image::Luma;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use reqwest::blocking::Client;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ops::RangeInclusive;
@@ -15,7 +14,8 @@ use vesuvius_gui::downloader::{DownloadState as DS, Downloader};
 use vesuvius_gui::model::Quality;
 use vesuvius_gui::model::{FullVolumeReference, VolumeReference};
 use vesuvius_gui::volume::{
-    self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, Volume, VoxelPaintVolume, VoxelVolume,
+    self, AffineTransform, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, Volume, VolumeCons, VoxelPaintVolume,
+    VoxelVolume,
 };
 
 #[derive(Clone, Debug)]
@@ -70,6 +70,12 @@ pub struct Args {
     /// Height of the segment file when browsing obj files
     #[clap(long)]
     height: u32,
+
+    /// Transform to apply to the obj file (to map between different scans). You can either supply a filename to a transform json file
+    /// (as defined in https://github.com/ScrollPrize/villa/blob/main/foundation/volume-registration/transform_schema.json) or supply
+    /// a 4x3 affine transformation matrix as a json array string directly
+    #[clap(long)]
+    transform: Option<String>,
 
     /// The target directory to save the rendered images
     #[clap(long)]
@@ -157,6 +163,7 @@ struct RenderParams {
     obj_file: String,
     width: usize,
     height: usize,
+    transform: Option<AffineTransform>,
     tile_size: usize,
     w_range: RangeInclusive<usize>,
     crop: Option<Crop>,
@@ -185,6 +192,10 @@ impl From<&Args> for RenderParams {
             obj_file: args.obj.clone(),
             width: args.width as usize,
             height: args.height as usize,
+            transform: args
+                .transform
+                .as_ref()
+                .map(|t| AffineTransform::from_json_array_or_path(t).unwrap()),
             tile_size: args.tile_size.unwrap_or(1024) as usize,
             w_range: args.min_layer.unwrap_or(25) as usize..=args.max_layer.unwrap_or(41) as usize,
             crop: args.crop.clone(),
@@ -226,7 +237,7 @@ const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
 
 impl Rendering {
     fn new(params: RenderParams, download_settings: DownloadSettings) -> Self {
-        let obj = Arc::new(ObjVolume::load_obj(&params.obj_file));
+        let obj = Arc::new(ObjVolume::load_obj(&params.obj_file, &params.transform));
 
         Self {
             params,
@@ -355,7 +366,13 @@ impl Rendering {
         let height = self.params.height;
         let tile_width = self.params.tile_size;
         let tile_height = self.params.tile_size;
-        let world = ObjVolume::new(self.obj.clone(), Volume::from_ref(dummy.clone()), width, height).into_volume();
+        let world = ObjVolume::new(
+            self.obj.clone(),
+            Volume::from_ref(Arc::new(dummy.as_ref().clone())),
+            width,
+            height,
+        )
+        .into_volume();
 
         let mut image = Image::new(tile_width, tile_height);
         let xyz = [
@@ -456,7 +473,7 @@ impl Rendering {
         }
         let dir = self.downloader.settings.cache_dir.clone();
 
-        let vol = volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Box::new(PanicDownloader {}));
+        let vol = volume::VolumeGrid64x4Mapped::from_data_dir(&dir, Arc::new(PanicDownloader {}));
         let world = ObjVolume::new(
             self.obj.clone(),
             vol.into_volume(),
@@ -557,6 +574,9 @@ impl PaintVolume for TileCollectingVolume {
         _config: &DrawingConfig,
         _buffer: &mut Image,
     ) {
+        panic!();
+    }
+    fn shared(&self) -> VolumeCons {
         panic!();
     }
 }

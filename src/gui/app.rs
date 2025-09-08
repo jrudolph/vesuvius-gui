@@ -1,8 +1,8 @@
 use crate::catalog::obj_repository::ObjRepository;
 use crate::catalog::Catalog;
 use crate::catalog::Segment;
+use crate::gui::{PaneType, VolumePane};
 use crate::model::*;
-use crate::volume;
 use crate::volume::*;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
@@ -13,15 +13,13 @@ use egui::SliderClamping;
 use egui::Stroke;
 use egui::Vec2;
 use egui::WidgetText;
-use egui::{ColorImage, Image, PointerButton, Response, Ui, Widget};
+use egui::{Response, Ui, Widget};
 use egui_extras::Column;
 use egui_extras::TableBuilder;
 use std::ops::RangeInclusive;
-use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
-
-const ZOOM_RES_FACTOR: f32 = 1.3; // defines which resolution is used for which zoom level, 2 means only when zooming deeper than 2x the full resolution is pulled
+use std::sync::Arc;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -38,9 +36,9 @@ pub struct SegmentMode {
     // This is the same reference as `world`. We need to add it just because upcasting between SurfaceVolume and VoxelPaintVolume is so hard.
     // TODO: remove when there's a better way to upcast
     #[serde(skip)]
-    surface_volume: Rc<dyn SurfaceVolume>,
+    surface_volume: Arc<dyn SurfaceVolume>,
     #[serde(skip)]
-    texture_uv: Option<egui::TextureHandle>,
+    uv_pane: VolumePane,
     #[serde(skip)]
     convert_to_world_coords: Box<dyn Fn([i32; 3]) -> [i32; 3]>,
 }
@@ -55,8 +53,8 @@ impl Default for SegmentMode {
             height: 1000,
             ranges: [0..=1000, 0..=1000, -40..=40],
             world: EmptyVolume {}.into_volume(),
-            surface_volume: Rc::new(EmptyVolume {}),
-            texture_uv: None,
+            surface_volume: Arc::new(EmptyVolume {}),
+            uv_pane: VolumePane::new(PaneType::UV, true),
             convert_to_world_coords: Box::new(|x| x),
         }
     }
@@ -70,6 +68,7 @@ pub struct ObjFileConfig {
     pub obj_file: String,
     pub width: usize,
     pub height: usize,
+    pub transform: Option<AffineTransform>,
 }
 
 pub struct VesuviusConfig {
@@ -77,6 +76,15 @@ pub struct VesuviusConfig {
     pub obj_file: Option<ObjFileConfig>,
     pub overlay_dir: Option<String>,
     pub volume: Option<NewVolumeReference>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+enum GuiLayout {
+    Grid,
+    XY,
+    XZ,
+    YZ,
+    UV,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -87,19 +95,9 @@ pub struct TemplateApp {
     volume_id: usize,
     coord: [i32; 3],
     zoom: f32,
-    frame_width: usize,
-    frame_height: usize,
     data_dir: String,
     #[serde(skip)]
-    texture_xy: Option<egui::TextureHandle>,
-    #[serde(skip)]
-    texture_xz: Option<egui::TextureHandle>,
-    #[serde(skip)]
-    texture_yz: Option<egui::TextureHandle>,
-    #[serde(skip)]
     world: Volume,
-    #[serde(skip)]
-    last_size: Vec2,
     #[serde(skip)]
     download_notifier: Option<Receiver<(usize, usize, usize, Quality)>>,
     drawing_config: DrawingConfig,
@@ -107,12 +105,6 @@ pub struct TemplateApp {
     show_overlay: bool,
     #[serde(skip)]
     ranges: [RangeInclusive<i32>; 3],
-    /* #[serde(skip)]
-    ppm_file: Option<String>,
-    #[serde(skip)]
-    obj_file: Option<String>, */
-    //#[serde(skip)]
-    //mode: Mode,
     #[serde(skip)]
     extra_resolutions: u32,
     #[serde(skip)]
@@ -132,6 +124,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     overlay: Option<Box<dyn PaintVolume>>,
     catalog_panel_open: bool,
+    layout: GuiLayout,
 }
 
 impl Default for TemplateApp {
@@ -144,21 +137,13 @@ impl Default for TemplateApp {
             volume_id: 0,
             coord: [2800, 2500, 10852],
             zoom: 1f32,
-            frame_width: 1000,
-            frame_height: 1000,
             data_dir: ".".to_string(),
-            texture_xy: None,
-            texture_xz: None,
-            texture_yz: None,
             world: EmptyVolume {}.into_volume(),
-            last_size: Vec2::ZERO,
             download_notifier: None,
             drawing_config: Default::default(),
             sync_coordinates: true,
             show_overlay: true,
-            ranges: [0..=10000, 0..=10000, 0..=21000],
-            //ppm_file: None,
-            //obj_file: None,
+            ranges: [0..=20000, 0..=20000, 0..=30000],
             extra_resolutions: 1,
             segment_mode: None,
             catalog,
@@ -169,6 +154,7 @@ impl Default for TemplateApp {
             notification_receiver,
             overlay: None,
             catalog_panel_open: true,
+            layout: GuiLayout::Grid,
         }
     }
 }
@@ -206,9 +192,10 @@ impl TemplateApp {
             obj_file,
             width,
             height,
+            transform,
         }) = config.obj_file
         {
-            app.setup_segment(&obj_file, width, height);
+            app.setup_segment(&obj_file, width, height, transform);
         }
 
         if let Some(segment_file) = config.overlay_dir {
@@ -235,7 +222,7 @@ impl TemplateApp {
         app
     }
 
-    fn setup_segment(&mut self, segment_file: &str, width: usize, height: usize) {
+    fn setup_segment(&mut self, segment_file: &str, width: usize, height: usize, transform: Option<AffineTransform>) {
         if segment_file.ends_with(".ppm") {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old = self.world.clone();
@@ -243,7 +230,7 @@ impl TemplateApp {
             let ppm = PPMVolume::new(segment_file, base);
             let width = ppm.width() as i32;
             let height = ppm.height() as i32;
-            let ppm = Rc::new(ppm);
+            let ppm = Arc::new(ppm);
             let ppm2 = ppm.clone();
             println!("Loaded PPM volume with size {}x{}", width, height);
 
@@ -256,7 +243,7 @@ impl TemplateApp {
             segment.height = height as usize;
             segment.ranges = [0..=width, 0..=height, -40..=40];
             segment.world = Volume::from_ref(ppm.clone());
-            segment.surface_volume = ppm;
+            //segment.surface_volume = ppm;
             segment.convert_to_world_coords = Box::new(move |coord| ppm2.convert_to_world_coords(coord));
 
             self.segment_mode = Some(segment)
@@ -264,11 +251,11 @@ impl TemplateApp {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old = self.world.clone();
             let base = old;
-            let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height);
+            let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height, &transform);
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
 
-            let volume = Rc::new(obj_volume);
+            let volume = Arc::new(obj_volume);
             let obj2 = volume.clone();
             println!("Loaded Obj volume with size {}x{}", width, height);
 
@@ -296,10 +283,7 @@ impl TemplateApp {
     }
 
     fn load_volume_by_ref(&mut self, volume_ref: &dyn VolumeReference) {
-        let new_vol = NewVolumeReference::Volume64x4(std::sync::Arc::new(DynamicFullVolumeReference::new(
-            "unknown".to_string(),
-            volume_ref.id(),
-        )));
+        let new_vol = NewVolumeReference::Volume64x4(volume_ref.owned());
         self.load_volume(&new_vol);
     }
 
@@ -319,199 +303,6 @@ impl TemplateApp {
 
     fn selected_volume(&self) -> &'static dyn VolumeReference {
         <dyn VolumeReference>::VOLUMES[self.volume_id]
-    }
-
-    pub fn clear_textures(&mut self) {
-        self.texture_xy = None;
-        self.texture_xz = None;
-        self.texture_yz = None;
-
-        if let Some(segment_mode) = self.segment_mode.as_mut() {
-            segment_mode.texture_uv = None;
-            self.sync_coords();
-        }
-    }
-
-    fn add_scroll_handler(&mut self, image: &Response, ui: &Ui, coord: usize, segment_pane: bool) {
-        let (coords, ranges) = if segment_pane {
-            let ranges = self.segment_mode.as_ref().unwrap().ranges.clone();
-
-            (&mut self.segment_mode.as_mut().unwrap().coord, ranges)
-        } else {
-            (&mut self.coord, self.ranges.clone())
-        };
-
-        if image.hovered() {
-            let delta = ui.input(|i| i.smooth_scroll_delta);
-            let zoom_delta = ui.input(|i| i.zoom_delta());
-
-            if zoom_delta != 1.0 {
-                self.zoom = (self.zoom * zoom_delta).max(0.1).min(6.0);
-                self.clear_textures();
-            } else if delta.y != 0.0 {
-                let min_level = 1 << ((ZOOM_RES_FACTOR / self.zoom) as i32).min(4);
-                let delta = delta.y.signum() * min_level as f32;
-                let m = &mut coords[coord];
-                *m = ((*m + delta as i32) / min_level as i32 * min_level as i32)
-                    .clamp(*ranges[coord].start(), *ranges[coord].end());
-                self.clear_textures();
-            }
-        }
-    }
-    fn add_drag_handler(&mut self, image: &Response, ucoord: usize, vcoord: usize, segment_pane: bool) {
-        if !segment_pane && self.should_sync_coords() {
-            return;
-        }
-
-        let (coords, ranges) = if segment_pane {
-            let smode = self.segment_mode.as_mut().unwrap();
-            (&mut smode.coord, &smode.ranges)
-        } else {
-            (&mut self.coord, &self.ranges)
-        };
-
-        if image.dragged_by(PointerButton::Primary) {
-            //let im2 = image.on_hover_cursor(CursorIcon::Grabbing);
-            let delta = -image.drag_delta() / self.zoom;
-
-            coords[ucoord] = (coords[ucoord] + delta.x as i32).clamp(*ranges[ucoord].start(), *ranges[ucoord].end());
-            coords[vcoord] = (coords[vcoord] + delta.y as i32).clamp(*ranges[vcoord].start(), *ranges[vcoord].end());
-            self.clear_textures();
-        }
-    }
-    fn get_or_create_texture(
-        &mut self,
-        ui: &Ui,
-        u_coord: usize,
-        v_coord: usize,
-        d_coord: usize,
-        segment_pane: bool,
-        t: fn(&mut Self) -> &mut Option<egui::TextureHandle>,
-    ) -> egui::TextureHandle {
-        if let Some(texture) = t(self) {
-            texture.clone()
-        } else {
-            let res = self.create_texture(ui, u_coord, v_coord, d_coord, segment_pane);
-            *t(self) = Some(res.clone());
-            res
-        }
-    }
-    fn create_texture(
-        &mut self,
-        ui: &Ui,
-        u_coord: usize,
-        v_coord: usize,
-        d_coord: usize,
-        segment_pane: bool,
-    ) -> egui::TextureHandle {
-        use std::time::Instant;
-        let _start = Instant::now();
-
-        let (scaling, paint_zoom) = if self.zoom >= 1.0 {
-            (self.zoom, 1 as u8)
-        } else {
-            let next_smaller_pow_of_2 = 2.0f32.powf((self.zoom as f32).log2().floor());
-            (
-                self.zoom / next_smaller_pow_of_2,
-                (1.0 / next_smaller_pow_of_2).round() as u8,
-            )
-        };
-        //println!("scaling: {}, paint_zoom: {}", scaling, paint_zoom);
-
-        let width = (self.frame_width as f32 / scaling) as usize;
-        let height = (self.frame_height as f32 / scaling) as usize;
-        let mut image = volume::Image::new(width, height);
-
-        //let q = 1;
-        //let mut printed = false;
-
-        let (coords, world) = if !segment_pane {
-            (self.coord, self.world.clone())
-        } else {
-            (
-                self.segment_mode.as_ref().unwrap().coord,
-                self.segment_mode.as_ref().unwrap().world.clone(),
-            )
-        };
-
-        let mut xyz: [i32; 3] = [0, 0, 0];
-        xyz[d_coord] = coords[d_coord];
-
-        let min_level = (32 - ((ZOOM_RES_FACTOR / self.zoom) as u32).leading_zeros())
-            .min(4)
-            .max(0);
-        let max_level: u32 = (min_level + self.extra_resolutions).min(4);
-        /* let min_level = 0;
-        let max_level = 0; */
-        for level in (min_level..=max_level).rev() {
-            let sfactor = 1 << level as u8;
-            //println!("level: {} factor: {}", level, sfactor);
-            world.paint(
-                coords,
-                u_coord,
-                v_coord,
-                d_coord,
-                width,
-                height,
-                sfactor,
-                paint_zoom,
-                &self.drawing_config,
-                &mut image,
-            );
-        }
-
-        if !segment_pane && self.show_overlay {
-            if let Some(zarr) = self.overlay.as_mut() {
-                zarr.paint(
-                    coords,
-                    u_coord,
-                    v_coord,
-                    d_coord,
-                    width,
-                    height,
-                    1 << min_level as u8,
-                    paint_zoom,
-                    &self.drawing_config,
-                    &mut image,
-                );
-            }
-        }
-
-        if self.is_segment_mode() && !segment_pane && self.drawing_config.show_segment_outlines {
-            let coords = self.segment_mode.as_ref().unwrap().coord;
-
-            self.segment_mode
-                .as_ref()
-                .unwrap()
-                .surface_volume
-                .paint_plane_intersection(
-                    self.coord,
-                    u_coord,
-                    v_coord,
-                    d_coord,
-                    width,
-                    height,
-                    1,
-                    paint_zoom,
-                    Some(coords),
-                    &self.drawing_config,
-                    &mut image,
-                );
-        }
-
-        let image: ColorImage = image.into();
-        //println!("Time elapsed before loading in ({}, {}, {}) is: {:?}", u_coord, v_coord, d_coord, _start.elapsed());
-        // Load the texture only once.
-        let texture_id = ui
-            .ctx()
-            .load_texture(format!("{}{}{}", u_coord, v_coord, d_coord), image, Default::default());
-
-        let _duration = _start.elapsed();
-        /* println!(
-            "Time elapsed in segment: {segment_pane} ({}, {}, {}) is: {:?}",
-            u_coord, v_coord, d_coord, _duration
-        ); */
-        texture_id
     }
 
     fn sync_coords(&mut self) {
@@ -553,7 +344,9 @@ impl TemplateApp {
                 if self.is_segment_mode() {
                     if ui.button("Unload segment").clicked() {
                         self.segment_mode = None;
-                        self.clear_textures();
+                        if self.layout == GuiLayout::UV {
+                            self.layout = GuiLayout::Grid;
+                        }
                     }
                 } else {
                     ui.add_enabled_ui(!self.is_segment_mode(), |ui| {
@@ -565,7 +358,6 @@ impl TemplateApp {
                                     let res = ui.selectable_value(&mut self.volume_id, id, volume.label());
                                     if res.changed() {
                                         println!("Selected volume: {}", self.volume_id);
-                                        self.clear_textures();
                                         self.select_volume(self.volume_id);
                                         self.zoom = 0.25;
                                     }
@@ -575,7 +367,7 @@ impl TemplateApp {
                 }
                 ui.end_row();
                 let sync_coordinates = self.should_sync_coords();
-                let x_sl = slider(
+                slider(
                     ui,
                     "x",
                     &mut self.coord[0],
@@ -583,7 +375,7 @@ impl TemplateApp {
                     false,
                     !sync_coordinates,
                 );
-                let y_sl = slider(
+                slider(
                     ui,
                     "y",
                     &mut self.coord[1],
@@ -591,7 +383,7 @@ impl TemplateApp {
                     false,
                     !sync_coordinates,
                 );
-                let z_sl = slider(
+                slider(
                     ui,
                     "z",
                     &mut self.coord[2],
@@ -627,10 +419,11 @@ impl TemplateApp {
                         false,
                         true,
                     );
+
                     has_changed = has_changed || u_sl.changed() || v_sl.changed() || w_sl.changed();
                 }
 
-                let zoom_sl = slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true, true);
+                slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true, true);
 
                 fn cb<T: ToString>(ui: &mut Ui, label: T, value: &mut bool) -> Response {
                     ui.label(label.to_string());
@@ -653,7 +446,7 @@ impl TemplateApp {
                         has_changed = true;
                     }
 
-                    let segment_mode = self.segment_mode.as_mut().unwrap();
+                    self.segment_mode.as_mut().unwrap();
                     has_changed = has_changed
                         || cb(
                             ui,
@@ -672,24 +465,101 @@ impl TemplateApp {
 
                     has_changed = has_changed || cb(ui, "Sync coordinates ('S')", &mut self.sync_coordinates).changed();
 
-                    if cb(ui, "XYZ outline ('X')", &mut self.drawing_config.draw_xyz_outlines).changed() {
-                        segment_mode.texture_uv = None;
-                    }
+                    cb(ui, "XYZ outline ('X')", &mut self.drawing_config.draw_xyz_outlines);
+
+                    ui.collapsing("Compositing", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Mode");
+                            // combo box
+                            egui::ComboBox::from_id_salt("Compositing Mode")
+                                .selected_text(self.drawing_config.compositing.mode.label())
+                                .show_ui(ui, |ui| {
+                                    for mode in CompositingMode::VALUES {
+                                        ui.selectable_value(
+                                            &mut self.drawing_config.compositing.mode,
+                                            mode,
+                                            mode.label(),
+                                        );
+                                    }
+                                });
+                            ui.end_row();
+                        });
+
+                        slider(
+                            ui,
+                            "Layers In Front",
+                            &mut self.drawing_config.compositing.layers_in_front,
+                            0..=100,
+                            false,
+                            true,
+                        );
+
+                        slider(
+                            ui,
+                            "Layers Behind",
+                            &mut self.drawing_config.compositing.layers_behind,
+                            0..=100,
+                            false,
+                            true,
+                        );
+
+                        if self.drawing_config.compositing.mode == CompositingMode::Alpha
+                            || self.drawing_config.compositing.mode == CompositingMode::AlphaHeightMap
+                        {
+                            slider(
+                                ui,
+                                "Alpha Min",
+                                &mut self.drawing_config.compositing.alpha_min,
+                                0..=255,
+                                false,
+                                true,
+                            );
+                            slider(
+                                ui,
+                                "Alpha Max",
+                                &mut self.drawing_config.compositing.alpha_max,
+                                0..=255,
+                                false,
+                                true,
+                            );
+                            slider(
+                                ui,
+                                "Alpha Threshold",
+                                &mut self.drawing_config.compositing.alpha_threshold,
+                                0..=10000,
+                                false,
+                                true,
+                            );
+                            slider(
+                                ui,
+                                "Opacity",
+                                &mut self.drawing_config.compositing.opacity,
+                                0..=300,
+                                false,
+                                true,
+                            );
+                            cb(
+                                ui,
+                                "Reverse Direction",
+                                &mut self.drawing_config.compositing.reverse_direction,
+                            );
+                        }
+                    });
                 }
 
-                if x_sl.changed() || y_sl.changed() || z_sl.changed() || zoom_sl.changed() || has_changed {
-                    self.clear_textures();
+                if has_changed {
+                    self.sync_coords();
                 }
             });
 
         ui.collapsing("Filters", |ui| {
-            let enable = ui.checkbox(&mut self.drawing_config.enable_filters, "Enable ('F')");
+            ui.checkbox(&mut self.drawing_config.enable_filters, "Enable ('F')");
             ui.add_enabled_ui(self.drawing_config.enable_filters, |ui| {
                 egui::Grid::new("my_grid")
                     .num_columns(2)
                     .spacing([40.0, 4.0])
                     .show(ui, |ui| {
-                        let min_sl = slider(
+                        slider(
                             ui,
                             "Min",
                             &mut self.drawing_config.threshold_min,
@@ -697,7 +567,7 @@ impl TemplateApp {
                             false,
                             true,
                         );
-                        let max_sl = slider(
+                        slider(
                             ui,
                             "Max",
                             &mut self.drawing_config.threshold_max,
@@ -705,8 +575,8 @@ impl TemplateApp {
                             false,
                             true,
                         );
-                        let bits_sl = slider(ui, "Mask Bits", &mut self.drawing_config.quant, 1..=8, false, true);
-                        let mask_sl = slider(
+                        slider(ui, "Mask Bits", &mut self.drawing_config.quant, 1..=8, false, true);
+                        slider(
                             ui,
                             "Mask Shift",
                             &mut self.drawing_config.mask_shift,
@@ -717,15 +587,8 @@ impl TemplateApp {
                         ui.label("Mask");
                         ui.label(format!("{:08b}", self.drawing_config.bit_mask()));
                         ui.end_row();
-
-                        if min_sl.changed() || max_sl.changed() || bits_sl.changed() || mask_sl.changed() {
-                            self.clear_textures();
-                        }
                     });
             });
-            if enable.changed() {
-                self.clear_textures();
-            }
         });
     }
 
@@ -737,8 +600,6 @@ impl TemplateApp {
         egui_extras::install_image_loaders(ctx);
 
         if self.try_recv_from_download_notifier() {
-            self.clear_textures();
-
             while self.try_recv_from_download_notifier() {} // clear queue
         }
 
@@ -756,9 +617,8 @@ impl TemplateApp {
         }
         if let Some((segment, obj_file)) = switch_segment {
             self.load_volume_by_ref(&segment.volume_ref());
-            self.setup_segment(obj_file.to_str().unwrap(), segment.width, segment.height);
+            self.setup_segment(obj_file.to_str().unwrap(), segment.width, segment.height, None);
             self.selected_segment = Some(segment);
-            self.clear_textures();
             self.downloading_segment = None;
         }
 
@@ -766,48 +626,87 @@ impl TemplateApp {
             self.catalog_panel(ctx);
         }
 
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::F) {
-                self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
-                self.clear_textures();
-            }
-            if self.overlay.is_some() && i.key_pressed(egui::Key::L) {
-                self.show_overlay = !self.show_overlay;
-                self.clear_textures();
-            }
-            if self.is_segment_mode() {
-                if i.key_pressed(egui::Key::I) {
-                    self.drawing_config.trilinear_interpolation = !self.drawing_config.trilinear_interpolation;
-                    self.clear_textures();
+        if !ctx.wants_keyboard_input() {
+            ctx.input(|i| {
+                if i.key_pressed(egui::Key::F) {
+                    self.drawing_config.enable_filters = !self.drawing_config.enable_filters;
                 }
-                if i.key_pressed(egui::Key::O) {
-                    self.drawing_config.show_segment_outlines = !self.drawing_config.show_segment_outlines;
-                    self.clear_textures();
+                if self.overlay.is_some() && i.key_pressed(egui::Key::L) {
+                    self.show_overlay = !self.show_overlay;
                 }
-                if i.key_pressed(egui::Key::P) {
-                    self.drawing_config.draw_outline_vertices = !self.drawing_config.draw_outline_vertices;
-                    self.clear_textures();
+                if i.key_pressed(egui::Key::C) {
+                    self.catalog_panel_open = !self.catalog_panel_open;
                 }
-                if i.key_pressed(egui::Key::S) {
-                    self.sync_coordinates = !self.sync_coordinates;
-                    self.clear_textures();
+                if i.key_pressed(egui::Key::Num1) {
+                    self.layout = GuiLayout::Grid;
                 }
-                if i.key_pressed(egui::Key::X) {
-                    self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
-                    self.clear_textures();
+                if i.key_pressed(egui::Key::Num2) {
+                    self.layout = GuiLayout::XY;
                 }
-                if i.key_pressed(egui::Key::J) {
-                    let segment_mode = self.segment_mode.as_mut().unwrap();
-                    segment_mode.coord[2] = (segment_mode.coord[2] - 1).max(*segment_mode.ranges[2].start());
-                    self.clear_textures();
+                if i.key_pressed(egui::Key::Num3) {
+                    self.layout = GuiLayout::XZ;
                 }
-                if i.key_pressed(egui::Key::K) {
-                    let segment_mode = self.segment_mode.as_mut().unwrap();
-                    segment_mode.coord[2] = (segment_mode.coord[2] + 1).min(*segment_mode.ranges[2].end());
-                    self.clear_textures();
+                if i.key_pressed(egui::Key::Num4) {
+                    self.layout = GuiLayout::YZ;
                 }
-            }
-        });
+                if self.is_segment_mode() {
+                    if i.key_pressed(egui::Key::I) {
+                        self.drawing_config.trilinear_interpolation = !self.drawing_config.trilinear_interpolation;
+                    }
+                    if i.key_pressed(egui::Key::O) {
+                        self.drawing_config.show_segment_outlines = !self.drawing_config.show_segment_outlines;
+                    }
+                    if i.key_pressed(egui::Key::P) {
+                        self.drawing_config.draw_outline_vertices = !self.drawing_config.draw_outline_vertices;
+                    }
+                    if i.key_pressed(egui::Key::S) {
+                        self.sync_coordinates = !self.sync_coordinates;
+                    }
+                    if i.key_pressed(egui::Key::X) {
+                        self.drawing_config.draw_xyz_outlines = !self.drawing_config.draw_xyz_outlines;
+                    }
+                    if i.key_pressed(egui::Key::A) {
+                        if self.drawing_config.compositing.mode != CompositingMode::Alpha {
+                            self.drawing_config.compositing.mode = CompositingMode::Alpha;
+                        } else {
+                            self.drawing_config.compositing.mode = CompositingMode::None;
+                        }
+                    }
+                    if i.key_pressed(egui::Key::M) {
+                        if self.drawing_config.compositing.mode != CompositingMode::Max {
+                            self.drawing_config.compositing.mode = CompositingMode::Max;
+                        } else {
+                            self.drawing_config.compositing.mode = CompositingMode::None;
+                        }
+                    }
+                    if i.key_pressed(egui::Key::H) {
+                        if self.drawing_config.compositing.mode != CompositingMode::AlphaHeightMap {
+                            self.drawing_config.compositing.mode = CompositingMode::AlphaHeightMap;
+                        } else {
+                            self.drawing_config.compositing.mode = CompositingMode::None;
+                        }
+                    }
+                    if i.key_pressed(egui::Key::J) {
+                        let segment_mode = self.segment_mode.as_mut().unwrap();
+                        segment_mode.coord[2] = (segment_mode.coord[2] - 1).max(*segment_mode.ranges[2].start());
+                        self.sync_coords();
+                    }
+                    if i.key_pressed(egui::Key::K) {
+                        let segment_mode = self.segment_mode.as_mut().unwrap();
+                        segment_mode.coord[2] = (segment_mode.coord[2] + 1).min(*segment_mode.ranges[2].end());
+                        self.sync_coords();
+                    }
+                    if i.key_pressed(egui::Key::Num0) {
+                        let segment_mode = self.segment_mode.as_mut().unwrap();
+                        segment_mode.coord[2] = 0;
+                        self.sync_coords();
+                    }
+                    if i.key_pressed(egui::Key::Num5) {
+                        self.layout = GuiLayout::UV;
+                    }
+                }
+            });
+        }
 
         egui::Window::new("Controls").show(ctx, |ui| {
             self.controls(_frame, ui);
@@ -824,76 +723,96 @@ impl TemplateApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let new_size = ui.available_size();
-            if new_size != self.last_size {
-                self.last_size = new_size;
-                self.clear_textures();
-            }
+            match self.layout {
+                GuiLayout::Grid => {
+                    let available_size = ui.available_size();
+                    let cell_width = (available_size.x - 2.0) / 2.0; // Account for spacing
+                    let cell_height = (available_size.y - 2.0) / 2.0; // Account for spacing
+                    let cell_size = Vec2::new(cell_width, cell_height);
 
-            let pane_scaling = if self.zoom >= 1.0 {
-                self.zoom
-            } else {
-                let next_smaller_pow_of_2 = 2.0f32.powf((self.zoom as f32).log2().floor());
-                self.zoom / next_smaller_pow_of_2
-            };
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            self.render_pane(ui, cell_size, Self::XY_PANE);
 
-            // use remaining space for image
-            let size = ui.available_size();
-            {
-                let new_width = size.x as usize / 2 - 10;
-                let new_height = size.y as usize / 2 - 10;
+                            ui.add_space(2.0);
 
-                self.frame_width = new_width;
-                self.frame_height = new_height;
-
-                let texture_xy = &self.get_or_create_texture(ui, 0, 1, 2, false, |s| &mut s.texture_xy);
-                let texture_xz = &self.get_or_create_texture(ui, 0, 2, 1, false, |s| &mut s.texture_xz);
-                let texture_yz = &self.get_or_create_texture(ui, 2, 1, 0, false, |s| &mut s.texture_yz);
-
-                let image = Image::new(texture_xy)
-                    .max_height(self.frame_height as f32)
-                    .max_width(self.frame_width as f32)
-                    .fit_to_original_size(pane_scaling);
-
-                let image_xz = Image::new(texture_xz)
-                    .max_height(self.frame_height as f32)
-                    .max_width(self.frame_width as f32)
-                    .fit_to_original_size(pane_scaling);
-
-                let image_yz = Image::new(texture_yz)
-                    .max_height(self.frame_height as f32)
-                    .max_width(self.frame_width as f32)
-                    .fit_to_original_size(pane_scaling);
-
-                ui.horizontal(|ui| {
-                    let im_xy = ui.add(image).interact(egui::Sense::drag());
-                    self.add_scroll_handler(&im_xy, ui, 2, false);
-                    self.add_drag_handler(&im_xy, 0, 1, false);
-
-                    let im_xz = ui.add(image_xz).interact(egui::Sense::drag());
-                    self.add_scroll_handler(&im_xz, ui, 1, false);
-                    self.add_drag_handler(&im_xz, 0, 2, false);
-                });
-                ui.horizontal(|ui| {
-                    let im_yz = ui.add(image_yz).interact(egui::Sense::drag());
-                    self.add_scroll_handler(&im_yz, ui, 0, false);
-                    self.add_drag_handler(&im_yz, 2, 1, false);
-
-                    if self.is_segment_mode() {
-                        let texture_uv = &self.get_or_create_texture(ui, 0, 1, 2, true, |s| {
-                            &mut s.segment_mode.as_mut().unwrap().texture_uv
+                            self.render_pane(ui, cell_size, Self::XZ_PANE);
                         });
-                        let image_uv = Image::new(texture_uv)
-                            .max_height(self.frame_height as f32)
-                            .max_width(self.frame_width as f32)
-                            .fit_to_original_size(pane_scaling);
-                        let im_uv = ui.add(image_uv).interact(egui::Sense::drag());
-                        self.add_scroll_handler(&im_uv, ui, 2, true);
-                        self.add_drag_handler(&im_uv, 0, 1, true);
+
+                        ui.add_space(2.0);
+
+                        ui.horizontal(|ui| {
+                            self.render_pane(ui, cell_size, Self::YZ_PANE);
+
+                            ui.add_space(2.0);
+
+                            self.render_uv_pane(ui, cell_size);
+                        });
+                    });
+                }
+                GuiLayout::XY => {
+                    self.render_pane(ui, ui.available_size(), Self::XY_PANE);
+                }
+                GuiLayout::XZ => {
+                    self.render_pane(ui, ui.available_size(), Self::XZ_PANE);
+                }
+                GuiLayout::YZ => {
+                    self.render_pane(ui, ui.available_size(), Self::YZ_PANE);
+                }
+                GuiLayout::UV => {
+                    if self.is_segment_mode() {
+                        self.render_uv_pane(ui, ui.available_size());
+                    } else {
+                        ui.label("UV pane is only available in segment mode.");
                     }
-                });
-            };
+                }
+            }
         });
+    }
+
+    const XY_PANE: VolumePane = VolumePane::new(PaneType::XY, false);
+    const XZ_PANE: VolumePane = VolumePane::new(PaneType::XZ, false);
+    const YZ_PANE: VolumePane = VolumePane::new(PaneType::YZ, false);
+    const UV_PANE: VolumePane = VolumePane::new(PaneType::UV, true);
+    fn render_pane(&mut self, ui: &mut Ui, cell_size: Vec2, pane: VolumePane) {
+        let segment_outlines_coord = if self.is_segment_mode() {
+            Some(self.segment_mode.as_ref().unwrap().coord)
+        } else {
+            None
+        };
+
+        pane.render(
+            ui,
+            &mut self.coord,
+            &self.world,
+            self.segment_mode.as_ref().map(|s| s.surface_volume.clone()),
+            &mut self.zoom,
+            &self.drawing_config,
+            self.extra_resolutions,
+            segment_outlines_coord,
+            &self.ranges,
+            cell_size,
+        );
+    }
+    fn render_uv_pane(&mut self, ui: &mut Ui, cell_size: Vec2) {
+        if let Some(segment_mode) = self.segment_mode.as_mut() {
+            if Self::UV_PANE.render(
+                ui,
+                &mut segment_mode.coord,
+                &segment_mode.world,
+                None,
+                &mut self.zoom,
+                &self.drawing_config,
+                self.extra_resolutions,
+                None,
+                &segment_mode.ranges,
+                cell_size,
+            ) {
+                if self.should_sync_coords() {
+                    self.sync_coords();
+                }
+            }
+        }
     }
 
     fn catalog_panel(&mut self, ctx: &egui::Context) {
@@ -909,8 +828,6 @@ impl TemplateApp {
             });
             ui.separator();
 
-            //ui.collapsing("Volumes", |_ui| {});
-            //ui.collapsing("Segments", |ui|
             {
                 let mut clicked = None;
                 self.catalog.scrolls().iter().for_each(|scroll| {
@@ -998,8 +915,7 @@ impl TemplateApp {
                 if let Some(segment) = clicked {
                     if let Some(obj_file) = self.obj_repository.get(&segment) {
                         self.load_volume_by_ref(&segment.volume_ref());
-                        self.setup_segment(&obj_file.to_str().unwrap().to_string(), segment.width, segment.height);
-                        self.clear_textures();
+                        self.setup_segment(&obj_file.to_str().unwrap().to_string(), segment.width, segment.height, None);
                         self.selected_segment = Some(segment);
                     } else {
                         let sender = self.notification_sender.clone();
@@ -1025,7 +941,31 @@ impl eframe::App for TemplateApp {
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.visuals_mut().button_frame = false;
-                    ui.toggle_value(&mut self.catalog_panel_open, "📜 Catalog");
+                    ui.toggle_value(&mut self.catalog_panel_open, "📜 (C)atalog");
+
+                    fn layout_button(
+                        ui: &mut Ui,
+                        field: &mut GuiLayout,
+                        target_layout: GuiLayout,
+                        label: &str,
+                    ) -> Response {
+                        let response = ui.selectable_value(field, target_layout, label);
+                        if response.clicked() {
+                            *field = target_layout;
+                        }
+                        response
+                    }
+
+                    ui.separator();
+                    ui.label("Layout");
+
+                    layout_button(ui, &mut self.layout, GuiLayout::Grid, "4x4 (1)");
+                    layout_button(ui, &mut self.layout, GuiLayout::XY, "XY (2)");
+                    layout_button(ui, &mut self.layout, GuiLayout::XZ, "XZ (3)");
+                    layout_button(ui, &mut self.layout, GuiLayout::YZ, "YZ (4)");
+                    if self.is_segment_mode() {
+                        layout_button(ui, &mut self.layout, GuiLayout::UV, "UV (5)");
+                    }
                 });
             });
 

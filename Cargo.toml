@@ -9,6 +9,7 @@ anyhow          = { version = "1" }
 async-recursion = { version = "1" }
 base64          = { version = "0.22" }
 clap            = { version = "4", features = [ "derive" ] }
+dashmap         = { version = "6" }
 derive_more     = { version = "1", features = [ "debug" ] }
 directories     = { version = "6" }
 eframe          = { version = "0.30", default-features = false, features = [
@@ -23,6 +24,7 @@ egui_extras     = { version = "0.30", features = [ "all_loaders" ] }
 ehttp           = { version = "0.5", features = ["native-async"] }
 emath           = { version = "0.30"}
 futures         = { version = "0.3" }
+fxhash          = { version = "0.2" }
 image           = { version = "0.25", default-features=false, features = ["png","tiff", "jpeg"] }
 indicatif       = { version = "0.17", features = ["rayon"]}
 itertools       = { version = "0.14" }
