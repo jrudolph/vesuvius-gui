@@ -24,9 +24,9 @@ pub struct Args {
     #[clap(long)]
     height: Option<usize>,
 
-    /// Transform to apply to the obj file (to map between different scans)
-    /// You can either supply a filename to a transform json file (as defined in https://github.com/ScrollPrize/villa/blob/main/foundation/volume-registration/transform_schema.json)
-    /// or supply a 4x3 affine transformation matrix as a json array string directly
+    /// Transform to apply to the obj file (to map between different scans). You can either supply a filename to a transform json file
+    /// (as defined in https://github.com/ScrollPrize/villa/blob/main/foundation/volume-registration/transform_schema.json) or supply
+    /// a 4x3 affine transformation matrix as a json array string directly
     #[clap(long)]
     transform: Option<String>,
 
