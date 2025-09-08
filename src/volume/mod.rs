@@ -180,6 +180,7 @@ impl From<Image> for ColorImage {
         ColorImage {
             size: [value.width, value.height],
             pixels: value.data,
+            ..Default::default()
         }
     }
 }

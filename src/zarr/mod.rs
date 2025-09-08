@@ -6,7 +6,7 @@ mod test;
 use crate::volume::{PaintVolume, VoxelPaintVolume, VoxelVolume};
 use blosc::BloscChunk;
 use dashmap::DashMap;
-use derive_more::Debug;
+use derive_more::with_trait::Debug;
 use directories::BaseDirs;
 use ehttp::Request;
 use fxhash::{FxHashMap, FxHashSet};
