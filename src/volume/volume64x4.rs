@@ -406,9 +406,6 @@ impl PaintVolume for VolumeGrid64x4Mapped {
         let mask = config.bit_mask();
         let filters_active = config.filters_active();
 
-        let center_u = canvas_width as i32 / 2;
-        let center_v = canvas_height as i32 / 2;
-
         let sfactor = _sfactor as i32;
         let tilesize = 64 * sfactor as i32;
         let blocksize = 4 * sfactor as i32;

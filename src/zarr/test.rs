@@ -1,8 +1,5 @@
 use super::{ZarrContext, ZarrContextBase};
-use crate::{
-    volume::PaintVolume,
-    zarr::{blosc::BloscChunk, ZarrArray},
-};
+use crate::{volume::PaintVolume, zarr::ZarrArray};
 use egui::Color32;
 use memmap::MmapOptions;
 use std::{
@@ -138,6 +135,9 @@ impl PaintVolume for FullMapVolume {
             }
         }
     }
+    fn shared(&self) -> crate::volume::VolumeCons {
+        todo!();
+    }
 }
 
 pub struct ConnectedFullMapVolume {
@@ -247,6 +247,9 @@ impl PaintVolume for ConnectedFullMapVolume {
                 }
             }
         }
+    }
+    fn shared(&self) -> crate::volume::VolumeCons {
+        todo!();
     }
 }
 

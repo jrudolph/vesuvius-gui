@@ -4,8 +4,6 @@ use crate::volume::PaintVolume;
 use crate::volume::VoxelPaintVolume;
 use crate::volume::VoxelVolume;
 use crate::zarr::default_cache_dir_for_url;
-use crate::zarr::ome;
-use egui::cache;
 use egui::Color32;
 use ehttp::Request;
 use serde::Deserialize;
