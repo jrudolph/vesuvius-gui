@@ -32,6 +32,8 @@ impl AffineTransform {
     }
 }
 
+/// Definition of the JSON schema for transform files as used in villa and defined in
+/// https://github.com/ScrollPrize/villa/blob/2a0bf2afdc1e16640ec8f4ce3c7f67f87d41fb06/foundation/volume-registration/transform_schema.json
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct VillaTransformFile {
     schema_version: String,
