@@ -14,7 +14,8 @@ use vesuvius_gui::downloader::{DownloadState as DS, Downloader};
 use vesuvius_gui::model::Quality;
 use vesuvius_gui::model::{FullVolumeReference, VolumeReference};
 use vesuvius_gui::volume::{
-    self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, Volume, VolumeCons, VoxelPaintVolume, VoxelVolume,
+    self, AffineTransform, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, Volume, VolumeCons, VoxelPaintVolume,
+    VoxelVolume,
 };
 
 #[derive(Clone, Debug)]
@@ -69,6 +70,10 @@ pub struct Args {
     /// Height of the segment file when browsing obj files
     #[clap(long)]
     height: u32,
+
+    /// Transform to apply to the obj file (to map between different scans)
+    #[clap(long)]
+    transform: Option<String>,
 
     /// The target directory to save the rendered images
     #[clap(long)]
@@ -156,6 +161,7 @@ struct RenderParams {
     obj_file: String,
     width: usize,
     height: usize,
+    transform: Option<AffineTransform>,
     tile_size: usize,
     w_range: RangeInclusive<usize>,
     crop: Option<Crop>,
@@ -184,6 +190,10 @@ impl From<&Args> for RenderParams {
             obj_file: args.obj.clone(),
             width: args.width as usize,
             height: args.height as usize,
+            transform: args
+                .transform
+                .as_ref()
+                .map(|t| AffineTransform::from_json_array_or_path(t).unwrap()),
             tile_size: args.tile_size.unwrap_or(1024) as usize,
             w_range: args.min_layer.unwrap_or(25) as usize..=args.max_layer.unwrap_or(41) as usize,
             crop: args.crop.clone(),
@@ -225,7 +235,7 @@ const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
 
 impl Rendering {
     fn new(params: RenderParams, download_settings: DownloadSettings) -> Self {
-        let obj = Arc::new(ObjVolume::load_obj(&params.obj_file, None));
+        let obj = Arc::new(ObjVolume::load_obj(&params.obj_file, &params.transform));
 
         Self {
             params,

@@ -231,7 +231,7 @@ pub struct ObjFile {
     xyz_index: XYZIndex,
 }
 impl ObjFile {
-    pub fn new(mut object: Object, transform: Option<AffineTransform>) -> Self {
+    pub fn new(mut object: Object, transform: &Option<AffineTransform>) -> Self {
         if let Some(AffineTransform { matrix: affine }) = transform {
             object.vertices.iter_mut().for_each(|v| {
                 let x = affine[0][0] * v.x + affine[0][1] * v.y + affine[0][2] * v.z + affine[0][3];
@@ -334,7 +334,7 @@ impl ObjVolume {
         base_volume: Volume,
         width: usize,
         height: usize,
-        transform: Option<AffineTransform>,
+        transform: &Option<AffineTransform>,
     ) -> Self {
         Self::new(
             Arc::new(Self::load_obj(obj_file_path, transform)),
@@ -352,7 +352,7 @@ impl ObjVolume {
         }
     }
 
-    pub fn load_obj(file_path: &str, transform: Option<AffineTransform>) -> ObjFile {
+    pub fn load_obj(file_path: &str, transform: &Option<AffineTransform>) -> ObjFile {
         let obj_file = std::fs::read_to_string(file_path).unwrap();
         // filter out opacity definitions that wavefront_obj does not cope well with
         let (not_faces, faces): (Vec<_>, Vec<_>) = obj_file

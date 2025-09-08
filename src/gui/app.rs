@@ -68,6 +68,7 @@ pub struct ObjFileConfig {
     pub obj_file: String,
     pub width: usize,
     pub height: usize,
+    pub transform: Option<AffineTransform>,
 }
 
 pub struct VesuviusConfig {
@@ -191,9 +192,10 @@ impl TemplateApp {
             obj_file,
             width,
             height,
+            transform,
         }) = config.obj_file
         {
-            app.setup_segment(&obj_file, width, height, None);
+            app.setup_segment(&obj_file, width, height, transform);
         }
 
         if let Some(segment_file) = config.overlay_dir {
@@ -249,7 +251,7 @@ impl TemplateApp {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old = self.world.clone();
             let base = old;
-            let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height, transform);
+            let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height, &transform);
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
 

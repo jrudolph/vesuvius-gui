@@ -4,6 +4,7 @@ mod grid500;
 mod layers;
 mod objvolume;
 mod ppmvolume;
+mod transform;
 mod volume64x4;
 
 use egui::{Color32, ColorImage};
@@ -15,12 +16,8 @@ use libm::modf;
 pub use objvolume::{ObjFile, ObjVolume};
 pub use ppmvolume::PPMVolume;
 use std::sync::Arc;
+pub use transform::AffineTransform;
 pub use volume64x4::VolumeGrid64x4Mapped;
-
-pub struct AffineTransform {
-    /// 3x4 affine transformation matrix in xyz coordinate order
-    matrix: [[f64; 4]; 3],
-}
 
 #[derive(Copy, Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub enum CompositingMode {

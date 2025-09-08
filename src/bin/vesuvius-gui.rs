@@ -3,6 +3,7 @@ use vesuvius_gui::gui::{ObjFileConfig, TemplateApp, VesuviusConfig};
 
 use clap::Parser;
 use vesuvius_gui::model::{NewVolumeReference, VolumeReference};
+use vesuvius_gui::volume::AffineTransform;
 
 /// Vesuvius GUI, an app to visualize and explore 3D data of the Vesuvius Challenge (https://scrollprize.org)
 #[derive(Parser, Debug)]
@@ -22,6 +23,12 @@ pub struct Args {
     /// Height of the segment file when browsing obj files
     #[clap(long)]
     height: Option<usize>,
+
+    /// Transform to apply to the obj file (to map between different scans)
+    /// You can either supply a filename to a transform json file (as defined in https://github.com/ScrollPrize/villa/blob/main/foundation/volume-registration/transform_schema.json)
+    /// or supply a 4x3 affine transformation matrix as a json array string directly
+    #[clap(long)]
+    transform: Option<String>,
 
     /// A directory that contains data to overlay. Only zarr arrays are currently supported
     #[clap(short, long)]
@@ -75,11 +82,18 @@ impl TryFrom<Args> for VesuviusConfig {
             None
         };
         let obj_file = if let Some(obj_file) = args.obj {
+            let transform = if let Some(transform) = args.transform {
+                Some(AffineTransform::from_json_array_or_path(&transform).map_err(|e| e.to_string())?)
+            } else {
+                None
+            };
+
             if let (Some(width), Some(height)) = (args.width, args.height) {
                 Some(ObjFileConfig {
                     obj_file,
                     width,
                     height,
+                    transform,
                 })
             } else {
                 return Err("Error: You need to provide --width and --height when using --obj".to_string());
