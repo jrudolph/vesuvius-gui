@@ -5,7 +5,6 @@ use directories::BaseDirs;
 use futures::{stream, StreamExt};
 use image::Luma;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use reqwest::blocking::Client;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ops::RangeInclusive;
@@ -15,7 +14,7 @@ use vesuvius_gui::downloader::{DownloadState as DS, Downloader};
 use vesuvius_gui::model::Quality;
 use vesuvius_gui::model::{FullVolumeReference, VolumeReference};
 use vesuvius_gui::volume::{
-    self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, Volume, VoxelPaintVolume, VoxelVolume,
+    self, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, Volume, VolumeCons, VoxelPaintVolume, VoxelVolume,
 };
 
 #[derive(Clone, Debug)]
@@ -355,7 +354,13 @@ impl Rendering {
         let height = self.params.height;
         let tile_width = self.params.tile_size;
         let tile_height = self.params.tile_size;
-        let world = ObjVolume::new(self.obj.clone(), Volume::from_ref(Arc::new(dummy.as_ref().clone())), width, height).into_volume();
+        let world = ObjVolume::new(
+            self.obj.clone(),
+            Volume::from_ref(Arc::new(dummy.as_ref().clone())),
+            width,
+            height,
+        )
+        .into_volume();
 
         let mut image = Image::new(tile_width, tile_height);
         let xyz = [
@@ -559,7 +564,7 @@ impl PaintVolume for TileCollectingVolume {
     ) {
         panic!();
     }
-    fn shared(&self) -> super::VolumeCons {
+    fn shared(&self) -> VolumeCons {
         panic!();
     }
 }

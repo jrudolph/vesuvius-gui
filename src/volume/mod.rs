@@ -182,7 +182,7 @@ impl From<Image> for ColorImage {
     }
 }
 
-pub(crate) type VolumeCons = Box<dyn (FnOnce() -> Volume) + Send + Sync>;
+pub type VolumeCons = Box<dyn (FnOnce() -> Volume) + Send + Sync>;
 
 pub trait PaintVolume {
     fn paint(
