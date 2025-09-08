@@ -500,9 +500,7 @@ impl PaintVolume for VolumeGrid64x4Mapped {
                                             }
                                             let value = tile[off as usize];
 
-                                            let value = if u == center_u || v == center_v {
-                                                0
-                                            } else if filters_active {
+                                            if filters_active {
                                                 let pluscon = ((value as i32 - config.threshold_min as i32).max(0)
                                                     * 255
                                                     / (255 - (config.threshold_min + config.threshold_max) as i32))
