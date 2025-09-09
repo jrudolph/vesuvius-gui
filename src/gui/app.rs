@@ -6,6 +6,7 @@ use crate::model::*;
 use crate::volume::*;
 use crate::zarr::ZarrArray;
 use directories::BaseDirs;
+use egui::CollapsingHeader;
 use egui::Color32;
 use egui::Label;
 use egui::RichText;
@@ -470,7 +471,11 @@ impl TemplateApp {
 
                     cb(ui, "XYZ outline ('X')", &mut self.drawing_config.draw_xyz_outlines);
 
-                    ui.collapsing("Compositing", |ui| {
+                    let mut header = CollapsingHeader::new("Compositing");
+                    if self.drawing_config.compositing.mode != CompositingMode::None {
+                        header = header.open(Some(true));
+                    }
+                    header.show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Mode");
                             // combo box
