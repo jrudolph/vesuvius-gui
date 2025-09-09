@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
 use std::cell::RefCell;
+use std::fs::File;
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     ops::Deref,
@@ -95,7 +97,7 @@ pub struct ZarrArray<const N: usize, T> {
 
 trait ZarrFileAccess: Send + Sync + Debug {
     fn load_array_def(&self) -> ZarrArrayDef;
-    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String>;
+    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<Arc<File>>;
     fn cache_missing(&self) -> bool;
 }
 
@@ -109,7 +111,7 @@ impl ZarrFileAccess for ZarrDirectory {
         serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
     }
 
-    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
+    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<Arc<File>> {
         let chunk_path = format!(
             "{}/{}",
             self.path,
@@ -122,7 +124,7 @@ impl ZarrFileAccess for ZarrDirectory {
         if !std::path::Path::new(&chunk_path).exists() {
             None
         } else {
-            Some(chunk_path)
+            Some(File::open(chunk_path).unwrap().into())
         }
     }
     fn cache_missing(&self) -> bool {
@@ -203,7 +205,7 @@ impl ZarrFileAccess for RemoteZarrDirectory {
         serde_json::from_str::<ZarrArrayDef>(&zarray).unwrap()
     }
 
-    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
+    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<Arc<File>> {
         let target_file = format!(
             "{}/{}",
             self.local_cache_dir,
@@ -211,7 +213,7 @@ impl ZarrFileAccess for RemoteZarrDirectory {
         );
 
         if std::path::Path::new(&target_file).exists() {
-            Some(target_file)
+            Some(File::open(target_file).unwrap().into())
         } else {
             let target_url = format!(
                 "{}/{}",
@@ -236,7 +238,7 @@ impl ZarrFileAccess for RemoteZarrDirectory {
 struct BlockingRemoteZarrDirectory {
     url: String,
     local_cache_dir: String,
-    downloading: Arc<Mutex<HashMap<String, Arc<Mutex<Option<String>>>>>>,
+    downloading: Arc<Mutex<HashMap<String, Arc<Mutex<Option<Arc<File>>>>>>>,
     client: Client,
 }
 impl BlockingRemoteZarrDirectory {
@@ -270,7 +272,7 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
             .expect(format!("Failed to parse .zarray from {}", target_file).as_str())
     }
 
-    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
+    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<Arc<File>> {
         let target_file = format!(
             "{}/{}",
             self.local_cache_dir,
@@ -278,7 +280,7 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
         );
 
         if std::path::Path::new(&target_file).exists() {
-            Some(target_file)
+            Some(File::open(target_file).unwrap().into())
         } else {
             let missing_marker_file = format!("{}.missing", target_file);
             if std::path::Path::new(&missing_marker_file).exists() {
@@ -324,21 +326,18 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
             let data = response.bytes().unwrap().to_vec();
             let parent_dir = std::path::Path::new(&target_file).parent().unwrap();
             std::fs::create_dir_all(parent_dir).unwrap();
-            use tempfile::Builder;
 
-            let tmp = Builder::new().tempfile_in(parent_dir).unwrap();
-            std::fs::write(&tmp, &data).unwrap();
-            std::fs::rename(&tmp, &target_file).unwrap();
-            let res = Some(target_file);
+            let mut file = File::create(&target_file).unwrap();
+            file.write_all(&data).unwrap();
+            let file = Arc::new(file);
 
-            *entry = res.clone();
+            *entry = Some(file.clone());
+
             {
                 self.downloading.lock().unwrap().remove(&chunk_str);
             }
 
-            res
-
-            // release lock
+            Some(file)
         }
     }
     fn cache_missing(&self) -> bool {
@@ -366,10 +365,10 @@ impl<const N: usize> ZarrArray<N, u8> {
             .chunk_file_for(&self.def, &chunk_no)
             .map(|chunk_file| match &self.def.compressor {
                 Some(compressor) => match compressor.id.as_str() {
-                    "blosc" => ChunkContext::Heap(BloscChunk::load_data(&chunk_file)),
+                    "blosc" => ChunkContext::Heap(BloscChunk::load_data_from_file(&chunk_file)),
                     _ => panic!("Unsupported compressor: {}", compressor.id),
                 },
-                _ => ChunkContext::Raw(RawContext::load(&chunk_file)),
+                _ => ChunkContext::Raw(RawContext::load_from_file(&chunk_file)),
             })
     }
     pub fn from_path(path: &str) -> Self {
@@ -438,10 +437,13 @@ pub struct RawContext {
     data: memmap::Mmap,
 }
 impl RawContext {
+    fn load_from_file(chunk_file: &File) -> RawContext {
+        let data = unsafe { memmap::Mmap::map(chunk_file).unwrap() };
+        RawContext { data }
+    }
     fn load(chunk_file: &str) -> RawContext {
         let file = std::fs::File::open(chunk_file).unwrap();
-        let data = unsafe { memmap::Mmap::map(&file).unwrap() };
-        RawContext { data }
+        Self::load_from_file(&file)
     }
     fn get(&self, idx: usize) -> u8 {
         self.data[idx]

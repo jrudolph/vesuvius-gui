@@ -84,9 +84,8 @@ pub struct BloscChunk<T> {
 }
 
 impl BloscChunk<u8> {
-    pub fn load(filename: &str) -> Self {
-        let file = File::open(filename).unwrap();
-        let chunk = unsafe { MmapOptions::new().map(&file) }.unwrap();
+    pub fn load_from_file(file: &File) -> Self {
+        let chunk = unsafe { MmapOptions::new().map(file) }.unwrap();
 
         // parse 16 byte blosc header
         let header = BloscHeader::from_bytes(&chunk[0..16]);
@@ -105,19 +104,27 @@ impl BloscChunk<u8> {
             header,
             offsets,
             data: chunk,
-            file_name: filename.to_string(),
+            file_name: "from_file".to_string(),
             phantom_t: std::marker::PhantomData,
         }
     }
+    pub fn load(filename: &str) -> Self {
+        let file = File::open(filename).unwrap();
+        Self::load_from_file(&file)
+    }
 
-    pub fn load_data(filename: &str) -> Vec<u8> {
-        let chunk = Self::load(filename);
+    pub fn load_data_from_file(file: &File) -> Vec<u8> {
+        let chunk = Self::load_from_file(file);
         let mut data = vec![];
         for i in 0..chunk.header.num_blocks() {
             let block = chunk.load_block(i);
             data.extend(block);
         }
         data
+    }
+    pub fn load_data(filename: &str) -> Vec<u8> {
+        let file = File::open(filename).unwrap();
+        Self::load_data_from_file(&file)
     }
     fn load_block(&self, block_idx: usize) -> Vec<u8> {
         self.decompress(block_idx)
