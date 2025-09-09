@@ -404,7 +404,7 @@ impl<const N: usize> ZarrArray<N, u8> {
     }
 
     pub fn into_ctx(self) -> ZarrContextBase<N> {
-        let cache = Arc::new(ZarrContextCache::new(&self.def));
+        let cache = Arc::new(ZarrContextCache::new());
         let cache_missing = self.access.cache_missing();
         ZarrContextBase {
             array: self,
@@ -471,36 +471,27 @@ impl Deref for ZarrContextCacheEntry {
         &self.ctx
     }
 }
-/* impl DerefMut for ZarrContextCacheEntry {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.ctx
-    }
-} */
 
 struct ZarrContextCache<const N: usize> {
     cache: DashMap<[usize; N], Option<ZarrContextCacheEntry>>,
     access_counter: AtomicU64,
     non_empty_entries: AtomicU64,
-    max_entries: usize,
 }
 impl<const N: usize> ZarrContextCache<N> {
-    fn new(def: &ZarrArrayDef) -> Self {
+    fn new() -> Self {
         ZarrContextCache {
             cache: DashMap::with_shard_amount(1024),
             access_counter: AtomicU64::new(0),
             non_empty_entries: AtomicU64::new(0),
-            max_entries: 2000000000 / def.chunks.iter().product::<usize>(), // FIXME: make configurable
         }
     }
-    fn entry(&self, ctx: Option<ChunkContext>) -> Option<ZarrContextCacheEntry> {
-        /* ctx.map(|ctx| ZarrContextCacheEntry {
-            ctx,
-            last_access: self.access_counter,
-        }) */
-        todo!()
-    }
+    // TODO: for now we expect chunks to be uncompressed and memmapped so we piggy back on the OS page cache
+    // for zarrs that are compressed, we currently have a memory leak that might need fixing in the future
+    // To do that, cache entries should report on their memory usage and we should limit the total amount of memory used
+    // in the cache.
+    /*
     fn cleanup(&mut self) {
-        /* if self.non_empty_entries > self.max_entries {
+        if self.non_empty_entries > self.max_entries {
             // FIXME: make configurable
             // purge oldest n% of entries
             let mut entries = self
@@ -521,8 +512,8 @@ impl<const N: usize> ZarrContextCache<N> {
                 "Purged {} entries {}/{} from {} (sorted: {})",
                 n, self.non_empty_entries, self.max_entries, before, sorted_entries_len
             ); */
-        } */
-    }
+        }
+    }*/
     fn get(&self, array: &ZarrArray<N, u8>, chunk_no: [usize; N]) -> Option<Arc<ChunkContext>> {
         let mut entry = self.cache.entry(chunk_no).or_insert_with(|| {
             let ctx = array.load_chunk_context(chunk_no);
@@ -700,50 +691,6 @@ impl ZarrContext<3> {
         state.last_chunk_no = chunk_no;
         state.last_context = Some(chunk.clone());
         chunk.map(|c| c.get(idx))
-
-        /* TODO
-        access.access_counter += 1;
-
-
-
-        if let Some(last) = state.last_context.take() {
-            let entry = access.entry(last);
-            if entry.is_some() {
-                access.non_empty_entries += 1;
-            }
-            access.cache.insert(state.last_chunk_no, entry);
-        }
-
-        access.cleanup();
-        let cache = &mut access.cache;
-
-        if cache.contains_key(&chunk_no) {
-            let mut entry = cache.remove(&chunk_no).unwrap();
-            if entry.is_some() {
-                access.non_empty_entries -= 1;
-            }
-            let res = if let Some(entry) = entry.as_mut() {
-                let res = entry.get(idx);
-                Some(res)
-            } else {
-                None
-            };
-            state.last_chunk_no = chunk_no;
-            state.last_context = Some(entry.map(|e| e.ctx));
-            res
-        } else {
-            if let Some(mut ctx) = self.array.load_chunk_context(chunk_no) {
-                //let mut ctx: BloscContext = chunk.into_ctx();
-                let res = ctx.get(idx);
-                state.last_chunk_no = chunk_no;
-                state.last_context = Some(Some(ctx));
-                Some(res)
-            } else {
-                state.last_chunk_no = chunk_no;
-                state.last_context = Some(None);
-                None
-            }
-        } */
     }
     fn shareable(&self) -> Box<dyn (FnOnce() -> ZarrContext<3>) + Send + Sync> {
         let array = self.array.clone();
