@@ -31,6 +31,7 @@ itertools       = { version = "0.14" }
 libm            = { version = "0.2" }
 log             = { version = "0.4" }
 lz4-compression = { version = "0.7" }
+nalgebra        = { version = "0.33" }
 num_cpus        = { version = "1" }
 rayon           = { version = "1" }
 regex           = { version = "1", default-features=false, features = ["unicode-perl"] }

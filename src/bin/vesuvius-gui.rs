@@ -30,6 +30,10 @@ pub struct Args {
     #[clap(long)]
     transform: Option<String>,
 
+    /// Invert the transform before applying it
+    #[clap(long)]
+    invert_transform: bool,
+
     /// A directory that contains data to overlay. Only zarr arrays are currently supported
     #[clap(short, long)]
     overlay: Option<String>,
@@ -83,7 +87,11 @@ impl TryFrom<Args> for VesuviusConfig {
         };
         let obj_file = if let Some(obj_file) = args.obj {
             let transform = if let Some(transform) = args.transform {
-                Some(AffineTransform::from_json_array_or_path(&transform).map_err(|e| e.to_string())?)
+                let mut t = AffineTransform::from_json_array_or_path(&transform).map_err(|e| e.to_string())?;
+                if args.invert_transform {
+                    t = t.invert().map_err(|e| e.to_string())?;
+                }
+                Some(t)
             } else {
                 None
             };

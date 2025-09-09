@@ -1,4 +1,5 @@
 use anyhow::*;
+use nalgebra::Matrix4;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
@@ -29,6 +30,30 @@ impl AffineTransform {
         } else {
             Self::from_villa_transform_json_file(std::path::Path::new(json_or_path))
         }
+    }
+
+    /// Invert this affine transformation matrix
+    pub fn invert(&self) -> Result<Self, Error> {
+        let m = &self.matrix;
+        let homogeneous = Matrix4::from([
+            [m[0][0], m[0][1], m[0][2], m[0][3]],
+            [m[1][0], m[1][1], m[1][2], m[1][3]],
+            [m[2][0], m[2][1], m[2][2], m[2][3]],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+
+        let inv = homogeneous
+            .try_inverse()
+            .ok_or_else(|| anyhow!("Matrix is not invertible"))?;
+
+        let inv_data = inv.data.0;
+        Ok(AffineTransform {
+            matrix: [
+                [inv_data[0][0], inv_data[0][1], inv_data[0][2], inv_data[0][3]],
+                [inv_data[1][0], inv_data[1][1], inv_data[1][2], inv_data[1][3]],
+                [inv_data[2][0], inv_data[2][1], inv_data[2][2], inv_data[2][3]],
+            ],
+        })
     }
 }
 

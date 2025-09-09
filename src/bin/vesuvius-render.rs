@@ -77,6 +77,10 @@ pub struct Args {
     #[clap(long)]
     transform: Option<String>,
 
+    /// Invert the transform before applying it
+    #[clap(long)]
+    invert_transform: bool,
+
     /// The target directory to save the rendered images
     #[clap(long)]
     target_dir: String,
@@ -195,7 +199,13 @@ impl From<&Args> for RenderParams {
             transform: args
                 .transform
                 .as_ref()
-                .map(|t| AffineTransform::from_json_array_or_path(t).unwrap()),
+                .map(|t| {
+                    let mut transform = AffineTransform::from_json_array_or_path(t).unwrap();
+                    if args.invert_transform {
+                        transform = transform.invert().unwrap();
+                    }
+                    transform
+                }),
             tile_size: args.tile_size.unwrap_or(1024) as usize,
             w_range: args.min_layer.unwrap_or(25) as usize..=args.max_layer.unwrap_or(41) as usize,
             crop: args.crop.clone(),
