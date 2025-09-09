@@ -21,6 +21,9 @@ use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
+pub(crate) const ZOOM_MIN: f32 = 0.025;
+pub(crate) const ZOOM_MAX: f32 = 8.0;
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct SegmentMode {
@@ -423,7 +426,7 @@ impl TemplateApp {
                     has_changed = has_changed || u_sl.changed() || v_sl.changed() || w_sl.changed();
                 }
 
-                slider(ui, "Zoom", &mut self.zoom, 0.1..=6.0, true, true);
+                slider(ui, "Zoom", &mut self.zoom, ZOOM_MIN..=ZOOM_MAX, true, true);
 
                 fn cb<T: ToString>(ui: &mut Ui, label: T, value: &mut bool) -> Response {
                     ui.label(label.to_string());

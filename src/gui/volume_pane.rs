@@ -1,3 +1,4 @@
+use crate::gui::app::{ZOOM_MAX, ZOOM_MIN};
 use crate::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
 use egui::cache::FramePublisher;
 use egui::{Color32, ColorImage, PointerButton, Response, Ui, Vec2};
@@ -107,6 +108,8 @@ pub struct VolumePane {
     is_segment_pane: bool,
 }
 
+const MAX_DOWNSAMPLE: u8 = 32;
+
 impl VolumePane {
     pub const fn new(pane_type: PaneType, is_segment_pane: bool) -> Self {
         Self {
@@ -129,7 +132,7 @@ impl VolumePane {
             1u8
         } else {
             let downsample_factor = (1.0 / zoom).ceil() as u8;
-            downsample_factor.clamp(1, 8)
+            downsample_factor.clamp(1, MAX_DOWNSAMPLE)
         };
 
         // When paint_zoom > 1, the effective tile size in world coordinates is larger
@@ -191,7 +194,7 @@ impl VolumePane {
             1u8
         } else {
             let downsample_factor = (1.0 / zoom).ceil() as u8;
-            downsample_factor.clamp(1, 8)
+            downsample_factor.clamp(1, MAX_DOWNSAMPLE)
         };
 
         // When paint_zoom > 1, the effective tile size in world coordinates is larger
@@ -274,7 +277,7 @@ impl VolumePane {
             let paint_zoom = if *zoom >= 1.0 {
                 1u8
             } else {
-                let downsample_factor = ((1.0 / *zoom).ceil() as u8).clamp(1, 8);
+                let downsample_factor = ((1.0 / *zoom).ceil() as u8).clamp(1, MAX_DOWNSAMPLE);
 
                 downsample_factor
             };
@@ -342,10 +345,10 @@ impl VolumePane {
             let zoom_delta = ui.input(|i| i.zoom_delta());
 
             if zoom_delta != 1.0 {
-                *zoom = (*zoom * zoom_delta).max(0.1).min(6.0);
+                *zoom = (*zoom * zoom_delta).max(ZOOM_MIN).min(ZOOM_MAX);
                 changed = true;
             } else if delta.y != 0.0 {
-                let min_level = 1 << ((ZOOM_RES_FACTOR / *zoom) as i32).min(4);
+                let min_level = 1 << ((ZOOM_RES_FACTOR / *zoom) as i32).min(6);
                 let delta = delta.y.signum() * min_level as f32;
                 let m = &mut coord[d_coord];
                 *m = ((*m + delta as i32) / min_level as i32 * min_level as i32)
@@ -395,7 +398,7 @@ impl VolumePane {
         } else {
             // For zoom < 1.0, use integer downsampling
             let downsample_factor = (1.0 / zoom).ceil() as u8;
-            downsample_factor.clamp(1, 8) // Reasonable limits
+            downsample_factor.clamp(1, MAX_DOWNSAMPLE) // Reasonable limits
         };
 
         let keys_and_rects = visible_tiles
