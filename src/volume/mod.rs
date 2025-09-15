@@ -13,7 +13,7 @@ pub use generic::AutoPaintVolume;
 pub use grid500::VolumeGrid500Mapped;
 pub use layers::LayersMappedVolume;
 use libm::modf;
-pub use objvolume::{ObjFile, ObjVolume};
+pub use objvolume::{ObjFile, ObjVolume, ProjectionKind};
 pub use ppmvolume::PPMVolume;
 use std::sync::Arc;
 pub use transform::AffineTransform;

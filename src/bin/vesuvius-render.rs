@@ -14,8 +14,8 @@ use vesuvius_gui::downloader::{DownloadState as DS, Downloader};
 use vesuvius_gui::model::Quality;
 use vesuvius_gui::model::{FullVolumeReference, VolumeReference};
 use vesuvius_gui::volume::{
-    self, AffineTransform, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, Volume, VolumeCons, VoxelPaintVolume,
-    VoxelVolume,
+    self, AffineTransform, DrawingConfig, Image, ObjFile, ObjVolume, PaintVolume, ProjectionKind, Volume, VolumeCons,
+    VoxelPaintVolume, VoxelVolume,
 };
 
 #[derive(Clone, Debug)]
@@ -76,6 +76,10 @@ pub struct Args {
     /// a 4x3 affine transformation matrix as a json array string directly
     #[clap(long)]
     transform: Option<String>,
+
+    /// Use orthographic projection along the Y axis (top-down view) when loading obj files (discarding existing texture coordinates).
+    #[clap(long, default_value_t = false)]
+    ortho_xz: bool,
 
     /// Invert the transform before applying it
     #[clap(long)]
@@ -168,6 +172,7 @@ struct RenderParams {
     width: usize,
     height: usize,
     transform: Option<AffineTransform>,
+    projection: ProjectionKind,
     tile_size: usize,
     w_range: RangeInclusive<usize>,
     crop: Option<Crop>,
@@ -196,16 +201,18 @@ impl From<&Args> for RenderParams {
             obj_file: args.obj.clone(),
             width: args.width as usize,
             height: args.height as usize,
-            transform: args
-                .transform
-                .as_ref()
-                .map(|t| {
-                    let mut transform = AffineTransform::from_json_array_or_path(t).unwrap();
-                    if args.invert_transform {
-                        transform = transform.invert().unwrap();
-                    }
-                    transform
-                }),
+            transform: args.transform.as_ref().map(|t| {
+                let mut transform = AffineTransform::from_json_array_or_path(t).unwrap();
+                if args.invert_transform {
+                    transform = transform.invert().unwrap();
+                }
+                transform
+            }),
+            projection: if args.ortho_xz {
+                ProjectionKind::OrthographicXZ
+            } else {
+                ProjectionKind::None
+            },
             tile_size: args.tile_size.unwrap_or(1024) as usize,
             w_range: args.min_layer.unwrap_or(25) as usize..=args.max_layer.unwrap_or(41) as usize,
             crop: args.crop.clone(),
@@ -247,7 +254,11 @@ const TILE_SERVER: &'static str = "https://vesuvius.virtual-void.net";
 
 impl Rendering {
     fn new(params: RenderParams, download_settings: DownloadSettings) -> Self {
-        let obj = Arc::new(ObjVolume::load_obj(&params.obj_file, &params.transform));
+        let obj = Arc::new(ObjVolume::load_obj(
+            &params.obj_file,
+            &params.transform,
+            params.projection,
+        ));
 
         Self {
             params,

@@ -224,6 +224,12 @@ impl UVIndex {
     }
 }
 
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum ProjectionKind {
+    None,
+    OrthographicXZ,
+}
+
 pub struct ObjFile {
     object: Object,
     has_inverted_uv_tris: bool,
@@ -231,7 +237,7 @@ pub struct ObjFile {
     xyz_index: XYZIndex,
 }
 impl ObjFile {
-    pub fn new(mut object: Object, transform: &Option<AffineTransform>) -> Self {
+    pub fn new(mut object: Object, transform: &Option<AffineTransform>, projection: ProjectionKind) -> Self {
         if let Some(AffineTransform { matrix: affine }) = transform {
             object.vertices.iter_mut().for_each(|v| {
                 let x = affine[0][0] * v.x + affine[0][1] * v.y + affine[0][2] * v.z + affine[0][3];
@@ -253,25 +259,54 @@ impl ObjFile {
             });
         }
 
-        // rescale tex to 0..1
-        let min_u = object.tex_vertices.iter().map(|v| v.u).fold(f64::INFINITY, f64::min);
-        let max_u = object
-            .tex_vertices
-            .iter()
-            .map(|v| v.u)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let du = max_u - min_u;
-        let min_v = object.tex_vertices.iter().map(|v| v.v).fold(f64::INFINITY, f64::min);
-        let max_v = object
-            .tex_vertices
-            .iter()
-            .map(|v| v.v)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let dv = max_v - min_v;
-        object.tex_vertices.iter_mut().for_each(|tex| {
-            tex.u = (tex.u - min_u) / du;
-            tex.v = (tex.v - min_v) / dv;
-        });
+        if projection == ProjectionKind::OrthographicXZ {
+            object.normals.iter_mut().for_each(|n| {
+                n.x = 0.0;
+                n.y = 1.0;
+                n.z = 0.0;
+            });
+
+            let vert_clone = object.vertices.clone();
+            let min_x = vert_clone.iter().map(|v| v.x).fold(f64::INFINITY, f64::min);
+            let max_x = vert_clone.iter().map(|v| v.x).fold(f64::NEG_INFINITY, f64::max);
+
+            let dx = max_x - min_x;
+
+            let min_z = vert_clone.iter().map(|v| v.z).fold(f64::INFINITY, f64::min);
+            let max_z = vert_clone.iter().map(|v| v.z).fold(f64::NEG_INFINITY, f64::max);
+            let dz = max_z - min_z;
+
+            object.tex_vertices.iter_mut().enumerate().for_each(|(idx, tex)| {
+                // replace the existing uv by an orthographic projection into the xz plane
+                let v = vert_clone[idx];
+                let x = v.x;
+                let z = v.z;
+
+                tex.u = (x - min_x) / dx;
+                tex.v = (z - min_z) / dz;
+            });
+        } else {
+            // rescale tex to 0..1
+            let min_u = object.tex_vertices.iter().map(|v| v.u).fold(f64::INFINITY, f64::min);
+            let max_u = object
+                .tex_vertices
+                .iter()
+                .map(|v| v.u)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let du = max_u - min_u;
+            let min_v = object.tex_vertices.iter().map(|v| v.v).fold(f64::INFINITY, f64::min);
+            let max_v = object
+                .tex_vertices
+                .iter()
+                .map(|v| v.v)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let dv = max_v - min_v;
+            object.tex_vertices.iter_mut().for_each(|tex| {
+                tex.u = (tex.u - min_u) / du;
+                tex.v = (tex.v - min_v) / dv;
+            });
+        }
+
         let has_inverted_uv_tris = Self::has_inverted_uv_tris(object.clone());
         let target_cell_num = 100.;
         let num_tris = object.geometry[0].shapes.len() as f64;
@@ -335,9 +370,10 @@ impl ObjVolume {
         width: usize,
         height: usize,
         transform: &Option<AffineTransform>,
+        projection: ProjectionKind,
     ) -> Self {
         Self::new(
-            Arc::new(Self::load_obj(obj_file_path, transform)),
+            Arc::new(Self::load_obj(obj_file_path, transform, projection)),
             base_volume,
             width,
             height,
@@ -352,7 +388,7 @@ impl ObjVolume {
         }
     }
 
-    pub fn load_obj(file_path: &str, transform: &Option<AffineTransform>) -> ObjFile {
+    pub fn load_obj(file_path: &str, transform: &Option<AffineTransform>, projection: ProjectionKind) -> ObjFile {
         let obj_file = std::fs::read_to_string(file_path).unwrap();
         // filter out opacity definitions that wavefront_obj does not cope well with
         let (not_faces, faces): (Vec<_>, Vec<_>) = obj_file
@@ -381,7 +417,7 @@ impl ObjVolume {
         } */
 
         let object = objects.remove(0);
-        ObjFile::new(object, transform)
+        ObjFile::new(object, transform, projection)
     }
 
     pub fn width(&self) -> usize {

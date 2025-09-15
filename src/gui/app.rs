@@ -73,6 +73,7 @@ pub struct ObjFileConfig {
     pub width: usize,
     pub height: usize,
     pub transform: Option<AffineTransform>,
+    pub projection: ProjectionKind,
 }
 
 pub struct VesuviusConfig {
@@ -197,9 +198,10 @@ impl TemplateApp {
             width,
             height,
             transform,
+            projection,
         }) = config.obj_file
         {
-            app.setup_segment(&obj_file, width, height, transform);
+            app.setup_segment(&obj_file, width, height, transform, projection);
         }
 
         if let Some(segment_file) = config.overlay_dir {
@@ -226,7 +228,14 @@ impl TemplateApp {
         app
     }
 
-    fn setup_segment(&mut self, segment_file: &str, width: usize, height: usize, transform: Option<AffineTransform>) {
+    fn setup_segment(
+        &mut self,
+        segment_file: &str,
+        width: usize,
+        height: usize,
+        transform: Option<AffineTransform>,
+        projection: ProjectionKind,
+    ) {
         if segment_file.ends_with(".ppm") {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old = self.world.clone();
@@ -255,7 +264,7 @@ impl TemplateApp {
             let mut segment: SegmentMode = self.segment_mode.take().unwrap_or_default();
             let old = self.world.clone();
             let base = old;
-            let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height, &transform);
+            let obj_volume = ObjVolume::load_from_obj(&segment_file, base, width, height, &transform, projection);
             let width = obj_volume.width() as i32;
             let height = obj_volume.height() as i32;
 
@@ -625,7 +634,13 @@ impl TemplateApp {
         }
         if let Some((segment, obj_file)) = switch_segment {
             self.load_volume_by_ref(&segment.volume_ref());
-            self.setup_segment(obj_file.to_str().unwrap(), segment.width, segment.height, None);
+            self.setup_segment(
+                obj_file.to_str().unwrap(),
+                segment.width,
+                segment.height,
+                None,
+                ProjectionKind::None,
+            );
             self.selected_segment = Some(segment);
             self.downloading_segment = None;
         }
@@ -923,7 +938,7 @@ impl TemplateApp {
                 if let Some(segment) = clicked {
                     if let Some(obj_file) = self.obj_repository.get(&segment) {
                         self.load_volume_by_ref(&segment.volume_ref());
-                        self.setup_segment(&obj_file.to_str().unwrap().to_string(), segment.width, segment.height, None);
+                        self.setup_segment(&obj_file.to_str().unwrap().to_string(), segment.width, segment.height, None, ProjectionKind::None);
                         self.selected_segment = Some(segment);
                     } else {
                         let sender = self.notification_sender.clone();

@@ -3,7 +3,7 @@ use vesuvius_gui::gui::{ObjFileConfig, TemplateApp, VesuviusConfig};
 
 use clap::Parser;
 use vesuvius_gui::model::{NewVolumeReference, VolumeReference};
-use vesuvius_gui::volume::AffineTransform;
+use vesuvius_gui::volume::{AffineTransform, ProjectionKind};
 
 /// Vesuvius GUI, an app to visualize and explore 3D data of the Vesuvius Challenge (https://scrollprize.org)
 #[derive(Parser, Debug)]
@@ -29,6 +29,10 @@ pub struct Args {
     /// a 4x3 affine transformation matrix as a json array string directly
     #[clap(long)]
     transform: Option<String>,
+
+    /// Use orthographic projection along the Y axis (top-down view) when loading obj files (discarding existing texture coordinates).
+    #[clap(long, default_value_t = false)]
+    ortho_xz: bool,
 
     /// Invert the transform before applying it
     #[clap(long)]
@@ -96,12 +100,19 @@ impl TryFrom<Args> for VesuviusConfig {
                 None
             };
 
+            let projection = if args.ortho_xz {
+                ProjectionKind::OrthographicXZ
+            } else {
+                ProjectionKind::None
+            };
+
             if let (Some(width), Some(height)) = (args.width, args.height) {
                 Some(ObjFileConfig {
                     obj_file,
                     width,
                     height,
                     transform,
+                    projection,
                 })
             } else {
                 return Err("Error: You need to provide --width and --height when using --obj".to_string());
