@@ -139,7 +139,12 @@ impl Decoder {
         // SAFETY: validated input; scratch is 32-byte aligned and the full
         // C3D_CHUNK_BYTES; the decoder writes every output byte.
         unsafe {
-            ffi::c3d_decoder_chunk_decode(self.ptr, compressed.as_ptr(), compressed.len(), self.scratch.as_mut_ptr());
+            ffi::c3d_decoder_chunk_decode(
+                self.ptr,
+                compressed.as_ptr(),
+                compressed.len(),
+                self.scratch.as_mut_ptr(),
+            );
         }
         Ok(())
     }
@@ -234,6 +239,9 @@ mod tests {
         assert_eq!(out.len(), C3D_CHUNK_BYTES);
         // Sanity: output isn't all-zero (a degenerate decode would produce that).
         let nonzero = out.iter().filter(|&&b| b != 0).count();
-        assert!(nonzero > 1_000_000, "decoded chunk looks suspicious: only {nonzero} non-zero voxels");
+        assert!(
+            nonzero > 1_000_000,
+            "decoded chunk looks suspicious: only {nonzero} non-zero voxels"
+        );
     }
 }

@@ -1,5 +1,7 @@
 pub mod blosc;
 pub mod ome;
+pub mod sharding;
+pub mod v3;
 
 use blosc::BloscChunk;
 use dashmap::DashMap;
@@ -26,14 +28,14 @@ type HashMap<K, V> = FxHashMap<K, V>;
 type HashSet<K> = FxHashSet<K>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-enum ZarrDataType {
+pub enum ZarrDataType {
     #[serde(rename = "|u1")]
     U1,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(try_from = "u8", into = "u8")]
-enum ZarrVersion {
+pub enum ZarrVersion {
     V2,
 }
 
@@ -56,7 +58,7 @@ impl From<ZarrVersion> for u8 {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-enum ZarrOrder {
+pub enum ZarrOrder {
     #[serde(rename = "C")]
     ColumnMajor,
     #[serde(rename = "F")]
@@ -64,7 +66,7 @@ enum ZarrOrder {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-enum ZarrCompressionName {
+pub enum ZarrCompressionName {
     #[serde(rename = "lz4")]
     Lz4,
     #[serde(rename = "zstd")]
@@ -72,13 +74,13 @@ enum ZarrCompressionName {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-enum ZarrCompressorId {
+pub enum ZarrCompressorId {
     #[serde(rename = "blosc")]
     Blosc,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct ZarrCompressor {
+pub struct ZarrCompressor {
     blocksize: u8,
     clevel: u8,
     #[serde(rename = "cname")]
@@ -88,18 +90,18 @@ struct ZarrCompressor {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct ZarrFilters {}
+pub struct ZarrFilters {}
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct ZarrArrayDef {
-    chunks: Vec<usize>,
-    compressor: Option<ZarrCompressor>,
-    dtype: ZarrDataType,
-    fill_value: u8,
-    filters: Option<ZarrFilters>,
-    order: ZarrOrder,
-    shape: Vec<usize>,
-    zarr_format: ZarrVersion,
-    dimension_separator: Option<String>,
+pub struct ZarrArrayDef {
+    pub chunks: Vec<usize>,
+    pub compressor: Option<ZarrCompressor>,
+    pub dtype: ZarrDataType,
+    pub fill_value: u8,
+    pub filters: Option<ZarrFilters>,
+    pub order: ZarrOrder,
+    pub shape: Vec<usize>,
+    pub zarr_format: ZarrVersion,
+    pub dimension_separator: Option<String>,
 }
 
 #[derive(Clone)]
@@ -109,23 +111,28 @@ pub struct ZarrArray<const N: usize, T> {
     phantom_t: std::marker::PhantomData<T>,
 }
 
-trait ZarrFileAccess: Send + Sync + Debug {
+pub trait ZarrFileAccess: Send + Sync + Debug {
     fn load_array_def(&self) -> ZarrArrayDef;
-    fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<Arc<File>>;
+    fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<ChunkContext>;
     fn cache_missing(&self) -> bool;
+}
+
+/// Apply a v2 compressor to a chunk file. Hoisted out of `ZarrArray::load_chunk_context`
+/// so that v3 access impls can keep their own decompression path without sharing this.
+fn decompress_v2_chunk(def: &ZarrArrayDef, file: Arc<File>) -> ChunkContext {
+    match &def.compressor {
+        Some(compressor) => match compressor.id {
+            ZarrCompressorId::Blosc => ChunkContext::Heap(BloscChunk::load_data_from_file(&file)),
+        },
+        None => ChunkContext::Raw(RawContext::load_from_file(&file)),
+    }
 }
 
 #[derive(Debug, Clone)]
 struct ZarrDirectory {
     path: String,
 }
-impl ZarrFileAccess for ZarrDirectory {
-    fn load_array_def(&self) -> ZarrArrayDef {
-        let path = format!("{}/.zarray", self.path);
-        let zarray = std::fs::read_to_string(&path).unwrap();
-        parse_json(&zarray, &path)
-    }
-
+impl ZarrDirectory {
     fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<Arc<File>> {
         let chunk_path = format!(
             "{}/{}",
@@ -141,6 +148,16 @@ impl ZarrFileAccess for ZarrDirectory {
         } else {
             Some(File::open(chunk_path).unwrap().into())
         }
+    }
+}
+impl ZarrFileAccess for ZarrDirectory {
+    fn load_array_def(&self) -> ZarrArrayDef {
+        let path = format!("{}/.zarray", self.path);
+        let zarray = std::fs::read_to_string(&path).unwrap();
+        parse_json(&zarray, &path)
+    }
+    fn load_chunk(&self, def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<ChunkContext> {
+        self.chunk_file_for(def, chunk_no).map(|f| decompress_v2_chunk(def, f))
     }
     fn cache_missing(&self) -> bool {
         true
@@ -262,22 +279,7 @@ struct RemoteZarrDirectory {
     local_cache_dir: String,
     downloader: Arc<dyn Downloader>,
 }
-impl ZarrFileAccess for RemoteZarrDirectory {
-    fn load_array_def(&self) -> ZarrArrayDef {
-        let target_file = format!("{}/.zarray", self.local_cache_dir);
-        if !std::path::Path::new(&target_file).exists() {
-            let data = ehttp::fetch_blocking(&Request::get(&format!("{}/.zarray", self.url)))
-                .unwrap()
-                .bytes
-                .to_vec();
-            std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
-            std::fs::write(&target_file, &data).unwrap();
-        }
-
-        let zarray = std::fs::read_to_string(&target_file).unwrap();
-        parse_json(&zarray, &target_file)
-    }
-
+impl RemoteZarrDirectory {
     fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<Arc<File>> {
         let target_file = format!(
             "{}/{}",
@@ -302,40 +304,15 @@ impl ZarrFileAccess for RemoteZarrDirectory {
             None
         }
     }
-    fn cache_missing(&self) -> bool {
-        false
-    }
 }
-
-#[derive(Debug, Clone)]
-struct BlockingRemoteZarrDirectory {
-    url: String,
-    local_cache_dir: String,
-    downloading: Arc<Mutex<HashMap<String, Arc<Mutex<Option<Arc<File>>>>>>>,
-    client: Client,
-}
-impl BlockingRemoteZarrDirectory {
-    fn new(url: &str, local_cache_dir: &str, client: Client) -> Self {
-        Self {
-            url: url.to_string(),
-            local_cache_dir: local_cache_dir.to_string(),
-            downloading: Arc::new(Mutex::new(HashMap::default())),
-            client,
-        }
-    }
-}
-impl ZarrFileAccess for BlockingRemoteZarrDirectory {
+impl ZarrFileAccess for RemoteZarrDirectory {
     fn load_array_def(&self) -> ZarrArrayDef {
         let target_file = format!("{}/.zarray", self.local_cache_dir);
         if !std::path::Path::new(&target_file).exists() {
-            let zarray_url = format!("{}/.zarray", self.url);
-            let res = ehttp::fetch_blocking(&Request::get(&zarray_url)).unwrap();
-
-            if res.status != 200 {
-                panic!("Failed to download .zarray from {}, status: {}", zarray_url, res.status);
-            }
-            let data = res.bytes.to_vec();
-
+            let data = ehttp::fetch_blocking(&Request::get(&format!("{}/.zarray", self.url)))
+                .unwrap()
+                .bytes
+                .to_vec();
             std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
             std::fs::write(&target_file, &data).unwrap();
         }
@@ -343,7 +320,30 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
         let zarray = std::fs::read_to_string(&target_file).unwrap();
         parse_json(&zarray, &target_file)
     }
+    fn load_chunk(&self, def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<ChunkContext> {
+        self.chunk_file_for(def, chunk_no).map(|f| decompress_v2_chunk(def, f))
+    }
+    fn cache_missing(&self) -> bool {
+        false
+    }
+}
 
+#[derive(Debug, Clone)]
+pub(crate) struct BlockingRemoteZarrDirectory {
+    url: String,
+    local_cache_dir: String,
+    downloading: Arc<Mutex<HashMap<String, Arc<Mutex<Option<Arc<File>>>>>>>,
+    client: Client,
+}
+impl BlockingRemoteZarrDirectory {
+    pub(crate) fn new(url: &str, local_cache_dir: &str, client: Client) -> Self {
+        Self {
+            url: url.to_string(),
+            local_cache_dir: local_cache_dir.to_string(),
+            downloading: Arc::new(Mutex::new(HashMap::default())),
+            client,
+        }
+    }
     fn chunk_file_for(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<Arc<File>> {
         let target_file = format!(
             "{}/{}",
@@ -412,6 +412,29 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
             Some(file)
         }
     }
+}
+impl ZarrFileAccess for BlockingRemoteZarrDirectory {
+    fn load_array_def(&self) -> ZarrArrayDef {
+        let target_file = format!("{}/.zarray", self.local_cache_dir);
+        if !std::path::Path::new(&target_file).exists() {
+            let zarray_url = format!("{}/.zarray", self.url);
+            let res = ehttp::fetch_blocking(&Request::get(&zarray_url)).unwrap();
+
+            if res.status != 200 {
+                panic!("Failed to download .zarray from {}, status: {}", zarray_url, res.status);
+            }
+            let data = res.bytes.to_vec();
+
+            std::fs::create_dir_all(std::path::Path::new(&target_file).parent().unwrap()).unwrap();
+            std::fs::write(&target_file, &data).unwrap();
+        }
+
+        let zarray = std::fs::read_to_string(&target_file).unwrap();
+        parse_json(&zarray, &target_file)
+    }
+    fn load_chunk(&self, def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<ChunkContext> {
+        self.chunk_file_for(def, chunk_no).map(|f| decompress_v2_chunk(def, f))
+    }
     fn cache_missing(&self) -> bool {
         true
     }
@@ -448,17 +471,9 @@ pub fn default_cache_dir_for_url(url: &str) -> String {
 
 impl<const N: usize> ZarrArray<N, u8> {
     fn load_chunk_context(&self, chunk_no: [usize; N]) -> Option<ChunkContext> {
-        self.access
-            .chunk_file_for(&self.def, &chunk_no)
-            .map(|chunk_file| match &self.def.compressor {
-                Some(compressor) => match compressor.id {
-                    ZarrCompressorId::Blosc => ChunkContext::Heap(BloscChunk::load_data_from_file(&chunk_file)),
-                },
-                _ => ChunkContext::Raw(RawContext::load_from_file(&chunk_file)),
-            })
+        self.access.load_chunk(&self.def, &chunk_no)
     }
     pub fn from_path(path: &str) -> Self {
-        //println!("Loading ZarrArray from path: {}", path);
         Self::from_access(Arc::new(ZarrDirectory { path: path.to_string() }))
     }
     pub fn from_url_blocking(url: &str, local_cache_dir: &str, client: Client) -> Self {
@@ -479,8 +494,15 @@ impl<const N: usize> ZarrArray<N, u8> {
     pub fn from_url_to_default_cache_dir(url: &str) -> Self {
         Self::from_url(url, &default_cache_dir_for_url(url))
     }
-    fn from_access(access: Arc<dyn ZarrFileAccess>) -> Self {
+    pub fn from_access(access: Arc<dyn ZarrFileAccess>) -> Self {
         let def = access.load_array_def();
+        ZarrArray {
+            access,
+            def,
+            phantom_t: std::marker::PhantomData,
+        }
+    }
+    pub fn from_def_and_access(def: ZarrArrayDef, access: Arc<dyn ZarrFileAccess>) -> Self {
         ZarrArray {
             access,
             def,
@@ -495,6 +517,39 @@ impl<const N: usize> ZarrArray<N, u8> {
             array: self,
             cache,
             cache_missing,
+        }
+    }
+}
+
+impl ZarrArray<3, u8> {
+    /// Open a 3D zarr at `path`. Tries zarr v3 (`zarr.json`) first and falls
+    /// back to v2 (`.zarray`). Specialised to 3D because the only v3 codec
+    /// chain we currently support (`sharding_indexed { c3d }`) is fixed at
+    /// 3D 256³ sub-chunks.
+    pub fn from_path_auto(path: &str) -> Self {
+        if std::path::Path::new(&format!("{}/zarr.json", path)).exists() {
+            v3::open_v3_array_local(path)
+        } else {
+            Self::from_path(path)
+        }
+    }
+
+    /// Remote analog of [`from_path_auto`]. Probes the URL for `zarr.json`
+    /// (v3) by issuing a HEAD-equivalent (a single GET — we cache the body
+    /// either way) and falls back to v2 (`.zarray`) on 404.
+    pub fn from_url_auto(url: &str, cache_dir: &str, client: Client) -> Self {
+        // Quick local-cache shortcut: if we've already cached zarr.json from
+        // a prior open, no need to probe again.
+        let cached_v3 = std::path::Path::new(&format!("{}/zarr.json", cache_dir)).exists();
+        let v3_present = cached_v3
+            || matches!(
+                client.get(&format!("{}/zarr.json", url.trim_end_matches('/'))).send().map(|r| r.status()),
+                Ok(s) if s.is_success()
+            );
+        if v3_present {
+            v3::open_v3_array_remote(url, cache_dir, client)
+        } else {
+            Self::from_url_blocking(url, cache_dir, client)
         }
     }
 }
@@ -532,12 +587,12 @@ impl RawContext {
     }
 }
 
-enum ChunkContext {
+pub enum ChunkContext {
     Heap(Vec<u8>),
     Raw(RawContext),
 }
 impl ChunkContext {
-    fn get(&self, idx: usize) -> u8 {
+    pub fn get(&self, idx: usize) -> u8 {
         match self {
             ChunkContext::Heap(data) => data[idx],
             ChunkContext::Raw(raw) => raw.get(idx),

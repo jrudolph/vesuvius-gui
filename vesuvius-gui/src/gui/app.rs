@@ -381,7 +381,10 @@ impl TemplateApp {
                         .into_volume()
                 } else {
                     log::info!("Loading zarr overlay from path: {}", segment_file);
-                    ZarrArray::from_path(&segment_file).into_ctx().into_ctx().into_volume()
+                    ZarrArray::<3, u8>::from_path_auto(&segment_file)
+                        .into_ctx()
+                        .into_ctx()
+                        .into_volume()
                 };
                 app.overlay = Some(OverlayPaintVolume::new(inner.clone(), app.overlay_coloring).into_volume());
                 app.overlay_inner = Some(inner);

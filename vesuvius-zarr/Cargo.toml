@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.70"
 
+[dev-dependencies]
+reqwest         = { workspace = true }
+
 [dependencies]
 dashmap         = { workspace = true }
 derive_more     = { workspace = true }
@@ -19,6 +22,7 @@ serde                = { workspace = true }
 serde_json           = { workspace = true }
 serde_path_to_error  = { workspace = true }
 sha2            = { workspace = true }
+vesuvius-c3d    = { path = "../vesuvius-c3d" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memmap = { workspace = true }

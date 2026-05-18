@@ -317,7 +317,10 @@ impl NewVolumeReference {
                     .into_ctx()
                     .into_ctx()
                     .into_volume(),
-                VolumeLocation::LocalPath(path) => ZarrArray::from_path(path).into_ctx().into_ctx().into_volume(),
+                VolumeLocation::LocalPath(path) => ZarrArray::<3, u8>::from_path_auto(path)
+                    .into_ctx()
+                    .into_ctx()
+                    .into_volume(),
             },
 
             NewVolumeReference::Cells { path, .. } => VolumeGrid500Mapped::from_data_dir(path).into_volume(),
@@ -379,13 +382,18 @@ impl NewVolumeReference {
             VolumeLocation::LocalPath(path) => (path.split('/').last().unwrap_or("unknown").to_string(), path.as_str()),
         };
 
-        // Try OME-Zarr first
-        if check_file_content(&location, ".zattrs", "multiscales") {
+        // Try OME-Zarr first (v2 .zattrs or v3 group zarr.json with multiscales)
+        if check_file_content(&location, ".zattrs", "multiscales")
+            || check_file_content(&location, "zarr.json", "multiscales")
+        {
             return Ok(NewVolumeReference::OmeZarr { id, location });
         }
 
-        // Try regular Zarr
-        if check_file_content(&location, ".zarray", "zarr_format") || check_file_content(&location, ".zarray", "chunks")
+        // Try regular Zarr (v2 .zarray or v3 array zarr.json)
+        if check_file_content(&location, ".zarray", "zarr_format")
+            || check_file_content(&location, ".zarray", "chunks")
+            || check_file_content(&location, "zarr.json", "\"node_type\": \"array\"")
+            || check_file_content(&location, "zarr.json", "\"node_type\":\"array\"")
         {
             return Ok(NewVolumeReference::Zarr { id, location });
         }
