@@ -582,6 +582,18 @@ impl RawContext {
         let data = unsafe { memmap::Mmap::map(chunk_file).unwrap() };
         RawContext { data }
     }
+    /// Open and mmap an existing file. Returns `None` if the file cannot be
+    /// opened or mmap'd — callers that use this as a cache lookup should
+    /// treat that as a cache miss and fall back to whatever produces the
+    /// bytes (e.g. re-decoding from a compressed source).
+    pub fn open(path: &std::path::Path) -> Option<RawContext> {
+        let file = std::fs::File::open(path).ok()?;
+        let data = unsafe { memmap::Mmap::map(&file).ok()? };
+        Some(RawContext { data })
+    }
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
     fn get(&self, idx: usize) -> u8 {
         self.data[idx]
     }

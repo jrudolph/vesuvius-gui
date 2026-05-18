@@ -7,11 +7,16 @@
 //! opaque way. When the format broadens, extend this module.
 
 use crate::sharding::{LocalShard, RemoteShard, ShardAccess, ShardIndex};
-use crate::{parse_json, ChunkContext, ZarrArray, ZarrArrayDef, ZarrDataType, ZarrFileAccess, ZarrOrder, ZarrVersion};
+use crate::{
+    default_cache_dir_for_url, parse_json, ChunkContext, RawContext, ZarrArray, ZarrArrayDef, ZarrDataType,
+    ZarrFileAccess, ZarrOrder, ZarrVersion,
+};
 use dashmap::DashMap;
 use fxhash::FxBuildHasher;
 use reqwest::blocking::Client;
 use serde::Deserialize;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -227,6 +232,99 @@ impl Sharded {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Layer-2 (decoded) on-disk cache
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Sub-chunk decoded bytes (16 MiB each) live as plain files on disk and are
+// mmapped on read. The OS page cache then acts as the implicit RAM tier — we
+// don't track residency or evict anything ourselves. Files are written via
+// `*.raw.tmp.<n>` + `rename` so concurrent decodes of the same sub-chunk are
+// safe (c3d decode is deterministic, so last-rename-wins is fine).
+
+const DECODED_SUFFIX: &str = "raw";
+
+#[derive(Debug)]
+struct DecodedCache {
+    root: PathBuf,
+}
+
+impl DecodedCache {
+    fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn path_for(&self, shard: [usize; 3], flat: usize) -> PathBuf {
+        self.root
+            .join(format!("{}_{}_{}", shard[0], shard[1], shard[2]))
+            .join(format!("sub_{:05}.{}", flat, DECODED_SUFFIX))
+    }
+
+    /// Hot path: try to mmap the decoded file. Returns `None` on any error
+    /// (missing, truncated, etc.) so the caller can fall through to decode.
+    /// Truncated/short files are treated as cache misses; the next decode
+    /// will overwrite them via atomic rename.
+    fn try_load(&self, shard: [usize; 3], flat: usize) -> Option<ChunkContext> {
+        let path = self.path_for(shard, flat);
+        let raw = RawContext::open(&path)?;
+        if raw.len() != vesuvius_c3d::C3D_CHUNK_BYTES {
+            return None;
+        }
+        Some(ChunkContext::Raw(raw))
+    }
+
+    /// Atomic write: stage to a unique temp name in the same directory, then
+    /// rename onto the final path. The unique suffix prevents collisions
+    /// between threads/processes that happen to be decoding the same sub-chunk
+    /// concurrently; both writes are valid (identical bytes), so the last
+    /// rename to win is harmless.
+    fn write_atomic(&self, shard: [usize; 3], flat: usize, bytes: &[u8]) {
+        let final_path = self.path_for(shard, flat);
+        let parent = match final_path.parent() {
+            Some(p) => p,
+            None => return,
+        };
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!("decoded-cache: create_dir_all({}) failed: {}", parent.display(), e);
+            return;
+        }
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tid = std::thread::current().id();
+        let tmp = parent.join(format!(
+            "sub_{:05}.{}.tmp.{}.{:?}",
+            flat, DECODED_SUFFIX, n, tid
+        ));
+        if let Err(e) = std::fs::write(&tmp, bytes) {
+            log::warn!("decoded-cache: write({}) failed: {}", tmp.display(), e);
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &final_path) {
+            log::warn!(
+                "decoded-cache: rename({} -> {}) failed: {}",
+                tmp.display(),
+                final_path.display(),
+                e
+            );
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// Stable cache root for a local zarr array at `array_path`. Uses the same
+/// hashed-by-URL scheme as remote so source volumes stay read-only and the
+/// per-LOD subdirectory falls out naturally (the OME caller passes a distinct
+/// `array_path` per multiscale level, e.g. `.../volume.zarr/0`).
+fn local_cache_root(array_path: &str) -> PathBuf {
+    let abs = match std::fs::canonicalize(array_path) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => array_path.trim_end_matches('/').to_string(),
+    };
+    let key = format!("file://{}", abs);
+    PathBuf::from(default_cache_dir_for_url(&key))
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Local v3 access
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -240,6 +338,9 @@ struct LocalV3ShardedAccess {
     // a separate in-memory cache.
     index_cache: DashMap<[usize; 3], Arc<ShardIndex>, FxBuildHasher>,
     shard_cache: DashMap<[usize; 3], Option<Arc<LocalShard>>, FxBuildHasher>,
+    // Layer-2: persisted decoded sub-chunks. Layer 1 (the compressed bytes)
+    // is the on-disk shard file itself; no separate compressed cache.
+    decoded_cache: DecodedCache,
 }
 
 impl LocalV3ShardedAccess {
@@ -281,13 +382,32 @@ impl ZarrFileAccess for LocalV3ShardedAccess {
 
     fn load_chunk(&self, _def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<ChunkContext> {
         let (shard, flat) = self.sharded.locate(chunk_no);
+
+        // Layer 2 hot path: a previously-decoded sub-chunk on disk.
+        if let Some(ctx) = self.decoded_cache.try_load(shard, flat) {
+            return Some(ctx);
+        }
+
+        // Layer 1: the shard file is the compressed source for local volumes.
         let index = self.get_index(shard)?;
         let (off, len) = index.lookup(flat)?;
         let shard_handle = self.get_shard(shard)?;
         let compressed = shard_handle.read_range(off, len)?;
+
+        // Decode and persist for next time.
         let decoded = vesuvius_c3d::with_decoder(|d| d.decode(&compressed))
             .unwrap_or_else(|e| panic!("c3d decode failed at shard {:?} sub-chunk {}: {}", shard, flat, e));
-        Some(ChunkContext::Heap(decoded))
+        self.decoded_cache.write_atomic(shard, flat, &decoded);
+
+        // Prefer to return the mmap'd view (so subsequent in-process accesses
+        // go through the same page-cache-backed pages). Fall back to the
+        // freshly-decoded Vec if the mmap can't be opened — e.g. disk full or
+        // permission denied on the write — so we still serve the request.
+        if let Some(ctx) = self.decoded_cache.try_load(shard, flat) {
+            Some(ctx)
+        } else {
+            Some(ChunkContext::Heap(decoded))
+        }
     }
 
     fn cache_missing(&self) -> bool {
@@ -306,16 +426,19 @@ impl ZarrFileAccess for LocalV3ShardedAccess {
 #[derive(Debug)]
 struct RemoteV3ShardedAccess {
     array_url: String,
-    cache_dir: String,
+    compressed_dir: PathBuf, // {cache_dir}/compressed
     client: Client,
     sharded: Sharded,
     shape: Vec<usize>,
-    // In-memory caches. The on-disk cache (under `cache_dir`) survives
-    // restarts; this layer just avoids re-reading the disk file on every miss.
+    // In-memory caches. The on-disk caches (under `compressed_dir` and
+    // `decoded_cache.root`) survive restarts; this in-memory layer just avoids
+    // re-reading the disk file on every miss.
     index_cache: DashMap<[usize; 3], Arc<ShardIndex>, FxBuildHasher>,
     // None = we tried to fetch the shard index and the shard is missing (404).
     // Some(idx) = present. Avoids re-fetching the index for empty shards.
     index_known_missing: DashMap<[usize; 3], (), FxBuildHasher>,
+    // Layer 2: persisted decoded sub-chunks.
+    decoded_cache: DecodedCache,
 }
 
 impl RemoteV3ShardedAccess {
@@ -324,21 +447,21 @@ impl RemoteV3ShardedAccess {
         format!("{}/c/{}{sep}{}{sep}{}", self.array_url, shard[0], shard[1], shard[2])
     }
 
-    fn shard_cache_dir(&self, shard: [usize; 3]) -> std::path::PathBuf {
-        std::path::PathBuf::from(&self.cache_dir)
+    fn shard_cache_dir(&self, shard: [usize; 3]) -> PathBuf {
+        self.compressed_dir
             .join("c")
             .join(format!("{}_{}_{}", shard[0], shard[1], shard[2]))
     }
 
-    fn index_disk_path(&self, shard: [usize; 3]) -> std::path::PathBuf {
+    fn index_disk_path(&self, shard: [usize; 3]) -> PathBuf {
         self.shard_cache_dir(shard).join("_index.bin")
     }
 
-    fn subchunk_disk_path(&self, shard: [usize; 3], flat: usize) -> std::path::PathBuf {
+    fn subchunk_disk_path(&self, shard: [usize; 3], flat: usize) -> PathBuf {
         self.shard_cache_dir(shard).join(format!("sub_{:05}.c3dc", flat))
     }
 
-    fn missing_marker_path(&self, shard: [usize; 3]) -> std::path::PathBuf {
+    fn missing_marker_path(&self, shard: [usize; 3]) -> PathBuf {
         self.shard_cache_dir(shard).join("_missing")
     }
 
@@ -425,12 +548,27 @@ impl ZarrFileAccess for RemoteV3ShardedAccess {
 
     fn load_chunk(&self, _def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<ChunkContext> {
         let (shard, flat) = self.sharded.locate(chunk_no);
+
+        // Layer 2 hot path.
+        if let Some(ctx) = self.decoded_cache.try_load(shard, flat) {
+            return Some(ctx);
+        }
+
+        // Layer 1 (with HTTP fallback inside).
         let index = self.get_index(shard)?;
         let (off, len) = index.lookup(flat)?;
         let compressed = self.fetch_subchunk(shard, flat, off, len)?;
+
+        // Decode and persist for next time.
         let decoded = vesuvius_c3d::with_decoder(|d| d.decode(&compressed))
             .unwrap_or_else(|e| panic!("c3d decode failed at shard {:?} sub-chunk {}: {}", shard, flat, e));
-        Some(ChunkContext::Heap(decoded))
+        self.decoded_cache.write_atomic(shard, flat, &decoded);
+
+        if let Some(ctx) = self.decoded_cache.try_load(shard, flat) {
+            Some(ctx)
+        } else {
+            Some(ChunkContext::Heap(decoded))
+        }
     }
 
     fn cache_missing(&self) -> bool {
@@ -444,10 +582,13 @@ impl ZarrFileAccess for RemoteV3ShardedAccess {
 pub fn open_v3_array_remote(url: &str, cache_dir: &str, client: Client) -> ZarrArray<3, u8> {
     let url = url.trim_end_matches('/');
     let cache_dir = cache_dir.trim_end_matches('/');
+    let cache_root = PathBuf::from(cache_dir);
+    let compressed_dir = cache_root.join("compressed");
+    let decoded_dir = cache_root.join("decoded");
 
-    // Cache + parse the array zarr.json.
-    let local_metadata = format!("{}/zarr.json", cache_dir);
-    if !std::path::Path::new(&local_metadata).exists() {
+    // Cache + parse the array zarr.json (lives at the cache root).
+    let local_metadata = cache_root.join("zarr.json");
+    if !local_metadata.exists() {
         let metadata_url = format!("{}/zarr.json", url);
         let res = client
             .get(&metadata_url)
@@ -457,23 +598,24 @@ pub fn open_v3_array_remote(url: &str, cache_dir: &str, client: Client) -> ZarrA
             panic!("fetch {}: status {}", metadata_url, res.status());
         }
         let bytes = res.bytes().unwrap();
-        std::fs::create_dir_all(cache_dir).unwrap();
+        std::fs::create_dir_all(&cache_root).unwrap();
         std::fs::write(&local_metadata, &bytes).unwrap();
     }
     let raw = std::fs::read_to_string(&local_metadata).unwrap();
-    let json: V3ArrayJson = parse_json(&raw, &local_metadata);
+    let json: V3ArrayJson = parse_json(&raw, &local_metadata.to_string_lossy());
     let sharded = Sharded::from_array_json(&json);
     let shape = json.shape.clone();
     let def = sharded.synthesize_def(&shape);
 
     let access = Arc::new(RemoteV3ShardedAccess {
         array_url: url.to_string(),
-        cache_dir: cache_dir.to_string(),
+        compressed_dir,
         client,
         sharded,
         shape,
         index_cache: DashMap::with_hasher(FxBuildHasher::default()),
         index_known_missing: DashMap::with_hasher(FxBuildHasher::default()),
+        decoded_cache: DecodedCache::new(decoded_dir),
     });
     ZarrArray::from_def_and_access(def, access)
 }
@@ -486,12 +628,16 @@ pub fn open_v3_array_local(path: &str) -> ZarrArray<3, u8> {
     let shape = json.shape.clone();
     let def = sharded.synthesize_def(&shape);
 
+    let cache_root = local_cache_root(path);
+    let decoded_cache = DecodedCache::new(cache_root.join("decoded"));
+
     let access = Arc::new(LocalV3ShardedAccess {
         array_root: path.trim_end_matches('/').to_string(),
         sharded,
         shape,
         index_cache: DashMap::with_hasher(FxBuildHasher::default()),
         shard_cache: DashMap::with_hasher(FxBuildHasher::default()),
+        decoded_cache,
     });
     ZarrArray::from_def_and_access(def, access)
 }
