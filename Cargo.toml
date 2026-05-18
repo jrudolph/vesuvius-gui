@@ -2,6 +2,7 @@
 members = [
     "vesuvius-rs",
     "vesuvius-atlas-rs",
+    "vesuvius-c3d",
     "vesuvius-zarr",
     "vesuvius-gui",
     "vesuvius-render",
@@ -12,6 +13,7 @@ resolver = "2"
 anyhow          = { version = "1" }
 async-recursion = { version = "1" }
 base64          = { version = "0.22" }
+cc              = { version = "1" }
 clap            = { version = "4", features = [ "derive" ] }
 dashmap         = { version = "6" }
 derive_more     = { version = "2", features = [ "debug" ] }
