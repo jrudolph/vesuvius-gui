@@ -33,7 +33,7 @@ fn miss_then_fetch_then_resident() {
     // First touch returns Pending (or already Resident if the worker is
     // fast — both are acceptable).
     let state = cache.state_or_fetch(key);
-    assert!(matches!(state.as_ref(), ChunkState::Pending | ChunkState::Resident(_)));
+    assert!(matches!(state.as_ref(), ChunkState::Pending | ChunkState::Resident { .. }));
 
     let state = cache.wait_for(key, Duration::from_secs(2));
     assert!(state.as_resident().is_some(), "chunk should be resident: {:?}", state);
@@ -112,8 +112,9 @@ fn all_absent_sources_transition_to_empty_and_persist() {
         "fetch should have run exactly once"
     );
 
-    // Reopen with a fresh cache (same disk root). The `.empty` sentinel
-    // should short-circuit dispatch — no second fetch.
+    // Reopen with a fresh cache (same disk root). The Empty entry in the
+    // sidecar should short-circuit dispatch — no second fetch.
+    cache.flush();
     drop(cache);
     let backfiller2 = Arc::new(AllAbsentBackfiller {
         volume_id: "absent-test".to_string(),
@@ -797,6 +798,7 @@ fn second_open_picks_up_disk_cache() {
         let cache = ChunkCache::new(&root, backfiller);
         cache.wait_for(key, Duration::from_secs(2));
         assert_eq!(cache.voxel(0, 0, 0, 0), 42);
+        cache.flush();
     }
 
     // New cache, same volume_id + root → should hit the disk without a fetch.

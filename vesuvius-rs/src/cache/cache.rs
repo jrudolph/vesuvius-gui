@@ -225,10 +225,14 @@ impl ChunkCache {
         let chunks_root = root;
         let _ = std::fs::create_dir_all(&spill_root);
 
+        let volume_id = backfiller.volume_id();
+        let extent = backfiller.voxel_extent();
+        let max_lod = backfiller.max_lod();
+
         let inner = Arc::new(Inner {
             map: DashMap::new(),
             dispatching: DashMap::new(),
-            disk: DiskStore::new(chunks_root),
+            disk: DiskStore::new(chunks_root, volume_id, extent, max_lod),
             spill: SpillStore::new(spill_root),
             backfiller,
             sources: Mutex::new(HashMap::new()),
@@ -304,6 +308,14 @@ impl ChunkCache {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Synchronously persist the on-disk chunk-state sidecar. Call this
+    /// before relying on a fresh `ChunkCache` opened against the same root
+    /// to see chunks written by the current process — the background sync
+    /// thread otherwise flushes only every ~10 s.
+    pub fn flush(&self) {
+        self.inner.disk.flush();
     }
 }
 
@@ -387,7 +399,7 @@ impl Inner {
     /// source), so double-fires from racing publishers are safe.
     fn publish_terminal(self: &Arc<Self>, key: ChunkKey, state: &Arc<ChunkState>) {
         let outcome: SourceOutcome = match state.as_ref() {
-            ChunkState::Resident(_) => Ok(Some(state.clone() as SourcePayload)),
+            ChunkState::Resident { .. } => Ok(Some(state.clone() as SourcePayload)),
             ChunkState::Empty => Ok(None),
             _ => return,
         };
@@ -409,9 +421,9 @@ impl Inner {
     /// `self.map.insert(key, …)` for this same key from here.
     fn dispatch_chunk(self: &Arc<Self>, key: ChunkKey) -> Arc<ChunkState> {
         match self.disk.load(key) {
-            LoadOutcome::Resident(mmap) => {
+            LoadOutcome::Resident { mmap, offset } => {
                 log::trace!("[{}] disk hit", key);
-                return Arc::new(ChunkState::Resident(mmap));
+                return Arc::new(ChunkState::Resident { mmap, offset });
             }
             LoadOutcome::Empty => {
                 log::trace!("[{}] disk hit (empty)", key);
@@ -620,7 +632,7 @@ impl Inner {
 
                 let child_state = self.state_or_fetch(child_key);
                 match child_state.as_ref() {
-                    ChunkState::Resident(_) => {
+                    ChunkState::Resident { .. } => {
                         // publish_terminal either fired during the dispatch
                         // call above or is about to via the disk path; in
                         // both cases the source is (or will be) Done.
@@ -929,9 +941,9 @@ impl Inner {
         match primary {
             ExtractedChunk::Bytes(bytes) => match self.disk.write_atomic(key, &bytes) {
                 Ok(()) => match self.disk.try_load(key) {
-                    Some(mmap) => {
+                    Some((mmap, offset)) => {
                         log::debug!("[{}] ready ({:?})", key, t0.elapsed());
-                        Arc::new(ChunkState::Resident(mmap))
+                        Arc::new(ChunkState::Resident { mmap, offset })
                     }
                     None => {
                         log::warn!("[{}] write ok but mmap reload failed", key);

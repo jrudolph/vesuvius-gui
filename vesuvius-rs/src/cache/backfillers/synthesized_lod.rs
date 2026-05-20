@@ -154,8 +154,8 @@ impl ChunkBackfiller for SynthesizedLodBackfiller {
                                         key.lod, i
                                     ))
                                 })?;
-                                if let ChunkState::Resident(mmap) = state {
-                                    arr[i] = Some(&mmap[..]);
+                                if let ChunkState::Resident { mmap, offset } = state {
+                                    arr[i] = Some(&mmap[*offset..*offset + CHUNK_VOXELS]);
                                 } else {
                                     arr[i] = None;
                                 }

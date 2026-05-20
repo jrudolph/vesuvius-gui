@@ -3,6 +3,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use super::CHUNK_VOXELS;
+
 /// Address of one cache chunk within a volume.
 ///
 /// `lod` is the mip level — LOD 0 is native resolution, LOD N covers a
@@ -36,11 +38,13 @@ pub enum ChunkState {
     Missing,
     /// Fetch in flight on a worker thread.
     Pending,
-    /// Loaded, mmap'd from disk.
-    Resident(Mmap),
+    /// Loaded — bytes live at `offset..offset+CHUNK_VOXELS` inside `mmap`.
+    /// The mmap is shared with every other resident chunk in the same LOD
+    /// data file.
+    Resident { mmap: Arc<Mmap>, offset: usize },
     /// Definitively absent: every backing source reported "not present"
     /// (e.g., 404 / 403). Sampling returns 0 without consulting any LOD
-    /// fallback. Persisted on disk via a sentinel, so subsequent sessions
+    /// fallback. Persisted in the chunk-state sidecar so subsequent sessions
     /// hit this without re-fetching.
     Empty,
     /// Most recent fetch failed; don't retry until `until`.
@@ -48,9 +52,9 @@ pub enum ChunkState {
 }
 
 impl ChunkState {
-    pub fn as_resident(self: &Arc<Self>) -> Option<&Mmap> {
+    pub fn as_resident(self: &Arc<Self>) -> Option<&[u8]> {
         match self.as_ref() {
-            ChunkState::Resident(m) => Some(m),
+            ChunkState::Resident { mmap, offset } => Some(&mmap[*offset..*offset + CHUNK_VOXELS]),
             _ => None,
         }
     }
@@ -60,7 +64,7 @@ impl ChunkState {
     /// state, because `Empty` at the fine LOD overrides any data at a
     /// coarser LOD.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, ChunkState::Resident(_) | ChunkState::Empty)
+        matches!(self, ChunkState::Resident { .. } | ChunkState::Empty)
     }
 
     pub fn is_empty(&self) -> bool {

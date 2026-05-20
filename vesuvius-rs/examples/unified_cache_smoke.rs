@@ -57,16 +57,16 @@ fn main() {
     let mut last_summary = String::new();
     loop {
         let mut resident = 0;
+        let mut empty = 0;
         let mut pending = 0;
         let mut cooldown = 0;
-        let mut empty = 0;
         for k in &keys {
             let s = cache.state_or_fetch(*k);
             match s.as_ref() {
-                ChunkState::Resident(_) => resident += 1,
+                ChunkState::Resident { .. } => resident += 1,
+                ChunkState::Empty => empty += 1,
                 ChunkState::Pending => pending += 1,
                 ChunkState::CooldownMiss { .. } => cooldown += 1,
-                ChunkState::Empty => empty += 1,
                 ChunkState::Missing => {}
             }
         }

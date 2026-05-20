@@ -16,6 +16,7 @@ mod backfiller;
 mod cache;
 mod disk;
 mod downloader;
+mod sidecar;
 mod spill;
 mod state;
 mod volume;

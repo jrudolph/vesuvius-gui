@@ -226,7 +226,7 @@ fn overlay_color_for(
         (None, Some(ChunkState::Missing)) | (None, None) => Some(Color32::from_rgb(220, 60, 220)), // magenta
         // Defensive: Resident / Empty here mean the LOD-walk produced no
         // chosen — shouldn't happen, but if it does, no overlay.
-        (None, Some(ChunkState::Resident(_) | ChunkState::Empty)) => None,
+        (None, Some(ChunkState::Resident { .. } | ChunkState::Empty)) => None,
     }
 }
 
