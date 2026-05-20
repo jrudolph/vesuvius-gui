@@ -16,6 +16,7 @@
 
 use super::priority::{Priority, MAX_AGE};
 use super::state::ChunkKey;
+use dashmap::DashMap;
 use reqwest::blocking::Client;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
@@ -52,6 +53,12 @@ struct DownloaderInner {
     queue: Mutex<Queue>,
     not_empty: Condvar,
     max_age: Duration,
+    /// Chunks with at least one HTTP GET currently in flight on a worker.
+    /// Value is the count of concurrent in-flight downloads for that chunk
+    /// (a chunk's backfill plan may issue multiple source URLs). Entries are
+    /// removed when the count drops to zero, so `contains_key` is a sufficient
+    /// "is actively downloading" check.
+    active: DashMap<ChunkKey, usize>,
 }
 
 struct Queue {
@@ -64,10 +71,10 @@ struct Queue {
 
 struct Entry {
     url: String,
-    /// The cache chunk this download is on behalf of. Currently logged for
-    /// observability only — the downloader itself doesn't make decisions
-    /// based on it.
-    #[allow(dead_code)]
+    /// The cache chunk this download is on behalf of. Used for logging and
+    /// for the per-chunk "active GET in flight" counter exposed via
+    /// `is_active_chunk` — the downloader still does not order or schedule
+    /// based on chunk identity.
     chunk: ChunkKey,
     added_at: Instant,
     on_done: OnDone,
@@ -91,6 +98,7 @@ impl Downloader {
             }),
             not_empty: Condvar::new(),
             max_age,
+            active: DashMap::new(),
         });
 
         let client = Client::builder()
@@ -156,6 +164,43 @@ impl Downloader {
             }
         }
     }
+
+    /// True iff a worker is currently executing an HTTP GET for at least one
+    /// source URL submitted on behalf of `chunk`. Queued-but-not-yet-popped
+    /// entries don't count — this is for the debug overlay to distinguish
+    /// "waiting in queue" from "bytes coming over the wire right now".
+    pub fn is_active_chunk(&self, chunk: ChunkKey) -> bool {
+        self.inner.active.contains_key(&chunk)
+    }
+}
+
+impl DownloaderInner {
+    fn mark_active(&self, chunk: ChunkKey) {
+        *self.active.entry(chunk).or_insert(0) += 1;
+    }
+
+    fn unmark_active(&self, chunk: ChunkKey) {
+        if let dashmap::mapref::entry::Entry::Occupied(mut e) = self.active.entry(chunk) {
+            let v = e.get_mut();
+            *v = v.saturating_sub(1);
+            if *v == 0 {
+                e.remove();
+            }
+        }
+    }
+}
+
+/// RAII guard that decrements the active-download counter for `chunk` when
+/// dropped. Held across the HTTP GET so a panic still releases the slot.
+struct ActiveGuard<'a> {
+    inner: &'a DownloaderInner,
+    chunk: ChunkKey,
+}
+
+impl Drop for ActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.inner.unmark_active(self.chunk);
+    }
 }
 
 impl Default for Downloader {
@@ -191,6 +236,11 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
 
         let t0 = Instant::now();
         log::trace!("[{}] GET", entry.url);
+        inner.mark_active(entry.chunk);
+        let _active = ActiveGuard {
+            inner: &inner,
+            chunk: entry.chunk,
+        };
         let outcome: DownloadResult = match client.get(&entry.url).send() {
             Ok(resp) => {
                 let status = resp.status();

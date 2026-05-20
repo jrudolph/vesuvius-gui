@@ -178,21 +178,50 @@ fn coord_at_lod(sx: u64, sy: u64, sz: u64, from_lod: u8, to_lod: u8) -> (u64, u6
 }
 
 /// Map the cache state of one target-LOD chunk (plus which LOD actually
-/// rendered) to an overlay tint. `None` means "ready at target LOD; no
-/// overlay needed".
-fn overlay_color_for(target_lod: u8, chosen_lod: Option<u8>, target_state: Option<&ChunkState>) -> Option<Color32> {
+/// rendered and whether an HTTP GET is in flight) to an overlay tint.
+/// `None` means "ready at target LOD; no overlay needed".
+///
+/// Color legend:
+/// - Green   — Empty (definitively absent, cached as a sentinel)
+/// - Blue    — served from coarser LOD, waiting in the work queue
+/// - Cyan    — served from coarser LOD, actively downloading right now
+/// - Yellow  — Pending, no coarser fallback yet, waiting in queue
+/// - Orange  — Pending, no coarser fallback yet, actively downloading
+/// - Red     — CooldownMiss (recent fetch failed)
+/// - Magenta — Missing / never dispatched
+fn overlay_color_for(
+    target_lod: u8,
+    chosen_lod: Option<u8>,
+    target_state: Option<&ChunkState>,
+    is_downloading: bool,
+) -> Option<Color32> {
     // Empty target wins over any LOD fallback — the chunk is definitively
-    // absent, gray-tint it as a normal "no data here" cell.
+    // absent. Use a vivid green so it doesn't blend with mid-gray voxel data
+    // the way the previous neutral tint did.
     if matches!(target_state, Some(ChunkState::Empty)) {
-        return Some(Color32::from_rgb(140, 140, 140)); // gray
+        return Some(Color32::from_rgb(60, 200, 110)); // green
     }
     match (chosen_lod, target_state) {
         // Rendered at target LOD with real data — happy path, no tint.
         (Some(l), _) if l == target_lod => None,
-        // Rendered via a coarser parent (target not ready).
-        (Some(_), _) => Some(Color32::from_rgb(60, 130, 230)), // blue
+        // Rendered via a coarser parent (target not ready). Cyan if the
+        // target's bytes are actually moving over the wire right now, blue
+        // if it's just sitting in the queue waiting for a worker.
+        (Some(_), _) => {
+            if is_downloading {
+                Some(Color32::from_rgb(40, 200, 220)) // cyan
+            } else {
+                Some(Color32::from_rgb(60, 130, 230)) // blue
+            }
+        }
         // Nothing resident yet — inspect target state for finer signal.
-        (None, Some(ChunkState::Pending)) => Some(Color32::from_rgb(230, 200, 40)), // yellow
+        (None, Some(ChunkState::Pending)) => {
+            if is_downloading {
+                Some(Color32::from_rgb(230, 140, 40)) // orange
+            } else {
+                Some(Color32::from_rgb(230, 200, 40)) // yellow
+            }
+        }
         (None, Some(ChunkState::CooldownMiss { .. })) => Some(Color32::from_rgb(220, 60, 60)), // red
         (None, Some(ChunkState::Missing)) | (None, None) => Some(Color32::from_rgb(220, 60, 220)), // magenta
         // Defensive: Resident / Empty here mean the LOD-walk produced no
@@ -462,7 +491,9 @@ impl PaintVolume for UnifiedVolume {
                     let target_key = ChunkKey::new(target_lod, chunk[0], chunk[1], chunk[2]);
                     let target_state = self.cache.peek(target_key);
                     let chosen_lod = chosen.as_ref().map(|(l, _)| *l);
-                    let color = overlay_color_for(target_lod, chosen_lod, target_state.as_deref());
+                    let is_downloading = self.cache.is_downloading(target_key);
+                    let color =
+                        overlay_color_for(target_lod, chosen_lod, target_state.as_deref(), is_downloading);
                     if let Some(c) = color {
                         for v_px in v_px_lo..v_px_hi {
                             for u_px in u_px_lo..u_px_hi {

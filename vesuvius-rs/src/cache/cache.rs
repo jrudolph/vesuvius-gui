@@ -250,6 +250,16 @@ impl ChunkCache {
         self.inner.map.get(&key).map(|e| e.clone())
     }
 
+    /// True iff at least one HTTP GET submitted on behalf of `key` is
+    /// currently executing on a downloader worker. Used by the debug overlay
+    /// to distinguish "in queue, not yet popped" from "bytes in flight".
+    /// Note: a chunk can be Pending without being actively downloading — it
+    /// could be waiting in the source queue, post-download in the extract
+    /// queue, or fed by a Compute / Chunk source rather than a Download.
+    pub fn is_downloading(&self, key: ChunkKey) -> bool {
+        self.inner.downloader.is_active_chunk(key)
+    }
+
     pub fn voxel_extent(&self) -> [u32; 3] {
         self.inner.backfiller.voxel_extent()
     }

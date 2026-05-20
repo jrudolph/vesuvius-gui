@@ -966,8 +966,14 @@ impl TemplateApp {
                 "Chunk cache state overlay",
             )
             .on_hover_text(
-                "Tint each chunk by its cache state: blue = served from coarser LOD, \
-                 yellow = pending, red = cooldown, magenta = missing.",
+                "Tint each chunk by its cache state. \
+                 Blue = served from coarser LOD, waiting in queue. \
+                 Cyan = served from coarser LOD, actively downloading. \
+                 Yellow = pending, waiting in queue. \
+                 Orange = pending, actively downloading. \
+                 Green = empty (confirmed absent). \
+                 Red = cooldown. \
+                 Magenta = missing.",
             );
         });
 
