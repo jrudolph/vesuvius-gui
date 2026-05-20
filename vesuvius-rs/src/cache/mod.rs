@@ -16,6 +16,7 @@ mod backfiller;
 mod cache;
 mod disk;
 mod downloader;
+mod priority;
 mod state;
 mod volume;
 
@@ -27,6 +28,9 @@ mod tests;
 pub use backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourcePayload, SourceSpec};
 pub use cache::ChunkCache;
 pub use downloader::{DownloadError, Downloader};
+pub use priority::{LodView, Priority, Viewport};
+#[allow(unused_imports)] // re-export kept for callers that build viewports
+pub use priority::MAX_AGE;
 pub use state::{ChunkKey, ChunkState};
 pub use volume::UnifiedVolume;
 

@@ -8,45 +8,50 @@
 //!     exactly once per source key.
 //!
 //! Flow for one chunk miss:
-//!   1. `state_or_fetch` → `dispatch_chunk` → backfiller emits a `BackfillPlan`.
+//!   1. `state_or_fetch_with_priority` → `dispatch_chunk` → backfiller emits
+//!      a `BackfillPlan`.
 //!   2. The chunk is parked in `chunks` with a counter of unresolved sources.
-//!   3. For each source: if first seen, queue a `FetchSource` task; otherwise
-//!      attach the chunk as a waiter on the existing source.
+//!   3. For each source: if first seen, queue a `FetchSource` task (Compute)
+//!      or hand the URL to the downloader (Download); otherwise attach the
+//!      chunk as a waiter on the existing source.
 //!   4. When a source resolves, every waiter chunk's counter drops by one;
 //!      when a chunk's counter hits zero, an `Extract` task is queued.
 //!   5. Extract runs the backfiller's closure → writes to disk → mmaps →
 //!      transitions chunk state to `Resident`.
 //!
-//! ### Backpressure
+//! ### Priority + age pruning
 //!
-//! The task channel is intentionally tiny (`TASK_QUEUE_CAPACITY`). When the
-//! pool can't accept new work we drop the task and revert the chunk to a
-//! short cooldown — the paint loop is calling us at frame rate and will
-//! re-request only the chunks that are *still in view*, so dropping stale
-//! requests is the right policy. The alternative — letting the queue grow —
-//! means the user pans away, and we keep on fetching for the *previous*
-//! viewport while the current frame's chunks queue up behind hundreds of
-//! stale ones.
+//! Tasks live in a `BTreeMap` keyed by `(priority, seq)`. The paint loop
+//! computes a per-chunk priority from its local viewport (coarse LOD first,
+//! then closest-to-center) and passes it via
+//! `state_or_fetch_with_priority`. Submission order within a frame is
+//! priority order, so the BTreeMap naturally pops the most urgent work
+//! across all panes first.
+//!
+//! Pruning is intentionally minimal: workers drop entries older than
+//! `MAX_AGE` at pop time and run the cancellation path so chunks roll back
+//! to cooldown. No distance / viewport-based reprioritization — by the time
+//! work is dropped for age, the paint loop has long since moved on to a new
+//! frame that resubmitted the chunks it still wants.
 
 use super::backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourcePayload, SourceSpec};
 use super::disk::DiskStore;
 use super::downloader::{DownloadError, DownloadResult, Downloader, OnDone, SubmitResult};
+use super::priority::{Priority, MAX_AGE};
 use super::state::{ChunkKey, ChunkState};
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 const COOLDOWN: Duration = Duration::from_secs(10);
 const SHORT_COOLDOWN: Duration = Duration::from_millis(150);
 const PERMANENT_COOLDOWN: Duration = Duration::from_secs(60 * 60 * 24 * 365);
 const DEFAULT_WORKERS: usize = 4;
-/// Hard cap on outstanding tasks. Combined with 4 workers, this means at most
-/// ~8 in-flight tasks at any moment — keeps the cache responsive to the
-/// freshest viewport request even under bursty paint loops.
-const TASK_QUEUE_CAPACITY: usize = 4;
+/// Generous cap on outstanding cache-side tasks. With per-frame distance
+/// pruning the effective working set stays much smaller.
+const TASK_QUEUE_CAPACITY: usize = 128;
 
 pub struct ChunkCache {
     inner: Arc<Inner>,
@@ -56,12 +61,13 @@ struct Inner {
     map: DashMap<ChunkKey, Arc<ChunkState>>,
     disk: DiskStore,
     backfiller: Arc<dyn ChunkBackfiller>,
-    /// `Mutex<HashMap>` rather than `DashMap` so we can hold the lock across
-    /// `try_send` — that closes the race where two threads register the
-    /// same source concurrently and we'd otherwise lose one fetch.
+    /// `Mutex<HashMap>` rather than `DashMap` so claim-the-slot for a fresh
+    /// source key is atomic. The lock is never held across `try_submit`
+    /// (downloader/task queue) because submit can synchronously invoke
+    /// callbacks that re-enter `complete_source` on the same thread.
     sources: Mutex<HashMap<String, Arc<Mutex<SourceState>>>>,
     chunks: DashMap<ChunkKey, Arc<Mutex<ChunkProgress>>>,
-    task_tx: SyncSender<Task>,
+    task_queue: TaskQueue,
     downloader: Arc<Downloader>,
 }
 
@@ -77,6 +83,10 @@ struct ChunkProgress {
     remaining: usize,
     results: HashMap<String, SourceOutcome>,
     extract: Option<Box<dyn FnOnce(&[SourceOutcome]) -> Result<Vec<u8>, BackfillError> + Send + 'static>>,
+    /// Priority captured at dispatch time. Used to enqueue the `Extract`
+    /// task once all sources resolve, so late-arriving completions inherit
+    /// the original chunk priority instead of falling back to `worst`.
+    priority: Priority,
 }
 
 enum Task {
@@ -84,17 +94,39 @@ enum Task {
         key: String,
         fetch: Box<dyn FnOnce() -> SourceOutcome + Send + 'static>,
     },
-    Extract(ChunkKey),
+    Extract,
+}
+
+/// Priority queue for cache-side `Task`s. BTreeMap keyed by `(priority,
+/// seq)` so workers always pop the most-urgent submitted entry. The only
+/// staleness check is age — see the module docs.
+struct TaskQueue {
+    inner: Mutex<TaskQueueInner>,
+    not_empty: Condvar,
+    capacity: usize,
+    max_age: Duration,
+}
+
+struct TaskQueueInner {
+    entries: BTreeMap<(u64, u64), TaskEntry>,
+    next_seq: u64,
+    closed: bool,
+}
+
+struct TaskEntry {
+    chunk: ChunkKey,
+    added_at: Instant,
+    task: Task,
 }
 
 enum RegisterResult {
-    /// First observer — `FetchSource` task was queued.
+    /// First observer — fetch was queued (cache pool or downloader).
     Queued,
     /// An earlier observer's fetch is in-flight; we're now a waiter.
     AttachedPending,
     /// Source already resolved; outcome is returned for the caller to apply.
     AlreadyDone(SourceOutcome),
-    /// Task queue is full; nothing was registered.
+    /// Task / download queue is full; nothing was registered.
     QueueFull,
 }
 
@@ -125,8 +157,7 @@ impl ChunkCache {
         workers: usize,
         downloader: Arc<Downloader>,
     ) -> Self {
-        let (task_tx, task_rx) = mpsc::sync_channel::<Task>(TASK_QUEUE_CAPACITY);
-        let task_rx = Arc::new(Mutex::new(task_rx));
+        let task_queue = TaskQueue::new(TASK_QUEUE_CAPACITY, MAX_AGE);
 
         let inner = Arc::new(Inner {
             map: DashMap::new(),
@@ -134,16 +165,15 @@ impl ChunkCache {
             backfiller,
             sources: Mutex::new(HashMap::new()),
             chunks: DashMap::new(),
-            task_tx,
+            task_queue,
             downloader,
         });
 
         for i in 0..workers.max(1) {
             let inner = inner.clone();
-            let rx = task_rx.clone();
             std::thread::Builder::new()
                 .name(format!("vesuvius-cache-{}", i))
-                .spawn(move || worker_loop(inner, rx))
+                .spawn(move || worker_loop(inner))
                 .expect("spawn cache worker");
         }
 
@@ -161,17 +191,25 @@ impl ChunkCache {
         }
     }
 
+    /// Best-effort dispatch with worst-case priority. Used by tests, by
+    /// `get()`, and anywhere a caller doesn't have viewport context. Prefer
+    /// `state_or_fetch_with_priority` from the paint loop.
     pub fn state_or_fetch(&self, key: ChunkKey) -> Arc<ChunkState> {
+        self.state_or_fetch_with_priority(key, Priority::worst())
+    }
+
+    pub fn state_or_fetch_with_priority(&self, key: ChunkKey, priority: Priority) -> Arc<ChunkState> {
         if let Some(entry) = self.inner.map.get(&key) {
             let state = entry.clone();
             drop(entry);
-            return self.maybe_retry(key, state);
+            return self.maybe_retry(key, state, priority);
         }
+        let inner = self.inner.clone();
         let entry = self
             .inner
             .map
             .entry(key)
-            .or_insert_with(|| self.inner.dispatch_chunk(key));
+            .or_insert_with(|| inner.dispatch_chunk(key, priority));
         entry.clone()
     }
 
@@ -182,10 +220,10 @@ impl ChunkCache {
         self.inner.map.get(&key).map(|e| e.clone())
     }
 
-    fn maybe_retry(&self, key: ChunkKey, state: Arc<ChunkState>) -> Arc<ChunkState> {
+    fn maybe_retry(&self, key: ChunkKey, state: Arc<ChunkState>, priority: Priority) -> Arc<ChunkState> {
         if let ChunkState::CooldownMiss { until } = state.as_ref() {
             if SystemTime::now() >= *until {
-                let new_state = self.inner.dispatch_chunk(key);
+                let new_state = self.inner.dispatch_chunk(key, priority);
                 self.inner.map.insert(key, new_state.clone());
                 return new_state;
             }
@@ -234,13 +272,13 @@ fn short_cooldown() -> Arc<ChunkState> {
 
 impl Inner {
     /// Drive one chunk from Missing to Pending. Plans + registers sources;
-    /// queues either FetchSource or (if all sources already Done) Extract.
+    /// queues either FetchSource / a download or (if all sources already
+    /// Done) Extract.
     ///
-    /// Returns the state to insert in `self.map`. Caller is `state_or_fetch`'s
-    /// `or_insert_with` closure — we must NEVER call `self.map.insert(key, …)`
-    /// for this same key from here (it would deadlock the shard lock that the
-    /// entry guard is holding).
-    fn dispatch_chunk(self: &Arc<Self>, key: ChunkKey) -> Arc<ChunkState> {
+    /// Returns the state to insert in `self.map`. Caller is the
+    /// `or_insert_with` closure on the entry guard — we must NEVER call
+    /// `self.map.insert(key, …)` for this same key from here.
+    fn dispatch_chunk(self: &Arc<Self>, key: ChunkKey, priority: Priority) -> Arc<ChunkState> {
         if let Some(mmap) = self.disk.try_load(key) {
             log::trace!("cache: chunk {:?} hit disk", key);
             return Arc::new(ChunkState::Resident(mmap));
@@ -271,23 +309,21 @@ impl Inner {
             remaining: order.len(),
             results: HashMap::new(),
             extract: Some(extract),
+            priority,
         }));
         self.chunks.insert(key, progress_arc.clone());
 
         if order.is_empty() {
             // 0-source plan: queue Extract immediately.
-            match self.task_tx.try_send(Task::Extract(key)) {
-                Ok(()) => return Arc::new(ChunkState::Pending),
-                Err(TrySendError::Full(_)) => {
+            return match self.task_queue.try_submit(key, priority, Task::Extract) {
+                Ok(()) => Arc::new(ChunkState::Pending),
+                Err(dropped) => {
                     log::trace!("cache: extract for {:?} dropped at dispatch (queue full)", key);
                     self.chunks.remove(&key);
-                    return short_cooldown();
+                    drop(dropped);
+                    short_cooldown()
                 }
-                Err(TrySendError::Disconnected(_)) => {
-                    self.chunks.remove(&key);
-                    return short_cooldown();
-                }
-            }
+            };
         }
 
         // Register sources. Track immediate Dones so we can satisfy them
@@ -296,7 +332,7 @@ impl Inner {
         let mut immediates: Vec<(String, SourceOutcome)> = Vec::new();
         for spec in sources {
             let source_key = spec.key().to_string();
-            match self.register_source(key, spec) {
+            match self.register_source(key, spec, priority) {
                 RegisterResult::Queued | RegisterResult::AttachedPending => {}
                 RegisterResult::AlreadyDone(outcome) => immediates.push((source_key, outcome)),
                 RegisterResult::QueueFull => {
@@ -308,16 +344,11 @@ impl Inner {
         }
 
         // Apply immediates. If they push the chunk to Extract-ready, queue
-        // Extract here. (Concurrent worker satisfies on the other sources
-        // race-safely against this via `results.contains_key` + the
-        // single-fire `remaining == 0` check inside the same lock.)
+        // Extract here.
         for (sk, outcome) in immediates {
-            match self.satisfy(key, &sk, outcome) {
+            match self.satisfy(key, &sk, outcome, priority) {
                 SatisfyResult::Ok => {}
                 SatisfyResult::QueueFullOnExtract => {
-                    // We can't `self.map.insert(key, short_cooldown())` here:
-                    // we're inside our own `or_insert_with`. Returning the
-                    // cooldown state has the same effect.
                     log::trace!("cache: chunk {:?} extract dropped at dispatch", key);
                     return short_cooldown();
                 }
@@ -326,17 +357,44 @@ impl Inner {
         Arc::new(ChunkState::Pending)
     }
 
-    fn register_source(self: &Arc<Self>, chunk_key: ChunkKey, spec: SourceSpec) -> RegisterResult {
-        let mut sources = self.sources.lock().unwrap();
+    fn register_source(
+        self: &Arc<Self>,
+        chunk_key: ChunkKey,
+        spec: SourceSpec,
+        priority: Priority,
+    ) -> RegisterResult {
         let source_key = spec.key().to_string();
 
-        // Dedup path: same for both variants.
-        if let Some(arc) = sources.get(&source_key) {
-            let arc = arc.clone();
-            drop(sources);
+        // Phase 1: under self.sources lock, either attach as a waiter on
+        // an existing source or install a fresh `Pending` placeholder for
+        // this source key.
+        //
+        // We MUST NOT call `downloader.try_submit` or `task_queue.try_submit`
+        // while holding this lock. Both can fire callbacks synchronously
+        // (downloader on queue-full / eviction). Those callbacks re-enter
+        // `complete_source`, which locks `self.sources` again on the same
+        // thread — a self-deadlock that wedged the cache after a few frames.
+        enum Slot {
+            Existing(Arc<Mutex<SourceState>>),
+            Fresh,
+        }
+        let slot = {
+            let mut sources = self.sources.lock().unwrap();
+            if let Some(arc) = sources.get(&source_key) {
+                Slot::Existing(arc.clone())
+            } else {
+                let arc = Arc::new(Mutex::new(SourceState::Pending {
+                    waiters: vec![chunk_key],
+                }));
+                sources.insert(source_key.clone(), arc);
+                Slot::Fresh
+            }
+        };
+
+        if let Slot::Existing(arc) = slot {
             drop(spec); // first observer's fetch/url is authoritative
             let mut s = arc.lock().unwrap();
-            match &mut *s {
+            return match &mut *s {
                 SourceState::Pending { waiters } => {
                     waiters.push(chunk_key);
                     log::trace!(
@@ -354,64 +412,74 @@ impl Inner {
                     );
                     RegisterResult::AlreadyDone(outcome.clone())
                 }
-            }
-        } else {
-            // First observer. Hold the sources lock across the dispatch so
-            // late observers always see a `Pending` entry to attach to.
-            match spec {
-                SourceSpec::Compute { key: _, fetch } => {
-                    match self.task_tx.try_send(Task::FetchSource {
+            };
+        }
+
+        // Phase 2: we're the first observer and we own the placeholder slot.
+        // Dispatch the fetch with no locks held.
+        match spec {
+            SourceSpec::Compute { key: _, fetch } => {
+                match self.task_queue.try_submit(
+                    chunk_key,
+                    priority,
+                    Task::FetchSource {
                         key: source_key.clone(),
                         fetch,
-                    }) {
-                        Ok(()) => {
-                            let arc = Arc::new(Mutex::new(SourceState::Pending {
-                                waiters: vec![chunk_key],
-                            }));
-                            sources.insert(source_key.clone(), arc);
-                            log::trace!("cache: source {} queued (chunk {:?})", source_key, chunk_key);
-                            RegisterResult::Queued
-                        }
-                        Err(_) => {
-                            log::trace!("cache: source {} dropped (worker queue full)", source_key);
-                            RegisterResult::QueueFull
-                        }
+                    },
+                ) {
+                    Ok(()) => {
+                        log::trace!("cache: source {} queued (chunk {:?})", source_key, chunk_key);
+                        RegisterResult::Queued
+                    }
+                    Err(_dropped) => {
+                        // Roll the placeholder forward to Done(Err) so any
+                        // concurrent waiters (the only chunk that could have
+                        // attached after we released the lock) get notified.
+                        log::trace!("cache: source {} dropped (cache queue full)", source_key);
+                        self.complete_source(
+                            source_key,
+                            Err(BackfillError::Transient("cache queue full".into())),
+                        );
+                        RegisterResult::QueueFull
                     }
                 }
-                SourceSpec::Download { key: _, url } => {
-                    let inner = self.clone();
-                    let key_for_done = source_key.clone();
-                    let on_done: OnDone = Box::new(move |result: DownloadResult| {
-                        let outcome: SourceOutcome = match result {
-                            Ok(Some(bytes)) => Ok(Some(Arc::new(bytes) as SourcePayload)),
-                            Ok(None) => Ok(None),
-                            Err(DownloadError::Transient(s)) => {
-                                Err(BackfillError::Transient(format!("download: {}", s)))
-                            }
-                        };
-                        inner.complete_source(key_for_done, outcome);
-                    });
+            }
+            SourceSpec::Download { key: _, url } => {
+                let inner = self.clone();
+                let key_for_done = source_key.clone();
+                let on_done: OnDone = Box::new(move |result: DownloadResult| {
+                    let outcome: SourceOutcome = match result {
+                        Ok(Some(bytes)) => Ok(Some(Arc::new(bytes) as SourcePayload)),
+                        Ok(None) => Ok(None),
+                        Err(DownloadError::Transient(s)) => {
+                            Err(BackfillError::Transient(format!("download: {}", s)))
+                        }
+                    };
+                    inner.complete_source(key_for_done, outcome);
+                });
 
-                    match self.downloader.try_submit(&url, on_done) {
-                        SubmitResult::Submitted => {
-                            let arc = Arc::new(Mutex::new(SourceState::Pending {
-                                waiters: vec![chunk_key],
-                            }));
-                            sources.insert(source_key.clone(), arc);
-                            log::trace!(
-                                "cache: source {} submitted to downloader (chunk {:?})",
-                                source_key,
-                                chunk_key
-                            );
-                            RegisterResult::Queued
-                        }
-                        SubmitResult::QueueFull => {
-                            log::trace!(
-                                "cache: source {} dropped (downloader queue full)",
-                                source_key
-                            );
-                            RegisterResult::QueueFull
-                        }
+                // Submit without holding self.sources. The downloader may
+                // synchronously fire `on_done` (queue full / eviction), which
+                // calls complete_source — that path now safely re-locks
+                // self.sources.
+                match self.downloader.try_submit(&url, chunk_key, priority, on_done) {
+                    SubmitResult::Submitted => {
+                        log::trace!(
+                            "cache: source {} submitted to downloader (chunk {:?})",
+                            source_key,
+                            chunk_key
+                        );
+                        RegisterResult::Queued
+                    }
+                    SubmitResult::QueueFull => {
+                        // The downloader already invoked our on_done with
+                        // Err synchronously — complete_source has run and
+                        // cleared the placeholder. Nothing more to do.
+                        log::trace!(
+                            "cache: source {} dropped (downloader queue full)",
+                            source_key
+                        );
+                        RegisterResult::QueueFull
                     }
                 }
             }
@@ -429,8 +497,7 @@ impl Inner {
 
     /// Mark a source as `Done(outcome)` and notify every chunk currently
     /// waiting on it. Called from both the synchronous `FetchSource` worker
-    /// path and the download callback path (where it runs on a downloader
-    /// thread once HTTP bytes have landed).
+    /// path and the download callback path.
     fn complete_source(self: &Arc<Self>, source_key: String, outcome: SourceOutcome) {
         let arc = {
             let sources = self.sources.lock().unwrap();
@@ -475,11 +542,17 @@ impl Inner {
         }
 
         for w in waiters {
+            // Each waiter chunk's priority is the one captured when its
+            // own dispatch_chunk ran. Look it up via the progress entry.
+            let priority = self
+                .chunks
+                .get(&w)
+                .map(|p| p.lock().unwrap().priority)
+                .unwrap_or_else(Priority::worst);
             if matches!(
-                self.satisfy(w, &source_key, outcome.clone()),
+                self.satisfy(w, &source_key, outcome.clone(), priority),
                 SatisfyResult::QueueFullOnExtract
             ) {
-                // Worker / downloader path: safe to mutate self.map directly.
                 self.map.insert(w, short_cooldown());
             }
         }
@@ -489,7 +562,13 @@ impl Inner {
     /// `QueueFullOnExtract` only when all sources are now resolved but
     /// the resulting Extract task couldn't be enqueued; caller must then
     /// move the chunk to a short cooldown.
-    fn satisfy(self: &Arc<Self>, chunk_key: ChunkKey, source_key: &str, outcome: SourceOutcome) -> SatisfyResult {
+    fn satisfy(
+        self: &Arc<Self>,
+        chunk_key: ChunkKey,
+        source_key: &str,
+        outcome: SourceOutcome,
+        priority: Priority,
+    ) -> SatisfyResult {
         let arc = match self.chunks.get(&chunk_key).map(|e| e.clone()) {
             Some(a) => a,
             None => return SatisfyResult::Ok,
@@ -505,9 +584,9 @@ impl Inner {
             }
         };
         if queue_extract {
-            match self.task_tx.try_send(Task::Extract(chunk_key)) {
+            match self.task_queue.try_submit(chunk_key, priority, Task::Extract) {
                 Ok(()) => SatisfyResult::Ok,
-                Err(_) => {
+                Err(_dropped) => {
                     log::debug!("cache: extract for {:?} dropped (queue full)", chunk_key);
                     self.chunks.remove(&chunk_key);
                     SatisfyResult::QueueFullOnExtract
@@ -571,6 +650,25 @@ impl Inner {
         self.map.insert(key, new_state);
     }
 
+    /// Handle a `TaskEntry` that the priority queue dropped (age / distance
+    /// / eviction). Acts as if the task ran and failed transiently:
+    /// `FetchSource` resolves with a Transient error so waiters back off;
+    /// `Extract` just cleans up progress and reverts the chunk to cooldown.
+    fn cancel_dropped_task(self: &Arc<Self>, entry: TaskEntry, reason: &str) {
+        match entry.task {
+            Task::FetchSource { key, fetch: _ } => {
+                log::trace!("cache: cancelling source {} ({})", key, reason);
+                self.complete_source(key, Err(BackfillError::Transient(reason.into())));
+            }
+            Task::Extract => {
+                let chunk_key = entry.chunk;
+                log::trace!("cache: cancelling extract for {:?} ({})", chunk_key, reason);
+                self.chunks.remove(&chunk_key);
+                self.map.insert(chunk_key, short_cooldown());
+            }
+        }
+    }
+
     fn is_out_of_bounds(&self, key: ChunkKey) -> bool {
         let extent = self.backfiller.voxel_extent();
         let scale = 1u64 << key.lod;
@@ -587,18 +685,97 @@ impl Inner {
     }
 }
 
-fn worker_loop(inner: Arc<Inner>, rx: Arc<Mutex<mpsc::Receiver<Task>>>) {
-    loop {
-        let task = {
-            let guard = rx.lock().unwrap();
-            match guard.recv() {
-                Ok(t) => t,
-                Err(_) => return,
+impl TaskQueue {
+    fn new(capacity: usize, max_age: Duration) -> Self {
+        Self {
+            inner: Mutex::new(TaskQueueInner {
+                entries: BTreeMap::new(),
+                next_seq: 0,
+                closed: false,
+            }),
+            not_empty: Condvar::new(),
+            capacity,
+            max_age,
+        }
+    }
+
+    /// Submit a task. On success returns `Ok(())`. On failure (queue is
+    /// full) returns the rejected `Task` so the caller can run its own
+    /// cancellation. We deliberately never evict to make room: the
+    /// caller's cooldown path is cheap, and avoiding eviction keeps
+    /// lifecycle simple — every queued task either runs or ages out.
+    fn try_submit(&self, chunk: ChunkKey, priority: Priority, task: Task) -> Result<(), Task> {
+        let mut q = self.inner.lock().unwrap();
+        if q.closed || q.entries.len() >= self.capacity {
+            return Err(task);
+        }
+        q.next_seq += 1;
+        let key = (priority.value(), q.next_seq);
+        q.entries.insert(
+            key,
+            TaskEntry {
+                chunk,
+                added_at: Instant::now(),
+                task,
+            },
+        );
+        self.not_empty.notify_one();
+        Ok(())
+    }
+
+    /// Block until either a non-stale entry is available (returned) or the
+    /// queue is closed. Entries dropped along the way (older than
+    /// `max_age`) are surfaced as `dropped` so the caller can run their
+    /// cancellation paths.
+    fn pop(&self) -> PopResult {
+        let mut q = self.inner.lock().unwrap();
+        let mut dropped: Vec<TaskEntry> = Vec::new();
+        loop {
+            if q.closed && q.entries.is_empty() {
+                return PopResult::Closed { dropped };
             }
-        };
-        match task {
-            Task::FetchSource { key, fetch } => inner.fetch_source(key, fetch),
-            Task::Extract(key) => inner.extract_chunk(key),
+            let Some((_, entry)) = q.entries.pop_first() else {
+                q = self.not_empty.wait(q).unwrap();
+                continue;
+            };
+            if entry.added_at.elapsed() > self.max_age {
+                dropped.push(entry);
+                continue;
+            }
+            return PopResult::Ready { entry, dropped };
+        }
+    }
+}
+
+enum PopResult {
+    Ready {
+        entry: TaskEntry,
+        dropped: Vec<TaskEntry>,
+    },
+    Closed {
+        dropped: Vec<TaskEntry>,
+    },
+}
+
+fn worker_loop(inner: Arc<Inner>) {
+    loop {
+        match inner.task_queue.pop() {
+            PopResult::Ready { entry, dropped } => {
+                for d in dropped {
+                    inner.cancel_dropped_task(d, "stale on pop");
+                }
+                let chunk = entry.chunk;
+                match entry.task {
+                    Task::FetchSource { key, fetch } => inner.fetch_source(key, fetch),
+                    Task::Extract => inner.extract_chunk(chunk),
+                }
+            }
+            PopResult::Closed { dropped } => {
+                for d in dropped {
+                    inner.cancel_dropped_task(d, "queue closed");
+                }
+                return;
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 use super::backfiller::{BackfillError, BackfillPlan};
 use super::backfillers::synthetic::SyntheticBackfiller;
+use super::priority::{LodView, Priority};
 use super::*;
 use crate::volume::{DrawingConfig, Image, PaintVolume, VoxelVolume};
 use std::path::PathBuf;
@@ -229,6 +230,39 @@ fn get_falls_back_to_coarser_lod_when_target_missing() {
     assert_eq!(volume.get([42.0, 17.0, 9.0], 1), 0x11);
     // Subsequent calls stay on the fallback path.
     assert_eq!(volume.get([100.0, 50.0, 12.0], 1), 0x11);
+}
+
+#[test]
+fn viewport_priority_orders_coarse_before_fine() {
+    // Same chunk position, coarse LOD should have a smaller numeric
+    // priority than fine LOD. Paint composes a local Viewport and uses it
+    // to compute priorities passed into state_or_fetch_with_priority.
+    let mut per_lod = vec![None; 3];
+    for lod in 0..=2 {
+        per_lod[lod] = Some(LodView {
+            center: [0, 0, 0],
+            rect_lo: [0, 0, 0],
+            rect_hi: [1, 1, 1],
+        });
+    }
+    let vp = Viewport { max_lod: 2, per_lod };
+    let coarse = vp.priority_for(ChunkKey::new(2, 0, 0, 0));
+    let mid = vp.priority_for(ChunkKey::new(1, 0, 0, 0));
+    let fine = vp.priority_for(ChunkKey::new(0, 0, 0, 0));
+    assert!(coarse < mid && mid < fine, "coarse < mid < fine: {:?} {:?} {:?}", coarse, mid, fine);
+
+    let center = vp.priority_for(ChunkKey::new(0, 0, 0, 0));
+    let edge = vp.priority_for(ChunkKey::new(0, 1, 1, 1));
+    assert!(center < edge, "center < edge: {:?} {:?}", center, edge);
+}
+
+#[test]
+fn priority_worst_is_worse_than_any_viewport_priority() {
+    // Direct-API callers that have no viewport context use Priority::worst().
+    // It must be larger than any priority a published viewport produces, so
+    // those calls don't preempt viewport-aware work.
+    let any = Priority::new(0, 0);
+    assert!(any < Priority::worst());
 }
 
 #[test]

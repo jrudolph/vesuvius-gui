@@ -4,28 +4,34 @@
 //! plus a thread pool that's sized for HTTP concurrency rather than CPU
 //! concurrency.
 //!
-//! Dedup lives one layer up: the cache's source map ensures only the first
-//! observer of a source key reaches `try_submit`. Other chunks that want the
-//! same source attach as waiters on the source's `Pending` state and get
-//! woken when its outcome lands. So this module is intentionally dumb — it
-//! does HTTP, fans the bytes back through `on_done`, and that's it.
+//! ## Priority queue + age pruning
 //!
-//! Submission is non-blocking (`try_submit`). The rendezvous channel between
-//! the submit side and the worker pool is the cap on outstanding HTTP work:
-//! when no worker is parked, `try_submit` returns `QueueFull` rather than
-//! buffering — so a panned-away viewport can't pile up stale fetches.
+//! Jobs feed a `BTreeMap` keyed by `(priority, seq)`. The paint loop submits
+//! coarse-LOD-first / center-first, so the BTreeMap naturally pops the
+//! most urgent work across panes. The only staleness check is age: jobs
+//! older than `MAX_AGE` are cancelled at pop with a Transient error so the
+//! cache rolls the chunk back to a short cooldown.
+//!
+//! Dedup remains a cache-layer responsibility — the downloader is
+//! intentionally dumb about URLs.
 
+use super::priority::{Priority, MAX_AGE};
+use super::state::ChunkKey;
 use reqwest::blocking::Client;
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 const DEFAULT_HTTP_WORKERS: usize = 32;
 const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 60;
+/// Generous outstanding-jobs cap. With age-based pruning the effective
+/// working set stays much smaller; this is just a guard against runaway
+/// growth.
+const DEFAULT_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone)]
 pub enum DownloadError {
-    /// Transport failure, 5xx, or the pool was unreachable. Caller may
+    /// Transport failure, 5xx, queue rejection, or stale-on-pop. Caller may
     /// retry.
     Transient(String),
 }
@@ -36,19 +42,43 @@ pub type OnDone = Box<dyn FnOnce(DownloadResult) + Send + 'static>;
 
 #[derive(Debug)]
 pub enum SubmitResult {
-    /// Job was handed to an idle worker.
+    /// Job was queued.
     Submitted,
-    /// No worker is parked; nothing was registered. Caller decides what to
-    /// do (typically: cool the chunk down and retry next frame).
+    /// Queue was full; nothing queued. Caller decides what to do
+    /// (typically: cool the chunk down and retry next frame). Note that
+    /// `on_done` is also invoked with a Transient error in this case, so
+    /// the cache's cancellation path runs uniformly with stale-pop
+    /// cancellation.
     QueueFull,
 }
 
 pub struct Downloader {
-    job_tx: SyncSender<Job>,
+    inner: Arc<DownloaderInner>,
 }
 
-struct Job {
+struct DownloaderInner {
+    queue: Mutex<Queue>,
+    not_empty: Condvar,
+    capacity: usize,
+    max_age: Duration,
+}
+
+struct Queue {
+    /// Key: (priority value, monotonic seq). Lower keys = popped first.
+    /// `next_seq` is the FIFO tiebreaker for entries with identical priority.
+    entries: BTreeMap<(u64, u64), Entry>,
+    next_seq: u64,
+    closed: bool,
+}
+
+struct Entry {
     url: String,
+    /// The cache chunk this download is on behalf of. Currently logged for
+    /// observability only — the downloader itself doesn't make decisions
+    /// based on it.
+    #[allow(dead_code)]
+    chunk: ChunkKey,
+    added_at: Instant,
     on_done: OnDone,
 }
 
@@ -58,8 +88,20 @@ impl Downloader {
     }
 
     pub fn with_workers(workers: usize) -> Self {
-        let (job_tx, job_rx) = mpsc::sync_channel::<Job>(0);
-        let job_rx = Arc::new(Mutex::new(job_rx));
+        Self::with_settings(workers, DEFAULT_QUEUE_CAPACITY, MAX_AGE)
+    }
+
+    pub fn with_settings(workers: usize, capacity: usize, max_age: Duration) -> Self {
+        let inner = Arc::new(DownloaderInner {
+            queue: Mutex::new(Queue {
+                entries: BTreeMap::new(),
+                next_seq: 0,
+                closed: false,
+            }),
+            not_empty: Condvar::new(),
+            capacity,
+            max_age,
+        });
 
         let client = Client::builder()
             .pool_max_idle_per_host(workers)
@@ -71,50 +113,95 @@ impl Downloader {
             .expect("failed to build reqwest client for cache Downloader");
 
         for i in 0..workers.max(1) {
-            let rx = job_rx.clone();
+            let inner = inner.clone();
             let client = client.clone();
             std::thread::Builder::new()
                 .name(format!("vesuvius-downloader-{}", i))
-                .spawn(move || worker_loop(rx, client))
+                .spawn(move || worker_loop(inner, client))
                 .expect("spawn downloader worker");
         }
 
-        Self { job_tx }
+        Self { inner }
     }
 
-    /// Non-blocking submission. On `QueueFull`, `on_done` is dropped (never
-    /// invoked) — the caller is responsible for rolling back whatever state
-    /// it set up in anticipation of the download.
-    pub fn try_submit(&self, url: &str, on_done: OnDone) -> SubmitResult {
-        match self.job_tx.try_send(Job {
-            url: url.to_string(),
-            on_done,
-        }) {
-            Ok(()) => {
+    /// Non-blocking submission with explicit priority + chunk identity.
+    ///
+    /// `chunk` is the cache chunk this download is on behalf of (used for
+    /// logging only — the downloader doesn't otherwise care).
+    ///
+    /// On `QueueFull`, `on_done` is invoked synchronously with
+    /// `Err(Transient(...))` so the caller's cancellation path runs
+    /// uniformly with stale-pop cancellation. Callers MUST NOT hold any
+    /// lock that `on_done` re-enters.
+    pub fn try_submit(&self, url: &str, chunk: ChunkKey, priority: Priority, on_done: OnDone) -> SubmitResult {
+        let rejected_on_done = {
+            let mut q = self.inner.queue.lock().unwrap();
+            if q.closed || q.entries.len() >= self.inner.capacity {
+                Some(on_done)
+            } else {
+                q.next_seq += 1;
+                let key = (priority.value(), q.next_seq);
+                q.entries.insert(
+                    key,
+                    Entry {
+                        url: url.to_string(),
+                        chunk,
+                        added_at: Instant::now(),
+                        on_done,
+                    },
+                );
+                self.inner.not_empty.notify_one();
+                None
+            }
+        };
+        match rejected_on_done {
+            None => {
                 log::trace!("downloader: submitted {}", url);
                 SubmitResult::Submitted
             }
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+            Some(on_done) => {
                 log::trace!("downloader: queue full, dropping {}", url);
+                on_done(Err(DownloadError::Transient("queue full".into())));
                 SubmitResult::QueueFull
             }
         }
     }
 }
 
-fn worker_loop(rx: Arc<Mutex<Receiver<Job>>>, client: Client) {
+impl Default for Downloader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
     loop {
-        let job = {
-            let guard = rx.lock().unwrap();
-            match guard.recv() {
-                Ok(j) => j,
-                Err(_) => return,
+        let entry: Entry = {
+            let mut q = inner.queue.lock().unwrap();
+            let max_age = inner.max_age;
+            loop {
+                if q.closed && q.entries.is_empty() {
+                    return;
+                }
+                let Some((_, entry)) = q.entries.pop_first() else {
+                    q = inner.not_empty.wait(q).unwrap();
+                    continue;
+                };
+                if entry.added_at.elapsed() > max_age {
+                    // Stale by age — cancel + loop.
+                    drop(q);
+                    log::trace!("downloader: dropping stale {}", entry.url);
+                    (entry.on_done)(Err(DownloadError::Transient("aged out".into())));
+                    q = inner.queue.lock().unwrap();
+                    continue;
+                }
+                break entry;
             }
         };
 
-        let t0 = std::time::Instant::now();
-        log::trace!("downloader: GET {}", job.url);
-        let outcome: DownloadResult = match client.get(&job.url).send() {
+        let t0 = Instant::now();
+        log::trace!("downloader: GET {}", entry.url);
+        let outcome: DownloadResult = match client.get(&entry.url).send() {
             Ok(resp) => {
                 let status = resp.status();
                 if status.as_u16() == 200 {
@@ -122,7 +209,7 @@ fn worker_loop(rx: Arc<Mutex<Receiver<Job>>>, client: Client) {
                         Ok(bytes) => {
                             log::trace!(
                                 "downloader: {} → 200 ({} bytes, {:?})",
-                                job.url,
+                                entry.url,
                                 bytes.len(),
                                 t0.elapsed()
                             );
@@ -131,12 +218,12 @@ fn worker_loop(rx: Arc<Mutex<Receiver<Job>>>, client: Client) {
                         Err(e) => Err(DownloadError::Transient(format!("read body: {}", e))),
                     }
                 } else if status.as_u16() == 404 {
-                    log::trace!("downloader: {} → 404 ({:?})", job.url, t0.elapsed());
+                    log::trace!("downloader: {} → 404 ({:?})", entry.url, t0.elapsed());
                     Ok(None)
                 } else {
                     log::debug!(
                         "downloader: {} → {} ({:?})",
-                        job.url,
+                        entry.url,
                         status.as_u16(),
                         t0.elapsed()
                     );
@@ -144,17 +231,11 @@ fn worker_loop(rx: Arc<Mutex<Receiver<Job>>>, client: Client) {
                 }
             }
             Err(e) => {
-                log::debug!("downloader: {} → transport error: {}", job.url, e);
+                log::debug!("downloader: {} → transport error: {}", entry.url, e);
                 Err(DownloadError::Transient(format!("transport: {}", e)))
             }
         };
 
-        (job.on_done)(outcome);
-    }
-}
-
-impl Default for Downloader {
-    fn default() -> Self {
-        Self::new()
+        (entry.on_done)(outcome);
     }
 }
