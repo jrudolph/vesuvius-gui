@@ -1,5 +1,8 @@
 use crate::{
-    cache::{backfillers::ome_zarr::OmeZarrBackfiller, ChunkCache, UnifiedVolume},
+    cache::{
+        backfillers::ome_zarr::OmeZarrBackfiller, backfillers::synthesized_lod::SynthesizedLodBackfiller,
+        ChunkBackfiller, ChunkCache, UnifiedVolume,
+    },
     downloader::SimpleDownloader,
     volume::{LayersMappedVolume, Volume, VolumeGrid500Mapped, VolumeGrid64x4Mapped, VoxelPaintVolume},
 };
@@ -310,7 +313,13 @@ impl NewVolumeReference {
                     VolumeLocation::LocalPath(path) => (OmeZarrContext::from_path(path), format!("file://{}", path)),
                 };
                 let cache_root = std::path::PathBuf::from(default_cache_dir_for_url(&source_key));
-                let backfiller = Arc::new(OmeZarrBackfiller::from_ome(id, ome));
+                // OME-Zarr volumes typically expose 4-6 native LODs. Pad
+                // with synthesized coarse levels so panes at extreme
+                // zoom-out still paint a downsampled preview instead of
+                // black. Cost is bounded: each synth chunk averages 8
+                // mmapped child chunks once and is then cached on disk.
+                let native: Arc<dyn ChunkBackfiller> = Arc::new(OmeZarrBackfiller::from_ome(id, ome));
+                let backfiller: Arc<dyn ChunkBackfiller> = Arc::new(SynthesizedLodBackfiller::new(native, 4));
                 let cache = ChunkCache::new(cache_root, backfiller);
                 UnifiedVolume::new(cache).into_volume()
             }

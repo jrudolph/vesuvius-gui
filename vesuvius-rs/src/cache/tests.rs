@@ -1,4 +1,5 @@
 use super::backfiller::{BackfillError, BackfillPlan};
+use super::backfillers::synthesized_lod::SynthesizedLodBackfiller;
 use super::backfillers::synthetic::SyntheticBackfiller;
 use super::priority::{LodView, Priority};
 use super::*;
@@ -301,6 +302,139 @@ fn get_uses_downsampled_xyz_convention_at_sfactor_gt_1() {
     // LOD-2 coord (25, 2, 2) → chunk x=0 → marker 0x20.
     cache.wait_for(ChunkKey::new(2, 0, 0, 0), Duration::from_secs(2));
     assert_eq!(volume.get([50.0, 5.0, 5.0], 2), 0x20);
+}
+
+#[test]
+fn synth_lod_one_level_above_native_averages_children() {
+    // Native backfiller exposes only LOD 0; per-chunk constant value =
+    // dz*4 + dy*2 + dx (0..=7). Wrap with SynthesizedLodBackfiller for one
+    // extra level → cache.max_lod() == 1.
+    //
+    // A synthesized LOD-1 chunk at (0,0,0) covers the world region spanned
+    // by LOD-0 chunks (dx,dy,dz) for d{x,y,z} ∈ {0,1}. Each output octant
+    // sits over exactly one of those children, and that child is uniformly
+    // filled, so each octant of the synth chunk should be uniformly filled
+    // with that child's constant value.
+    struct PerChunkConst;
+    impl ChunkBackfiller for PerChunkConst {
+        fn max_lod(&self) -> u8 {
+            0
+        }
+        fn voxel_extent(&self) -> [u32; 3] {
+            [256, 256, 256]
+        }
+        fn volume_id(&self) -> String {
+            "per-chunk-const".into()
+        }
+        fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            let marker = (key.z as u8) * 4 + (key.y as u8) * 2 + (key.x as u8);
+            let extract = Box::new(move |_inputs: &[_]| Ok(vec![marker; CHUNK_VOXELS]));
+            Ok(BackfillPlan { sources: Vec::new(), extract })
+        }
+    }
+
+    let root = tmp_root("synth-l1");
+    let inner: Arc<dyn ChunkBackfiller> = Arc::new(PerChunkConst);
+    let synth = Arc::new(SynthesizedLodBackfiller::new(inner, 1));
+    let cache = ChunkCache::new(&root, synth);
+    assert_eq!(cache.max_lod(), 1);
+
+    let state = cache.wait_for(ChunkKey::new(1, 0, 0, 0), Duration::from_secs(5));
+    let mmap = state
+        .as_resident()
+        .unwrap_or_else(|| panic!("synth L1 chunk should be resident: {:?}", state));
+
+    // Sample one voxel from each octant.
+    let probe = |ox: usize, oy: usize, oz: usize| {
+        let off = oz * CHUNK_SIDE * CHUNK_SIDE + oy * CHUNK_SIDE + ox;
+        mmap[off]
+    };
+    // (0,0,0) → child (0,0,0) → marker 0.
+    assert_eq!(probe(10, 10, 10), 0);
+    // (40, 10, 10) → child (1,0,0) → marker 1.
+    assert_eq!(probe(40, 10, 10), 1);
+    // (10, 40, 10) → child (0,1,0) → marker 2.
+    assert_eq!(probe(10, 40, 10), 2);
+    // (40, 40, 40) → child (1,1,1) → marker 7.
+    assert_eq!(probe(40, 40, 40), 7);
+}
+
+#[test]
+fn synth_lod_two_levels_above_native_recurses() {
+    // Native max_lod=0, extra_levels=2 → cache.max_lod()=2. The LOD-2 chunk
+    // depends on 8 synthesized LOD-1 chunks, which themselves depend on 8×8
+    // = 64 native LOD-0 chunks. Verifies that chunk-as-source dependencies
+    // recurse correctly through the cache.
+    //
+    // Use a uniform native value so the expected output is also uniform:
+    // averaging-of-averages preserves a constant value.
+    struct Const(u8);
+    impl ChunkBackfiller for Const {
+        fn max_lod(&self) -> u8 {
+            0
+        }
+        fn voxel_extent(&self) -> [u32; 3] {
+            [512, 512, 512]
+        }
+        fn volume_id(&self) -> String {
+            "synth-recurse".into()
+        }
+        fn plan(&self, _key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            let v = self.0;
+            let extract = Box::new(move |_inputs: &[_]| Ok(vec![v; CHUNK_VOXELS]));
+            Ok(BackfillPlan { sources: Vec::new(), extract })
+        }
+    }
+
+    let root = tmp_root("synth-l2");
+    let inner: Arc<dyn ChunkBackfiller> = Arc::new(Const(123));
+    let synth = Arc::new(SynthesizedLodBackfiller::new(inner, 2));
+    let cache = ChunkCache::new(&root, synth);
+    assert_eq!(cache.max_lod(), 2);
+
+    let state = cache.wait_for(ChunkKey::new(2, 0, 0, 0), Duration::from_secs(10));
+    let mmap = state
+        .as_resident()
+        .unwrap_or_else(|| panic!("synth L2 chunk should be resident: {:?}", state));
+    for &b in mmap.iter() {
+        assert_eq!(b, 123, "uniform source averaged through 2 synth levels");
+    }
+}
+
+#[test]
+fn unified_volume_renders_at_target_lod_above_native_max() {
+    // Drive UnifiedVolume::get at a target_lod beyond the native max so the
+    // fallback walk lands on a synthesized chunk. This is the regression
+    // path: at zoom small enough that target_lod > native_max, surface
+    // rendering used to paint black.
+    struct Const(u8);
+    impl ChunkBackfiller for Const {
+        fn max_lod(&self) -> u8 {
+            0
+        }
+        fn voxel_extent(&self) -> [u32; 3] {
+            [256, 256, 256]
+        }
+        fn volume_id(&self) -> String {
+            "synth-get".into()
+        }
+        fn plan(&self, _key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            let v = self.0;
+            let extract = Box::new(move |_inputs: &[_]| Ok(vec![v; CHUNK_VOXELS]));
+            Ok(BackfillPlan { sources: Vec::new(), extract })
+        }
+    }
+
+    let root = tmp_root("synth-volume-get");
+    let inner: Arc<dyn ChunkBackfiller> = Arc::new(Const(200));
+    let synth = Arc::new(SynthesizedLodBackfiller::new(inner, 1));
+    let cache = ChunkCache::new(&root, synth);
+    let volume = UnifiedVolume::new(cache.clone());
+
+    // sfactor=2 → target_lod=1, which is exactly cache.max_lod(). xyz is in
+    // LOD-1 coords; the LOD-1 chunk needed is the synthesized (0,0,0).
+    cache.wait_for(ChunkKey::new(1, 0, 0, 0), Duration::from_secs(5));
+    assert_eq!(volume.get([10.0, 10.0, 10.0], 2), 200);
 }
 
 #[test]

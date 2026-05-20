@@ -83,6 +83,14 @@ struct Inner {
     /// callbacks that re-enter `complete_source` on the same thread.
     sources: Mutex<HashMap<String, Arc<Mutex<SourceState>>>>,
     chunks: DashMap<ChunkKey, Arc<Mutex<ChunkProgress>>>,
+    /// Reverse index for `SourceSpec::Chunk` dependencies: when chunk `K`
+    /// transitions to `Resident`, `publish_resident(K, …)` drains
+    /// `pending_chunk_sources[K]` and completes each listed source key with
+    /// `K`'s `Arc<ChunkState>` as the payload. Source-key entries are
+    /// deduplicated by `register_source`'s Phase 1, so at most one entry per
+    /// child chunk lands here — multiple parents waiting on the same child
+    /// all attach as waiters on the same source state.
+    pending_chunk_sources: DashMap<ChunkKey, Vec<String>>,
     task_queue: TaskQueue,
     downloader: Arc<Downloader>,
 }
@@ -197,6 +205,7 @@ impl ChunkCache {
             backfiller,
             sources: Mutex::new(HashMap::new()),
             chunks: DashMap::new(),
+            pending_chunk_sources: DashMap::new(),
             task_queue,
             downloader,
         });
@@ -231,49 +240,7 @@ impl ChunkCache {
     }
 
     pub fn state_or_fetch_with_priority(&self, key: ChunkKey, priority: Priority) -> Arc<ChunkState> {
-        // Fast path: already-known state. Quick read of the shard, then
-        // drop the guard before any potentially-blocking work.
-        if let Some(entry) = self.inner.map.get(&key) {
-            let state = entry.clone();
-            drop(entry);
-            if let ChunkState::CooldownMiss { until } = state.as_ref() {
-                if SystemTime::now() < *until {
-                    return state;
-                }
-                // Cooldown expired — fall through to redispatch.
-            } else {
-                return state;
-            }
-        }
-
-        // Slow path: dispatch. We do this WITHOUT holding any DashMap shard.
-        // `or_insert_with` would hold a shard write lock across the closure,
-        // and `dispatch_chunk` can synchronously call `complete_source` →
-        // `self.map.insert(...)` (on this key, when a download fails fast),
-        // which would deadlock the shard.
-        //
-        // Instead, atomically claim a slot in `dispatching`. The first
-        // thread for a key wins; concurrent callers see the in-progress
-        // dispatch and return whatever's currently in `map` (or Pending).
-        let claimed = self
-            .inner
-            .dispatching
-            .insert(key, ())
-            .is_none();
-        if !claimed {
-            return self
-                .inner
-                .map
-                .get(&key)
-                .map(|e| e.clone())
-                .unwrap_or_else(|| Arc::new(ChunkState::Pending));
-        }
-
-        let inner = self.inner.clone();
-        let _guard = DispatchGuard { inner: inner.clone(), key };
-        let state = inner.dispatch_chunk(key, priority);
-        inner.map.insert(key, state.clone());
-        state
+        self.inner.state_or_fetch_with_priority(key, priority)
     }
 
     /// Cheap state lookup without dispatching a fetch. Returns `None` if no
@@ -336,6 +303,58 @@ fn short_cooldown() -> Arc<ChunkState> {
 }
 
 impl Inner {
+    /// Same semantics as `ChunkCache::state_or_fetch_with_priority` but
+    /// callable from inside cache internals (notably `register_source`'s
+    /// Chunk-variant handler, which dispatches a child chunk synchronously
+    /// without ever blocking a worker on its completion).
+    fn state_or_fetch_with_priority(self: &Arc<Self>, key: ChunkKey, priority: Priority) -> Arc<ChunkState> {
+        if let Some(entry) = self.map.get(&key) {
+            let state = entry.clone();
+            drop(entry);
+            if let ChunkState::CooldownMiss { until } = state.as_ref() {
+                if SystemTime::now() < *until {
+                    return state;
+                }
+            } else {
+                return state;
+            }
+        }
+
+        let claimed = self.dispatching.insert(key, ()).is_none();
+        if !claimed {
+            return self
+                .map
+                .get(&key)
+                .map(|e| e.clone())
+                .unwrap_or_else(|| Arc::new(ChunkState::Pending));
+        }
+
+        let _guard = DispatchGuard { inner: self.clone(), key };
+        let state = self.dispatch_chunk(key, priority);
+        self.map.insert(key, state.clone());
+        self.publish_resident(key, &state);
+        state
+    }
+
+    /// Called right after a chunk is written into `self.map`. If the new
+    /// state is `Resident`, drain `pending_chunk_sources[key]` and complete
+    /// each waiting source with the chunk's `Arc<ChunkState>` as payload.
+    /// Source completion is idempotent (`complete_source` no-ops on a
+    /// Done source), so double-fires from racing publishers are safe.
+    fn publish_resident(self: &Arc<Self>, key: ChunkKey, state: &Arc<ChunkState>) {
+        if !matches!(state.as_ref(), ChunkState::Resident(_)) {
+            return;
+        }
+        let waiters: Vec<String> = match self.pending_chunk_sources.remove(&key) {
+            Some((_, v)) => v,
+            None => return,
+        };
+        let payload: SourcePayload = state.clone();
+        for source_key in waiters {
+            self.complete_source(source_key, Ok(Some(payload.clone())));
+        }
+    }
+
     /// Drive one chunk from Missing to Pending. Plans + registers sources;
     /// queues either FetchSource / a download or (if all sources already
     /// Done) Extract.
@@ -510,6 +529,58 @@ impl Inner {
                             Err(BackfillError::Transient("cache queue full".into())),
                         );
                         RegisterResult::QueueFull
+                    }
+                }
+            }
+            SourceSpec::Chunk { key: _, chunk_key: child_key } => {
+                // Register our interest BEFORE dispatching the child. If
+                // dispatch happens to disk-hit and synchronously transition
+                // the child to Resident, the publish_resident call inside
+                // state_or_fetch_with_priority drains our entry and
+                // completes the source right then. complete_source is
+                // idempotent, so the post-dispatch check below double-firing
+                // is harmless — the second call no-ops on the already-Done
+                // source.
+                self.pending_chunk_sources
+                    .entry(child_key)
+                    .or_insert_with(Vec::new)
+                    .push(source_key.clone());
+
+                let child_state = self.state_or_fetch_with_priority(child_key, priority);
+                match child_state.as_ref() {
+                    ChunkState::Resident(_) => {
+                        // publish_resident either fired during the dispatch
+                        // call above or is about to via the disk path; in
+                        // both cases the source is (or will be) Done.
+                        log::trace!(
+                            "[{}] chunk dep on {} resident (chunk {})",
+                            source_key,
+                            child_key,
+                            chunk_key
+                        );
+                        RegisterResult::Queued
+                    }
+                    ChunkState::CooldownMiss { .. } => {
+                        // Child won't load — resolve our source as absent.
+                        log::trace!(
+                            "[{}] chunk dep on {} unresolvable (chunk {})",
+                            source_key,
+                            child_key,
+                            chunk_key
+                        );
+                        self.complete_source(source_key.clone(), Ok(None));
+                        RegisterResult::Queued
+                    }
+                    _ => {
+                        // Pending / Missing — publish_resident will satisfy
+                        // us when the child completes extract.
+                        log::trace!(
+                            "[{}] chunk dep on {} pending (chunk {})",
+                            source_key,
+                            child_key,
+                            chunk_key
+                        );
+                        RegisterResult::Queued
                     }
                 }
             }
@@ -768,7 +839,8 @@ impl Inner {
             }
         }
 
-        self.map.insert(key, new_state);
+        self.map.insert(key, new_state.clone());
+        self.publish_resident(key, &new_state);
     }
 
     /// Handle a `TaskEntry` that the priority queue dropped (age / distance

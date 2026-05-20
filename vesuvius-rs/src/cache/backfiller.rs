@@ -74,6 +74,19 @@ pub enum SourceSpec {
         /// any decompression.
         url: String,
     },
+    /// Depend on another cache chunk. The cache dispatches the child chunk
+    /// (no worker thread blocks waiting on it) and, when the child becomes
+    /// Resident, satisfies this source with the child's `Arc<ChunkState>`
+    /// as payload — extract closures downcast and call `as_resident()` to
+    /// access the child's mmap'd bytes. If the child enters a permanent /
+    /// cooldown state instead, the source resolves with `Ok(None)`.
+    ///
+    /// Used by `SynthesizedLodBackfiller` to express "this synthesized LOD
+    /// chunk is built from these 8 children at the next-finer LOD."
+    Chunk {
+        key: String,
+        chunk_key: super::state::ChunkKey,
+    },
 }
 
 impl SourceSpec {
@@ -81,6 +94,7 @@ impl SourceSpec {
         match self {
             SourceSpec::Compute { key, .. } => key,
             SourceSpec::Download { key, .. } => key,
+            SourceSpec::Chunk { key, .. } => key,
         }
     }
 }
