@@ -17,6 +17,7 @@ mod cache;
 mod disk;
 mod downloader;
 mod priority;
+mod spill;
 mod state;
 mod volume;
 

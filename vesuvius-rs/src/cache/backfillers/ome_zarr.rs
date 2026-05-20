@@ -23,6 +23,7 @@ use crate::cache::backfiller::{
 };
 use crate::cache::state::ChunkKey;
 use crate::cache::{CHUNK_SIDE, CHUNK_VOXELS};
+use memmap::Mmap;
 use std::sync::Arc;
 use vesuvius_zarr::{ChunkContext, OmeZarrContext, ZarrArray};
 
@@ -220,9 +221,15 @@ impl ChunkBackfiller for OmeZarrBackfiller {
                             // Local-fallback Compute payload, already
                             // decoded.
                             ctx_arc
+                        } else if let Ok(mmap_arc) = p.clone().downcast::<Mmap>() {
+                            // Download payload — bytes were spilled to disk
+                            // by the cache's on_done handler. Decode from
+                            // the mmap so we don't materialize the
+                            // compressed payload back into the heap.
+                            Arc::new(array_for_decode.decode_chunk_bytes(&mmap_arc[..]))
                         } else if let Ok(bytes_arc) = p.clone().downcast::<Vec<u8>>() {
-                            // Download payload: raw HTTP bytes. Decode here,
-                            // on the cache worker.
+                            // Fallback when spill write failed: bytes still
+                            // in memory.
                             Arc::new(array_for_decode.decode_chunk_bytes(&bytes_arc))
                         } else {
                             return Err(BackfillError::Permanent("source payload type".into()));

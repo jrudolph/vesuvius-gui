@@ -8,12 +8,11 @@
 //!
 //! Jobs feed a `BTreeMap` keyed by `(priority, seq)`. The paint loop submits
 //! coarse-LOD-first / center-first, so the BTreeMap naturally pops the
-//! most urgent work across panes. The only staleness check is age: jobs
-//! older than `MAX_AGE` are cancelled at pop with a Transient error so the
-//! cache rolls the chunk back to a short cooldown.
-//!
-//! Dedup remains a cache-layer responsibility — the downloader is
-//! intentionally dumb about URLs.
+//! most urgent work across panes. The queue is unbounded — cache-layer
+//! dedup (one entry per source key in `self.sources`) means we never
+//! submit the same URL twice, and the only staleness check is age: jobs
+//! older than `MAX_AGE` are cancelled at pop with a Transient error so
+//! the cache rolls the chunk back to a short cooldown.
 
 use super::priority::{Priority, MAX_AGE};
 use super::state::ChunkKey;
@@ -24,10 +23,6 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_HTTP_WORKERS: usize = 32;
 const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 60;
-/// Generous outstanding-jobs cap. With age-based pruning the effective
-/// working set stays much smaller; this is just a guard against runaway
-/// growth.
-const DEFAULT_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone)]
 pub enum DownloadError {
@@ -44,11 +39,8 @@ pub type OnDone = Box<dyn FnOnce(DownloadResult) + Send + 'static>;
 pub enum SubmitResult {
     /// Job was queued.
     Submitted,
-    /// Queue was full; nothing queued. Caller decides what to do
-    /// (typically: cool the chunk down and retry next frame). Note that
-    /// `on_done` is also invoked with a Transient error in this case, so
-    /// the cache's cancellation path runs uniformly with stale-pop
-    /// cancellation.
+    /// Downloader was shut down; nothing queued. `on_done` was invoked with
+    /// a Transient error so the cache's cancellation path runs uniformly.
     QueueFull,
 }
 
@@ -59,7 +51,6 @@ pub struct Downloader {
 struct DownloaderInner {
     queue: Mutex<Queue>,
     not_empty: Condvar,
-    capacity: usize,
     max_age: Duration,
 }
 
@@ -88,10 +79,10 @@ impl Downloader {
     }
 
     pub fn with_workers(workers: usize) -> Self {
-        Self::with_settings(workers, DEFAULT_QUEUE_CAPACITY, MAX_AGE)
+        Self::with_settings(workers, MAX_AGE)
     }
 
-    pub fn with_settings(workers: usize, capacity: usize, max_age: Duration) -> Self {
+    pub fn with_settings(workers: usize, max_age: Duration) -> Self {
         let inner = Arc::new(DownloaderInner {
             queue: Mutex::new(Queue {
                 entries: BTreeMap::new(),
@@ -99,7 +90,6 @@ impl Downloader {
                 closed: false,
             }),
             not_empty: Condvar::new(),
-            capacity,
             max_age,
         });
 
@@ -136,7 +126,7 @@ impl Downloader {
     pub fn try_submit(&self, url: &str, chunk: ChunkKey, priority: Priority, on_done: OnDone) -> SubmitResult {
         let rejected_on_done = {
             let mut q = self.inner.queue.lock().unwrap();
-            if q.closed || q.entries.len() >= self.inner.capacity {
+            if q.closed {
                 Some(on_done)
             } else {
                 q.next_seq += 1;
@@ -160,8 +150,8 @@ impl Downloader {
                 SubmitResult::Submitted
             }
             Some(on_done) => {
-                log::trace!("downloader: queue full, dropping {}", url);
-                on_done(Err(DownloadError::Transient("queue full".into())));
+                log::trace!("downloader: shutting down, dropping {}", url);
+                on_done(Err(DownloadError::Transient("downloader closed".into())));
                 SubmitResult::QueueFull
             }
         }

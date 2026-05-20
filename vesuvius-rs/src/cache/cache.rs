@@ -28,16 +28,20 @@
 //! priority order, so the BTreeMap naturally pops the most urgent work
 //! across all panes first.
 //!
-//! Pruning is intentionally minimal: workers drop entries older than
-//! `MAX_AGE` at pop time and run the cancellation path so chunks roll back
-//! to cooldown. No distance / viewport-based reprioritization — by the time
-//! work is dropped for age, the paint loop has long since moved on to a new
-//! frame that resubmitted the chunks it still wants.
+//! The queue is **unbounded**: dedup happens upstream (cache's source map
+//! ensures one source-key → one FetchSource enqueue; `satisfy` enqueues at
+//! most one Extract per chunk). Workers prune at two points:
+//!
+//!   * **Age:** entries older than `MAX_AGE` are dropped + cancelled at pop.
+//!   * **Already-met:** at pop, skip Extract for chunks that became
+//!     Resident through another path, and FetchSource for sources that
+//!     are already Done. Defensive against cooldown-retry races.
 
 use super::backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourcePayload, SourceSpec};
 use super::disk::DiskStore;
 use super::downloader::{DownloadError, DownloadResult, Downloader, OnDone, SubmitResult};
 use super::priority::{Priority, MAX_AGE};
+use super::spill::SpillStore;
 use super::state::{ChunkKey, ChunkState};
 use dashmap::DashMap;
 use std::collections::{BTreeMap, HashMap};
@@ -52,9 +56,6 @@ const PERMANENT_COOLDOWN: Duration = Duration::from_secs(60 * 60 * 24 * 365);
 /// the count low reduces the chance that a worker stalls behind a
 /// DashMap shard another worker is holding.
 const DEFAULT_WORKERS: usize = 2;
-/// Cap on outstanding cache-side tasks. With age-based pruning the effective
-/// working set stays small.
-const TASK_QUEUE_CAPACITY: usize = 128;
 
 pub struct ChunkCache {
     inner: Arc<Inner>,
@@ -71,6 +72,10 @@ struct Inner {
     /// access deadlocks.
     dispatching: DashMap<ChunkKey, ()>,
     disk: DiskStore,
+    /// On-disk spill for downloaded source bytes. Sits between the
+    /// downloader and Extract so the compressed payload doesn't live on
+    /// the heap.
+    spill: SpillStore,
     backfiller: Arc<dyn ChunkBackfiller>,
     /// `Mutex<HashMap>` rather than `DashMap` so claim-the-slot for a fresh
     /// source key is atomic. The lock is never held across `try_submit`
@@ -109,12 +114,12 @@ enum Task {
 }
 
 /// Priority queue for cache-side `Task`s. BTreeMap keyed by `(priority,
-/// seq)` so workers always pop the most-urgent submitted entry. The only
-/// staleness check is age — see the module docs.
+/// seq)` so workers always pop the most-urgent submitted entry. Unbounded;
+/// dedup happens at the cache layer (source-key + chunk-key uniqueness).
+/// The only staleness check is age — see the module docs.
 struct TaskQueue {
     inner: Mutex<TaskQueueInner>,
     not_empty: Condvar,
-    capacity: usize,
     max_age: Duration,
 }
 
@@ -168,12 +173,16 @@ impl ChunkCache {
         workers: usize,
         downloader: Arc<Downloader>,
     ) -> Self {
-        let task_queue = TaskQueue::new(TASK_QUEUE_CAPACITY, MAX_AGE);
+        let task_queue = TaskQueue::new(MAX_AGE);
+        let spill_root = root.join("spill");
+        let chunks_root = root;
+        let _ = std::fs::create_dir_all(&spill_root);
 
         let inner = Arc::new(Inner {
             map: DashMap::new(),
             dispatching: DashMap::new(),
-            disk: DiskStore::new(root),
+            disk: DiskStore::new(chunks_root),
+            spill: SpillStore::new(spill_root),
             backfiller,
             sources: Mutex::new(HashMap::new()),
             chunks: DashMap::new(),
@@ -493,8 +502,23 @@ impl Inner {
                 let inner = self.clone();
                 let key_for_done = source_key.clone();
                 let on_done: OnDone = Box::new(move |result: DownloadResult| {
+                    // Spill the bytes to disk as soon as they arrive so the
+                    // payload is mmap-backed by the time Extract picks it
+                    // up. This keeps the heap bounded even when many
+                    // downloads complete faster than the (limited) cache
+                    // workers can extract them.
                     let outcome: SourceOutcome = match result {
-                        Ok(Some(bytes)) => Ok(Some(Arc::new(bytes) as SourcePayload)),
+                        Ok(Some(bytes)) => match inner.spill.write_and_mmap(&key_for_done, &bytes) {
+                            Ok(mmap) => Ok(Some(Arc::new(mmap) as SourcePayload)),
+                            Err(e) => {
+                                log::warn!(
+                                    "cache: spill failed for {} ({}), falling back to in-memory",
+                                    key_for_done,
+                                    e
+                                );
+                                Ok(Some(Arc::new(bytes) as SourcePayload))
+                            }
+                        },
                         Ok(None) => Ok(None),
                         Err(DownloadError::Transient(s)) => {
                             Err(BackfillError::Transient(format!("download: {}", s)))
@@ -714,6 +738,21 @@ impl Inner {
         }
     }
 
+    fn is_chunk_resident(&self, key: ChunkKey) -> bool {
+        self.map
+            .get(&key)
+            .map(|s| matches!(s.as_ref(), ChunkState::Resident(_)))
+            .unwrap_or(false)
+    }
+
+    fn is_source_done(&self, source_key: &str) -> bool {
+        let sources = self.sources.lock().unwrap();
+        match sources.get(source_key) {
+            Some(arc) => matches!(*arc.lock().unwrap(), SourceState::Done(_)),
+            None => false,
+        }
+    }
+
     fn is_out_of_bounds(&self, key: ChunkKey) -> bool {
         let extent = self.backfiller.voxel_extent();
         let scale = 1u64 << key.lod;
@@ -731,7 +770,7 @@ impl Inner {
 }
 
 impl TaskQueue {
-    fn new(capacity: usize, max_age: Duration) -> Self {
+    fn new(max_age: Duration) -> Self {
         Self {
             inner: Mutex::new(TaskQueueInner {
                 entries: BTreeMap::new(),
@@ -739,19 +778,16 @@ impl TaskQueue {
                 closed: false,
             }),
             not_empty: Condvar::new(),
-            capacity,
             max_age,
         }
     }
 
-    /// Submit a task. On success returns `Ok(())`. On failure (queue is
-    /// full) returns the rejected `Task` so the caller can run its own
-    /// cancellation. We deliberately never evict to make room: the
-    /// caller's cooldown path is cheap, and avoiding eviction keeps
-    /// lifecycle simple — every queued task either runs or ages out.
+    /// Submit a task. Only fails if the queue is closed (shutdown). The
+    /// queue is otherwise unbounded; cache-layer dedup ensures we don't
+    /// queue duplicate Fetch/Extract tasks for the same key.
     fn try_submit(&self, chunk: ChunkKey, priority: Priority, task: Task) -> Result<(), Task> {
         let mut q = self.inner.lock().unwrap();
-        if q.closed || q.entries.len() >= self.capacity {
+        if q.closed {
             return Err(task);
         }
         q.next_seq += 1;
@@ -809,7 +845,25 @@ fn worker_loop(inner: Arc<Inner>) {
                 for d in dropped {
                     inner.cancel_dropped_task(d, "stale on pop");
                 }
+                // Skip-met: cooldown-retry races or duplicate enqueues can
+                // leave stale work in the queue. Drop it instead of doing
+                // redundant disk + decode work.
                 let chunk = entry.chunk;
+                match &entry.task {
+                    Task::Extract => {
+                        if inner.is_chunk_resident(chunk) {
+                            log::trace!("cache: skip Extract {:?} (already resident)", chunk);
+                            inner.chunks.remove(&chunk);
+                            continue;
+                        }
+                    }
+                    Task::FetchSource { key, .. } => {
+                        if inner.is_source_done(key) {
+                            log::trace!("cache: skip FetchSource {} (already done)", key);
+                            continue;
+                        }
+                    }
+                }
                 match entry.task {
                     Task::FetchSource { key, fetch } => inner.fetch_source(key, fetch),
                     Task::Extract => inner.extract_chunk(chunk),
