@@ -115,6 +115,14 @@ pub trait ZarrFileAccess: Send + Sync + Debug {
     fn load_array_def(&self) -> ZarrArrayDef;
     fn load_chunk(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<ChunkContext>;
     fn cache_missing(&self) -> bool;
+
+    /// URL the chunk at `chunk_no` would be fetched from, if this backend has
+    /// a remote source. Returns `None` for local-only backends. Used by the
+    /// unified cache to drive downloads through its own centralized
+    /// downloader instead of going through the per-backend disk cache.
+    fn chunk_url(&self, _array_def: &ZarrArrayDef, _chunk_no: &[usize]) -> Option<String> {
+        None
+    }
 }
 
 /// Apply a v2 compressor to a chunk file. Hoisted out of `ZarrArray::load_chunk_context`
@@ -323,6 +331,14 @@ impl ZarrFileAccess for RemoteZarrDirectory {
     fn load_chunk(&self, def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<ChunkContext> {
         self.chunk_file_for(def, chunk_no).map(|f| decompress_v2_chunk(def, f))
     }
+    fn chunk_url(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
+        let chunk_str = chunk_no
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(array_def.dimension_separator.as_deref().unwrap_or("."));
+        Some(format!("{}/{}", self.url, chunk_str))
+    }
     fn cache_missing(&self) -> bool {
         false
     }
@@ -446,6 +462,14 @@ impl ZarrFileAccess for BlockingRemoteZarrDirectory {
     fn cache_missing(&self) -> bool {
         true
     }
+    fn chunk_url(&self, array_def: &ZarrArrayDef, chunk_no: &[usize]) -> Option<String> {
+        let chunk_str = chunk_no
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(array_def.dimension_separator.as_deref().unwrap_or("."));
+        Some(format!("{}/{}", self.url, chunk_str))
+    }
 }
 
 pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(json: &str, source: &str) -> T {
@@ -504,6 +528,26 @@ impl<const N: usize> ZarrArray<N, u8> {
     /// downloading, caller should retry).
     pub fn cache_missing(&self) -> bool {
         self.access.cache_missing()
+    }
+
+    /// Remote URL for the chunk at `chunk_no`, or `None` if this array isn't
+    /// HTTP-backed. Together with `decode_chunk_bytes`, this lets callers
+    /// (e.g. the unified cache) drive downloads through their own pool
+    /// rather than going through the zarr-side disk cache.
+    pub fn chunk_url(&self, chunk_no: [usize; N]) -> Option<String> {
+        self.access.chunk_url(&self.def, &chunk_no)
+    }
+
+    /// Decode raw bytes for one native chunk per this array's compressor +
+    /// dtype. The bytes are the full chunk file as it sits on the server
+    /// (blosc-framed, zstd-framed, or raw u8 depending on `def.compressor`).
+    pub fn decode_chunk_bytes(&self, bytes: &[u8]) -> ChunkContext {
+        match &self.def.compressor {
+            Some(compressor) => match compressor.id {
+                ZarrCompressorId::Blosc => ChunkContext::Heap(BloscChunk::decompress_to_vec(bytes)),
+            },
+            None => ChunkContext::Heap(bytes.to_vec()),
+        }
     }
     pub fn from_path(path: &str) -> Self {
         Self::from_access(Arc::new(ZarrDirectory { path: path.to_string() }))

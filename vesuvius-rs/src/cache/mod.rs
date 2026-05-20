@@ -15,6 +15,7 @@
 mod backfiller;
 mod cache;
 mod disk;
+mod downloader;
 mod state;
 mod volume;
 
@@ -23,8 +24,9 @@ pub mod backfillers;
 #[cfg(test)]
 mod tests;
 
-pub use backfiller::{BackfillError, ChunkBackfiller};
+pub use backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourcePayload, SourceSpec};
 pub use cache::ChunkCache;
+pub use downloader::{DownloadError, Downloader};
 pub use state::{ChunkKey, ChunkState};
 pub use volume::UnifiedVolume;
 

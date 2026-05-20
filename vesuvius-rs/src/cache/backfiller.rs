@@ -47,16 +47,42 @@ pub type SourcePayload = Arc<dyn Any + Send + Sync>;
 ///   - `Err(e)`: transient/permanent failure — extract typically propagates.
 pub type SourceOutcome = Result<Option<SourcePayload>, BackfillError>;
 
-/// One fetchable input artifact.
-pub struct SourceSpec {
-    /// Globally unique identifier (URL, canonical path, …). Two SourceSpecs
-    /// with the same key are deduplicated: the first fetch runs, later ones
-    /// attach as waiters.
-    pub key: String,
-    /// Synchronous fetch. Called at most once per `key` across the lifetime
-    /// of the cache (until evicted). Runs on the cache's worker pool, so it
-    /// may block on I/O.
-    pub fetch: Box<dyn FnOnce() -> SourceOutcome + Send + 'static>,
+/// One fetchable input artifact. Two specs with the same key are
+/// deduplicated by the cache: the first observer's fetch (or download)
+/// runs, later observers attach as waiters and share the outcome.
+///
+/// `Download` is the async path: the cache hands the URL to its central
+/// downloader, gets bytes back without ever blocking a cache worker, and
+/// surfaces the raw bytes as the source payload. The expensive decode
+/// (blosc/zstd/c3d) belongs to the backfiller's `extract` closure, which
+/// runs on the cache worker pool — i.e. on CPU-sized concurrency, not
+/// I/O-sized.
+pub enum SourceSpec {
+    Compute {
+        key: String,
+        /// Synchronous fetch. Runs on the cache's worker pool. Use this for
+        /// in-process or local-disk sources where there's no benefit to
+        /// async dispatch.
+        fetch: Box<dyn FnOnce() -> SourceOutcome + Send + 'static>,
+    },
+    Download {
+        key: String,
+        /// HTTP URL. The cache submits this to its centralized downloader,
+        /// which delivers the raw bytes as the source payload
+        /// (`Arc<Vec<u8>>`). No decode happens here — the backfiller's
+        /// `extract` closure receives the raw bytes and is responsible for
+        /// any decompression.
+        url: String,
+    },
+}
+
+impl SourceSpec {
+    pub fn key(&self) -> &str {
+        match self {
+            SourceSpec::Compute { key, .. } => key,
+            SourceSpec::Download { key, .. } => key,
+        }
+    }
 }
 
 /// Plan for filling one 64³ cache chunk.

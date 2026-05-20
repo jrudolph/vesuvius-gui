@@ -131,6 +131,42 @@ impl BloscChunk<u8> {
         }
         data
     }
+
+    /// In-memory variant of `load_data_from_file`: decompress a blosc-framed
+    /// chunk straight from a byte slice. Used by the unified cache, which
+    /// downloads chunks itself rather than going through the zarr on-disk
+    /// cache.
+    pub fn decompress_to_vec(bytes: &[u8]) -> Vec<u8> {
+        let header = BloscHeader::from_bytes(&bytes[0..16]);
+        let num_blocks = header.num_blocks();
+        let mut offsets = Vec::with_capacity(num_blocks);
+        for i in 0..num_blocks {
+            offsets.push(u32::from_le_bytes([
+                bytes[16 + i * 4],
+                bytes[16 + i * 4 + 1],
+                bytes[16 + i * 4 + 2],
+                bytes[16 + i * 4 + 3],
+            ]));
+        }
+        let mut data = Vec::with_capacity(num_blocks * header.blocksize.max(1));
+        for i in 0..num_blocks {
+            let block_offset = offsets[i] as usize;
+            if block_offset + 4 >= bytes.len() {
+                panic!("blosc block {} offset out of bounds", i);
+            }
+            let block_compressed_length =
+                u32::from_le_bytes(bytes[block_offset..block_offset + 4].try_into().unwrap()) as usize;
+            let block_compressed_data = &bytes[block_offset + 4..block_offset + block_compressed_length + 4];
+            let block = match header.compressor {
+                BloscCompressor::Lz4 => lz4_compression::decompress::decompress(block_compressed_data)
+                    .unwrap_or_else(|_| vec![0; header.blocksize]),
+                BloscCompressor::Zstd => zstd_decompress(block_compressed_data),
+                _ => panic!("Unsupported blosc compressor: {:?}", header.compressor),
+            };
+            data.extend(block);
+        }
+        data
+    }
     pub fn load_data(filename: &str) -> Vec<u8> {
         let file = File::open(filename).unwrap();
         Self::load_data_from_file(&file)

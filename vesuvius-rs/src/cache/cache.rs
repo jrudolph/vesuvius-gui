@@ -28,8 +28,9 @@
 //! viewport while the current frame's chunks queue up behind hundreds of
 //! stale ones.
 
-use super::backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourceSpec};
+use super::backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourcePayload, SourceSpec};
 use super::disk::DiskStore;
+use super::downloader::{DownloadError, DownloadResult, Downloader, OnDone, SubmitResult};
 use super::state::{ChunkKey, ChunkState};
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -61,6 +62,7 @@ struct Inner {
     sources: Mutex<HashMap<String, Arc<Mutex<SourceState>>>>,
     chunks: DashMap<ChunkKey, Arc<Mutex<ChunkProgress>>>,
     task_tx: SyncSender<Task>,
+    downloader: Arc<Downloader>,
 }
 
 enum SourceState {
@@ -114,6 +116,15 @@ impl ChunkCache {
     }
 
     pub fn new_at(root: PathBuf, backfiller: Arc<dyn ChunkBackfiller>, workers: usize) -> Self {
+        Self::new_with_downloader(root, backfiller, workers, Arc::new(Downloader::new()))
+    }
+
+    pub fn new_with_downloader(
+        root: PathBuf,
+        backfiller: Arc<dyn ChunkBackfiller>,
+        workers: usize,
+        downloader: Arc<Downloader>,
+    ) -> Self {
         let (task_tx, task_rx) = mpsc::sync_channel::<Task>(TASK_QUEUE_CAPACITY);
         let task_rx = Arc::new(Mutex::new(task_rx));
 
@@ -124,6 +135,7 @@ impl ChunkCache {
             sources: Mutex::new(HashMap::new()),
             chunks: DashMap::new(),
             task_tx,
+            downloader,
         });
 
         for i in 0..workers.max(1) {
@@ -253,7 +265,7 @@ impl Inner {
         };
 
         let BackfillPlan { sources, extract } = plan;
-        let order: Vec<String> = sources.iter().map(|s| s.key.clone()).collect();
+        let order: Vec<String> = sources.iter().map(|s| s.key().to_string()).collect();
         let progress_arc = Arc::new(Mutex::new(ChunkProgress {
             order: order.clone(),
             remaining: order.len(),
@@ -283,7 +295,7 @@ impl Inner {
         // dispatch, and lets us bail on queue-full cleanly).
         let mut immediates: Vec<(String, SourceOutcome)> = Vec::new();
         for spec in sources {
-            let source_key = spec.key.clone();
+            let source_key = spec.key().to_string();
             match self.register_source(key, spec) {
                 RegisterResult::Queued | RegisterResult::AttachedPending => {}
                 RegisterResult::AlreadyDone(outcome) => immediates.push((source_key, outcome)),
@@ -315,13 +327,14 @@ impl Inner {
     }
 
     fn register_source(self: &Arc<Self>, chunk_key: ChunkKey, spec: SourceSpec) -> RegisterResult {
-        let SourceSpec { key: source_key, fetch } = spec;
         let mut sources = self.sources.lock().unwrap();
+        let source_key = spec.key().to_string();
+
+        // Dedup path: same for both variants.
         if let Some(arc) = sources.get(&source_key) {
             let arc = arc.clone();
             drop(sources);
-            // Don't run another fetch; the first observer's is authoritative.
-            drop(fetch);
+            drop(spec); // first observer's fetch/url is authoritative
             let mut s = arc.lock().unwrap();
             match &mut *s {
                 SourceState::Pending { waiters } => {
@@ -343,26 +356,63 @@ impl Inner {
                 }
             }
         } else {
-            // Fresh source: try to enqueue *while still holding the sources
-            // lock*. That way the worker can't pop the task and look up an
-            // entry that doesn't yet exist.
-            match self.task_tx.try_send(Task::FetchSource {
-                key: source_key.clone(),
-                fetch,
-            }) {
-                Ok(()) => {
-                    let arc = Arc::new(Mutex::new(SourceState::Pending {
-                        waiters: vec![chunk_key],
-                    }));
-                    sources.insert(source_key.clone(), arc);
-                    drop(sources);
-                    log::trace!("cache: source {} queued (chunk {:?})", source_key, chunk_key);
-                    RegisterResult::Queued
+            // First observer. Hold the sources lock across the dispatch so
+            // late observers always see a `Pending` entry to attach to.
+            match spec {
+                SourceSpec::Compute { key: _, fetch } => {
+                    match self.task_tx.try_send(Task::FetchSource {
+                        key: source_key.clone(),
+                        fetch,
+                    }) {
+                        Ok(()) => {
+                            let arc = Arc::new(Mutex::new(SourceState::Pending {
+                                waiters: vec![chunk_key],
+                            }));
+                            sources.insert(source_key.clone(), arc);
+                            log::trace!("cache: source {} queued (chunk {:?})", source_key, chunk_key);
+                            RegisterResult::Queued
+                        }
+                        Err(_) => {
+                            log::trace!("cache: source {} dropped (worker queue full)", source_key);
+                            RegisterResult::QueueFull
+                        }
+                    }
                 }
-                Err(_) => {
-                    drop(sources);
-                    log::trace!("cache: source {} dropped (queue full)", source_key);
-                    RegisterResult::QueueFull
+                SourceSpec::Download { key: _, url } => {
+                    let inner = self.clone();
+                    let key_for_done = source_key.clone();
+                    let on_done: OnDone = Box::new(move |result: DownloadResult| {
+                        let outcome: SourceOutcome = match result {
+                            Ok(Some(bytes)) => Ok(Some(Arc::new(bytes) as SourcePayload)),
+                            Ok(None) => Ok(None),
+                            Err(DownloadError::Transient(s)) => {
+                                Err(BackfillError::Transient(format!("download: {}", s)))
+                            }
+                        };
+                        inner.complete_source(key_for_done, outcome);
+                    });
+
+                    match self.downloader.try_submit(&url, on_done) {
+                        SubmitResult::Submitted => {
+                            let arc = Arc::new(Mutex::new(SourceState::Pending {
+                                waiters: vec![chunk_key],
+                            }));
+                            sources.insert(source_key.clone(), arc);
+                            log::trace!(
+                                "cache: source {} submitted to downloader (chunk {:?})",
+                                source_key,
+                                chunk_key
+                            );
+                            RegisterResult::Queued
+                        }
+                        SubmitResult::QueueFull => {
+                            log::trace!(
+                                "cache: source {} dropped (downloader queue full)",
+                                source_key
+                            );
+                            RegisterResult::QueueFull
+                        }
+                    }
                 }
             }
         }
@@ -373,9 +423,15 @@ impl Inner {
         source_key: String,
         fetch: Box<dyn FnOnce() -> SourceOutcome + Send + 'static>,
     ) {
-        let t0 = std::time::Instant::now();
         let outcome = fetch();
+        self.complete_source(source_key, outcome);
+    }
 
+    /// Mark a source as `Done(outcome)` and notify every chunk currently
+    /// waiting on it. Called from both the synchronous `FetchSource` worker
+    /// path and the download callback path (where it runs on a downloader
+    /// thread once HTTP bytes have landed).
+    fn complete_source(self: &Arc<Self>, source_key: String, outcome: SourceOutcome) {
         let arc = {
             let sources = self.sources.lock().unwrap();
             match sources.get(&source_key) {
@@ -406,10 +462,9 @@ impl Inner {
             },
         };
         log::debug!(
-            "cache: source {} resolved [{}] in {:?}, notifying {} waiter(s)",
+            "cache: source {} resolved [{}], notifying {} waiter(s)",
             source_key,
             outcome_label,
-            t0.elapsed(),
             waiters.len()
         );
 
@@ -424,7 +479,7 @@ impl Inner {
                 self.satisfy(w, &source_key, outcome.clone()),
                 SatisfyResult::QueueFullOnExtract
             ) {
-                // Worker-side path: safe to mutate self.map directly.
+                // Worker / downloader path: safe to mutate self.map directly.
                 self.map.insert(w, short_cooldown());
             }
         }
