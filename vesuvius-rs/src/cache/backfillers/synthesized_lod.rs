@@ -25,12 +25,68 @@ pub struct SynthesizedLodBackfiller {
 }
 
 impl SynthesizedLodBackfiller {
-    /// Wrap `inner` and expose an additional `extra_levels` LODs above
-    /// `inner.max_lod()`. Each extra level is built by 2× averaging from the
-    /// next-finer level (recursing through previously-synthesized levels).
-    pub fn new(inner: Arc<dyn ChunkBackfiller>, extra_levels: u8) -> Self {
+    /// Wrap `inner`, enabling synthesis only when the inner backfiller's
+    /// coarsest native LOD already collapses the whole volume to at most
+    /// `max_native_chunks_at_coarsest` chunks. Each synthesized level above
+    /// `inner.max_lod()` is materialized as a real cached chunk by averaging
+    /// 8 children at the next-finer LOD — and because every native chunk at
+    /// the coarsest level feeds into exactly one synth chunk per level above,
+    /// the **total** native work to render the whole volume at any synth
+    /// level is fixed at that coarsest-level chunk count.
+    ///
+    /// If the source isn't pyramidal enough (e.g. a single-level zarr, or an
+    /// OME-Zarr where the coarsest level still has thousands of chunks),
+    /// the gate fails and the wrapper is a passthrough — `max_lod()` reports
+    /// `inner.max_lod()` and `plan` delegates unchanged. This prevents the
+    /// cache from quietly building expensive synthetic pyramids out of raw
+    /// full-resolution data.
+    ///
+    /// When the gate passes, the wrapper adds enough synth levels to collapse
+    /// the volume to one chunk per axis — additional levels beyond that
+    /// would just pad with out-of-bounds zeros.
+    pub fn new(inner: Arc<dyn ChunkBackfiller>, max_native_chunks_at_coarsest: u32) -> Self {
+        let extra = recommended_extra_levels(inner.as_ref(), max_native_chunks_at_coarsest);
+        Self::with_extra_levels(inner, extra)
+    }
+
+    /// Direct constructor that takes an explicit `extra_levels` count and
+    /// skips the budget gate. Used by tests where the inner backfiller's
+    /// extent doesn't reflect a realistic scroll volume; production code
+    /// should prefer `new`.
+    pub fn with_extra_levels(inner: Arc<dyn ChunkBackfiller>, extra_levels: u8) -> Self {
         Self { inner, extra_levels }
     }
+}
+
+fn recommended_extra_levels(inner: &dyn ChunkBackfiller, budget: u32) -> u8 {
+    let m = inner.max_lod();
+    let extent = inner.voxel_extent();
+    let scale = 1u64 << m;
+    let chunk_world = 64u64 * scale;
+    // Chunks per axis at the coarsest native level. `div_ceil` so a partial
+    // chunk at the volume's far edge still counts.
+    let cx = (extent[0] as u64).div_ceil(chunk_world).max(1);
+    let cy = (extent[1] as u64).div_ceil(chunk_world).max(1);
+    let cz = (extent[2] as u64).div_ceil(chunk_world).max(1);
+    let native_total = cx.saturating_mul(cy).saturating_mul(cz);
+
+    if native_total > budget as u64 {
+        // Pyramid not collapsed enough at native max — synthesizing would
+        // pull in too many full-resolution chunks.
+        return 0;
+    }
+
+    // Add synth levels until the coarsest synth chunk count is 1 per axis.
+    // Cap at 8 just to bound the loop in pathological cases (lod is u8).
+    let (mut x, mut y, mut z) = (cx, cy, cz);
+    let mut extra: u8 = 0;
+    while (x > 1 || y > 1 || z > 1) && extra < 8 {
+        x = x.div_ceil(2);
+        y = y.div_ceil(2);
+        z = z.div_ceil(2);
+        extra += 1;
+    }
+    extra
 }
 
 impl ChunkBackfiller for SynthesizedLodBackfiller {

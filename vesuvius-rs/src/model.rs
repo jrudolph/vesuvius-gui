@@ -313,13 +313,15 @@ impl NewVolumeReference {
                     VolumeLocation::LocalPath(path) => (OmeZarrContext::from_path(path), format!("file://{}", path)),
                 };
                 let cache_root = std::path::PathBuf::from(default_cache_dir_for_url(&source_key));
-                // OME-Zarr volumes typically expose 4-6 native LODs. Pad
-                // with synthesized coarse levels so panes at extreme
-                // zoom-out still paint a downsampled preview instead of
-                // black. Cost is bounded: each synth chunk averages 8
-                // mmapped child chunks once and is then cached on disk.
+                // Pad pyramidal OME-Zarr volumes with synthesized coarse
+                // levels so panes at extreme zoom-out paint a downsampled
+                // preview instead of black. The wrapper gates itself off
+                // for sources that aren't already pyramidal — a coarsest
+                // native level over 32 chunks (any partial-pyramid /
+                // single-level zarr) bypasses synthesis entirely so we
+                // don't end up averaging thousands of full-res chunks.
                 let native: Arc<dyn ChunkBackfiller> = Arc::new(OmeZarrBackfiller::from_ome(id, ome));
-                let backfiller: Arc<dyn ChunkBackfiller> = Arc::new(SynthesizedLodBackfiller::new(native, 4));
+                let backfiller: Arc<dyn ChunkBackfiller> = Arc::new(SynthesizedLodBackfiller::new(native, 32));
                 let cache = ChunkCache::new(cache_root, backfiller);
                 UnifiedVolume::new(cache).into_volume()
             }
