@@ -473,6 +473,30 @@ impl<const N: usize> ZarrArray<N, u8> {
     fn load_chunk_context(&self, chunk_no: [usize; N]) -> Option<ChunkContext> {
         self.access.load_chunk(&self.def, &chunk_no)
     }
+
+    /// Array definition: shape and native chunk shape, both in zarr's
+    /// canonical order (ZYX for 3D arrays here). Callers that want to fill a
+    /// downstream cache one native chunk at a time read this to find chunk
+    /// boundaries.
+    pub fn def(&self) -> &ZarrArrayDef {
+        &self.def
+    }
+
+    /// Decoded bytes for one native chunk. Behaves as the cache layer used
+    /// to call internally: missing chunks return `None`, present chunks
+    /// return their decoded `ChunkContext` (either a heap `Vec<u8>` or an
+    /// `Mmap`-backed view, depending on the access impl).
+    pub fn load_chunk(&self, chunk_no: [usize; N]) -> Option<ChunkContext> {
+        self.access.load_chunk(&self.def, &chunk_no)
+    }
+
+    /// Whether `load_chunk` returning `None` is a definitive answer. `true`
+    /// for local and blocking-remote access (None = chunk really absent);
+    /// `false` for async-remote access (None = either absent or still
+    /// downloading, caller should retry).
+    pub fn cache_missing(&self) -> bool {
+        self.access.cache_missing()
+    }
     pub fn from_path(path: &str) -> Self {
         Self::from_access(Arc::new(ZarrDirectory { path: path.to_string() }))
     }
@@ -718,6 +742,13 @@ impl<const N: usize> ZarrContextBase<N> {
 impl<const N: usize> ZarrContext<N> {
     pub fn shape(&self) -> &[usize] {
         self.array.shape()
+    }
+
+    /// Underlying array — gives downstream caches a handle to fetch native
+    /// chunks directly (`array().load_chunk(...)`), bypassing the per-context
+    /// `RefCell` fast-path used by `get`.
+    pub fn array(&self) -> &ZarrArray<N, u8> {
+        &self.array
     }
 }
 

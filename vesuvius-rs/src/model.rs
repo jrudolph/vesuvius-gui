@@ -1,9 +1,7 @@
 use crate::{
+    cache::{backfillers::ome_zarr::OmeZarrBackfiller, ChunkCache, UnifiedVolume},
     downloader::SimpleDownloader,
-    volume::{
-        GrayScale, LayersMappedVolume, OmeZarrPaintVolume, Volume, VolumeGrid500Mapped, VolumeGrid64x4Mapped,
-        VoxelPaintVolume,
-    },
+    volume::{LayersMappedVolume, Volume, VolumeGrid500Mapped, VolumeGrid64x4Mapped, VoxelPaintVolume},
 };
 use std::{path::Path, sync::Arc};
 use vesuvius_zarr::{default_cache_dir_for_url, OmeZarrContext, ZarrArray};
@@ -303,15 +301,16 @@ impl NewVolumeReference {
                 let v = VolumeGrid64x4Mapped::from_data_dir(&volume_dir, downloader);
                 v.into_volume()
             }
-            NewVolumeReference::OmeZarr { location, .. } => match location {
-                VolumeLocation::RemoteUrl(url) => {
-                    OmeZarrPaintVolume::<GrayScale>::new(OmeZarrContext::from_url_to_default_cache_dir(url))
-                        .into_volume()
-                }
-                VolumeLocation::LocalPath(path) => {
-                    OmeZarrPaintVolume::<GrayScale>::new(OmeZarrContext::from_path(path)).into_volume()
-                }
-            },
+            NewVolumeReference::OmeZarr { id, location } => {
+                let (ome, source_key) = match location {
+                    VolumeLocation::RemoteUrl(url) => (OmeZarrContext::from_url_to_default_cache_dir(url), url.clone()),
+                    VolumeLocation::LocalPath(path) => (OmeZarrContext::from_path(path), format!("file://{}", path)),
+                };
+                let cache_root = std::path::PathBuf::from(default_cache_dir_for_url(&source_key));
+                let backfiller = Arc::new(OmeZarrBackfiller::from_ome(id, ome));
+                let cache = ChunkCache::new(cache_root, backfiller);
+                UnifiedVolume::new(cache).into_volume()
+            }
             NewVolumeReference::Zarr { location, .. } => match location {
                 VolumeLocation::RemoteUrl(url) => ZarrArray::from_url_to_default_cache_dir(url)
                     .into_ctx()

@@ -120,16 +120,19 @@ impl PaintVolume for UnifiedVolume {
             return;
         }
 
-        let chunk_world = 64 * scale;
-        let tile_min_uc = (min_uc.div_euclid(chunk_world)).max(0);
+        let chunk_world = 64 * scale; // one chunk covers this many world voxels on each axis
+        let pzoom = paint_zoom as i32;
+        // Chunk indices spanned by the viewport. div_euclid keeps negative
+        // viewport positions outside the chunk grid so the loop simply skips.
+        let tile_min_uc = min_uc.div_euclid(chunk_world).max(0);
         let tile_max_uc = max_uc.div_euclid(chunk_world);
-        let tile_min_vc = (min_vc.div_euclid(chunk_world)).max(0);
+        let tile_min_vc = min_vc.div_euclid(chunk_world).max(0);
         let tile_max_vc = max_vc.div_euclid(chunk_world);
         let tile_pc = pc.div_euclid(chunk_world);
         if tile_pc < 0 {
             return;
         }
-        // Intra-chunk plane offset in sample units.
+        // Sample (intra-chunk) coordinate on the plane axis at this LOD.
         let plane_sample = (pc.rem_euclid(chunk_world) / scale) as usize;
 
         for tu in tile_min_uc..=tile_max_uc {
@@ -145,35 +148,40 @@ impl PaintVolume for UnifiedVolume {
                     None => continue,
                 };
 
-                // Range of intra-chunk sample indices on this tile.
-                let chunk_min_u = (tu * chunk_world).max(min_uc) - tu * chunk_world;
-                let chunk_max_u = ((tu + 1) * chunk_world).min(max_uc) - tu * chunk_world;
-                let chunk_min_v = (tv * chunk_world).max(min_vc) - tv * chunk_world;
-                let chunk_max_v = ((tv + 1) * chunk_world).min(max_vc) - tv * chunk_world;
-                // Convert world offsets to sample indices.
-                let su_lo = (chunk_min_u / scale) as usize;
-                let su_hi = ((chunk_max_u + scale - 1) / scale) as usize;
-                let sv_lo = (chunk_min_v / scale) as usize;
-                let sv_hi = ((chunk_max_v + scale - 1) / scale) as usize;
+                // Iterate by destination pixel: for each pixel mapped into
+                // this chunk, look up the sample. This is the right
+                // ordering — stepping by sample units would skip world
+                // pixels whenever `scale > paint_zoom`, producing visible
+                // gaps at sfactor > 1.
+                let chunk_u_lo = tu * chunk_world;
+                let chunk_u_hi = chunk_u_lo + chunk_world;
+                let chunk_v_lo = tv * chunk_world;
+                let chunk_v_hi = chunk_v_lo + chunk_world;
 
-                let step = paint_zoom as usize;
-                for sv in (sv_lo..sv_hi.min(64)).step_by(step) {
-                    for su in (su_lo..su_hi.min(64)).step_by(step) {
+                // Both bounds are ceil((edge - origin) / pzoom): the smallest
+                // u_px with min_uc + u_px*pzoom >= edge. u_px_hi must use the
+                // same formula as u_px_lo or boundary pixels get skipped
+                // when (chunk_hi - min_uc) isn't divisible by pzoom — the
+                // "grid lines at zoomed-out LODs" symptom.
+                let ceil_div = |x: i32, d: i32| (x + d - 1).div_euclid(d);
+                let u_px_lo = ceil_div(chunk_u_lo - min_uc, pzoom).max(0);
+                let u_px_hi = ceil_div(chunk_u_hi - min_uc, pzoom).min(canvas_width as i32);
+                let v_px_lo = ceil_div(chunk_v_lo - min_vc, pzoom).max(0);
+                let v_px_hi = ceil_div(chunk_v_hi - min_vc, pzoom).min(canvas_height as i32);
+
+                for v_px in v_px_lo..v_px_hi {
+                    let world_v = min_vc + v_px * pzoom;
+                    let sample_v = ((world_v - chunk_v_lo) / scale) as usize;
+                    for u_px in u_px_lo..u_px_hi {
+                        let world_u = min_uc + u_px * pzoom;
+                        let sample_u = ((world_u - chunk_u_lo) / scale) as usize;
                         let mut s = [0usize; 3];
-                        s[u_coord] = su;
-                        s[v_coord] = sv;
+                        s[u_coord] = sample_u;
+                        s[v_coord] = sample_v;
                         s[plane_coord] = plane_sample;
                         let off = s[2] * 64 * 64 + s[1] * 64 + s[0];
                         let value = config.filter(mmap[off]);
-
-                        // World coord → pixel coord.
-                        let world_u = tu * chunk_world + su as i32 * scale;
-                        let world_v = tv * chunk_world + sv as i32 * scale;
-                        let u_px = (world_u - min_uc) / paint_zoom as i32;
-                        let v_px = (world_v - min_vc) / paint_zoom as i32;
-                        if u_px >= 0 && u_px < canvas_width as i32 && v_px >= 0 && v_px < canvas_height as i32 {
-                            buffer.set_gray(u_px as usize, v_px as usize, value);
-                        }
+                        buffer.set_gray(u_px as usize, v_px as usize, value);
                     }
                 }
             }

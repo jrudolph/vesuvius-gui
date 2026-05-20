@@ -84,6 +84,64 @@ fn paint_renders_synthetic_pattern() {
 }
 
 #[test]
+fn paint_no_gaps_with_pzoom_misaligned_at_chunk_edge() {
+    // Reproduces the chunk-boundary grid lines: paint_zoom=2 with min_uc set
+    // so (chunk_world - min_uc) is odd. The boundary pixel was previously
+    // dropped because u_px_hi used floor.
+    let root = tmp_root("paint-gridlines");
+    let backfiller = Arc::new(SyntheticBackfiller::new("test", [512, 512, 512], 2, |_, _, _, _| 0xab));
+    let cache = ChunkCache::new(&root, backfiller);
+    let volume = UnifiedVolume::new(cache.clone());
+
+    for cx in 0..3 {
+        for cy in 0..3 {
+            cache.wait_for(ChunkKey::new(1, cx, cy, 0), Duration::from_secs(2));
+        }
+    }
+
+    let mut img = Image::new(64, 64);
+    let cfg = DrawingConfig::default();
+    // paint_zoom=2, sfactor=2 → lod=1, scale=2, chunk_world=128.
+    // min_uc = xyz[0] - canvas/2 * pzoom = 129 - 64 = 65 (odd).
+    volume.paint([129, 129, 16], 0, 1, 2, 64, 64, 2, 2, &cfg, &mut img);
+
+    for (i, px) in img.data.iter().enumerate() {
+        assert_eq!(px.r(), 0xab, "pixel {} = {:?}, expected 0xab", i, px);
+    }
+}
+
+#[test]
+fn paint_no_gaps_at_higher_lod() {
+    // At LOD 1, each cache sample covers 2 world voxels. If we step by sample
+    // we'd leave every odd pixel black. Verify every pixel is set.
+    let root = tmp_root("paint-lod1");
+    let backfiller = Arc::new(SyntheticBackfiller::new(
+        "test",
+        [256, 256, 256],
+        2,
+        // Pattern: constant non-zero so any "skipped" pixel stands out.
+        |_, _, _, _| 0x42,
+    ));
+    let cache = ChunkCache::new(&root, backfiller);
+    let volume = UnifiedVolume::new(cache.clone());
+
+    for cx in 0..2 {
+        for cy in 0..2 {
+            cache.wait_for(ChunkKey::new(1, cx, cy, 0), Duration::from_secs(2));
+        }
+    }
+
+    let mut img = Image::new(64, 64);
+    let cfg = DrawingConfig::default();
+    // sfactor=2 → lod=1. paint_zoom=1 so world step matches pixel step.
+    volume.paint([64, 64, 16], 0, 1, 2, 64, 64, 2, 1, &cfg, &mut img);
+
+    for (i, px) in img.data.iter().enumerate() {
+        assert_eq!(px.r(), 0x42, "pixel {} = {:?}, expected 0x42", i, px);
+    }
+}
+
+#[test]
 fn second_open_picks_up_disk_cache() {
     let root = tmp_root("persist");
     let key = ChunkKey::new(0, 0, 0, 0);

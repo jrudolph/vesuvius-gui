@@ -290,10 +290,7 @@ impl DecodedCache {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let tid = std::thread::current().id();
-        let tmp = parent.join(format!(
-            "sub_{:05}.{}.tmp.{}.{:?}",
-            flat, DECODED_SUFFIX, n, tid
-        ));
+        let tmp = parent.join(format!("sub_{:05}.{}.tmp.{}.{:?}", flat, DECODED_SUFFIX, n, tid));
         if let Err(e) = std::fs::write(&tmp, bytes) {
             log::warn!("decoded-cache: write({}) failed: {}", tmp.display(), e);
             let _ = std::fs::remove_file(&tmp);
