@@ -345,30 +345,30 @@ impl Inner {
     /// `self.map.insert(key, …)` for this same key from here.
     fn dispatch_chunk(self: &Arc<Self>, key: ChunkKey, priority: Priority) -> Arc<ChunkState> {
         if let Some(mmap) = self.disk.try_load(key) {
-            log::trace!("cache: chunk {:?} hit disk", key);
+            log::trace!("[{}] disk hit", key);
             return Arc::new(ChunkState::Resident(mmap));
         }
         if self.is_out_of_bounds(key) {
-            log::trace!("cache: chunk {:?} out of bounds", key);
+            log::trace!("[{}] out of bounds", key);
             return long_cooldown();
         }
 
-        log::debug!("cache: dispatching chunk {:?}", key);
         let plan = match self.backfiller.plan(key) {
             Ok(p) => p,
             Err(BackfillError::OutOfBounds) => return long_cooldown(),
             Err(BackfillError::Permanent(reason)) => {
-                log::warn!("unified-cache: plan({:?}) permanent: {}", key, reason);
+                log::warn!("[{}] permanent (plan): {}", key, reason);
                 return long_cooldown();
             }
             Err(BackfillError::Transient(reason)) => {
-                log::debug!("unified-cache: plan({:?}) transient: {}", key, reason);
+                log::debug!("[{}] transient (plan): {}", key, reason);
                 return cooldown();
             }
         };
 
         let BackfillPlan { sources, extract } = plan;
         let order: Vec<String> = sources.iter().map(|s| s.key().to_string()).collect();
+        log::debug!("[{}] miss → fetching {} source(s)", key, order.len());
         let progress_arc = Arc::new(Mutex::new(ChunkProgress {
             order: order.clone(),
             remaining: order.len(),
@@ -383,7 +383,7 @@ impl Inner {
             return match self.task_queue.try_submit(key, priority, Task::Extract) {
                 Ok(()) => Arc::new(ChunkState::Pending),
                 Err(dropped) => {
-                    log::trace!("cache: extract for {:?} dropped at dispatch (queue full)", key);
+                    log::debug!("[{}] dropped: extract queue full (dispatch)", key);
                     self.chunks.remove(&key);
                     drop(dropped);
                     short_cooldown()
@@ -401,7 +401,7 @@ impl Inner {
                 RegisterResult::Queued | RegisterResult::AttachedPending => {}
                 RegisterResult::AlreadyDone(outcome) => immediates.push((source_key, outcome)),
                 RegisterResult::QueueFull => {
-                    log::trace!("cache: chunk {:?} aborted at dispatch (source queue full)", key);
+                    log::debug!("[{}] dropped: source queue full (dispatch)", key);
                     self.chunks.remove(&key);
                     return short_cooldown();
                 }
@@ -414,7 +414,7 @@ impl Inner {
             match self.satisfy(key, &sk, outcome, priority) {
                 SatisfyResult::Ok => {}
                 SatisfyResult::QueueFullOnExtract => {
-                    log::trace!("cache: chunk {:?} extract dropped at dispatch", key);
+                    log::debug!("[{}] dropped: extract queue full (immediate)", key);
                     return short_cooldown();
                 }
             }
@@ -462,11 +462,7 @@ impl Inner {
             return match &mut *s {
                 SourceState::Pending { waiters } => {
                     waiters.push(chunk_key);
-                    log::trace!(
-                        "cache: source {} dedup-pending (chunk {:?} attached)",
-                        source_key,
-                        chunk_key
-                    );
+                    log::trace!("[{}] attach (chunk {})", source_key, chunk_key);
                     RegisterResult::AttachedPending
                 }
                 SourceState::Done {
@@ -478,7 +474,7 @@ impl Inner {
                     // waits for this chunk too.
                     *remaining_consumers += 1;
                     log::trace!(
-                        "cache: source {} dedup-done (chunk {:?} → immediate satisfy, refcount {})",
+                        "[{}] reuse (chunk {}, refcount {})",
                         source_key,
                         chunk_key,
                         remaining_consumers
@@ -501,14 +497,14 @@ impl Inner {
                     },
                 ) {
                     Ok(()) => {
-                        log::trace!("cache: source {} queued (chunk {:?})", source_key, chunk_key);
+                        log::trace!("[{}] queued (chunk {})", source_key, chunk_key);
                         RegisterResult::Queued
                     }
                     Err(_dropped) => {
                         // Roll the placeholder forward to Done(Err) so any
                         // concurrent waiters (the only chunk that could have
                         // attached after we released the lock) get notified.
-                        log::trace!("cache: source {} dropped (cache queue full)", source_key);
+                        log::trace!("[{}] dropped: cache queue full", source_key);
                         self.complete_source(
                             source_key,
                             Err(BackfillError::Transient("cache queue full".into())),
@@ -530,11 +526,7 @@ impl Inner {
                         Ok(Some(bytes)) => match inner.spill.write_and_mmap(&key_for_done, &bytes) {
                             Ok(mmap) => Ok(Some(Arc::new(mmap) as SourcePayload)),
                             Err(e) => {
-                                log::warn!(
-                                    "cache: spill failed for {} ({}), falling back to in-memory",
-                                    key_for_done,
-                                    e
-                                );
+                                log::warn!("[{}] spill failed ({}); falling back to in-memory", key_for_done, e);
                                 Ok(Some(Arc::new(bytes) as SourcePayload))
                             }
                         },
@@ -552,21 +544,14 @@ impl Inner {
                 // self.sources.
                 match self.downloader.try_submit(&url, chunk_key, priority, on_done) {
                     SubmitResult::Submitted => {
-                        log::trace!(
-                            "cache: source {} submitted to downloader (chunk {:?})",
-                            source_key,
-                            chunk_key
-                        );
+                        log::trace!("[{}] submitted (chunk {})", source_key, chunk_key);
                         RegisterResult::Queued
                     }
                     SubmitResult::QueueFull => {
                         // The downloader already invoked our on_done with
                         // Err synchronously — complete_source has run and
                         // cleared the placeholder. Nothing more to do.
-                        log::trace!(
-                            "cache: source {} dropped (downloader queue full)",
-                            source_key
-                        );
+                        log::trace!("[{}] dropped: downloader queue full", source_key);
                         RegisterResult::QueueFull
                     }
                 }
@@ -592,7 +577,7 @@ impl Inner {
             match sources.get(&source_key) {
                 Some(a) => a.clone(),
                 None => {
-                    log::trace!("cache: source {} evicted before completion", source_key);
+                    log::trace!("[{}] evicted before completion", source_key);
                     return;
                 }
             }
@@ -626,8 +611,8 @@ impl Inner {
                 BackfillError::OutOfBounds => "oob",
             },
         };
-        log::debug!(
-            "cache: source {} resolved [{}], notifying {} waiter(s)",
+        log::trace!(
+            "[{}] resolved {} → {} waiter(s)",
             source_key,
             outcome_label,
             waiters.len()
@@ -685,7 +670,7 @@ impl Inner {
             match self.task_queue.try_submit(chunk_key, priority, Task::Extract) {
                 Ok(()) => SatisfyResult::Ok,
                 Err(_dropped) => {
-                    log::debug!("cache: extract for {:?} dropped (queue full)", chunk_key);
+                    log::debug!("[{}] dropped: extract queue full", chunk_key);
                     self.chunks.remove(&chunk_key);
                     SatisfyResult::QueueFullOnExtract
                 }
@@ -697,7 +682,7 @@ impl Inner {
 
     fn extract_chunk(self: &Arc<Self>, key: ChunkKey) {
         let t0 = std::time::Instant::now();
-        log::trace!("cache: extract start for chunk {:?}", key);
+        log::trace!("[{}] extract start", key);
         let (_, arc) = match self.chunks.remove(&key) {
             Some(v) => v,
             None => return,
@@ -722,26 +707,33 @@ impl Inner {
             Ok(bytes) => match self.disk.write_atomic(key, &bytes) {
                 Ok(()) => match self.disk.try_load(key) {
                     Some(mmap) => {
-                        log::debug!("cache: chunk {:?} resident after {:?}", key, t0.elapsed());
+                        log::debug!("[{}] ready ({:?})", key, t0.elapsed());
                         Arc::new(ChunkState::Resident(mmap))
                     }
                     None => {
-                        log::warn!("unified-cache: chunk {:?} written but mmap reload failed", key);
+                        log::warn!("[{}] write ok but mmap reload failed", key);
                         cooldown()
                     }
                 },
                 Err(e) => {
-                    log::warn!("unified-cache: disk write for {:?} failed: {}", key, e);
+                    log::warn!("[{}] disk write failed: {}", key, e);
                     cooldown()
                 }
             },
             Err(BackfillError::OutOfBounds) => long_cooldown(),
             Err(BackfillError::Permanent(reason)) => {
-                log::warn!("unified-cache: chunk {:?} permanently unavailable: {}", key, reason);
+                log::warn!("[{}] permanent: {}", key, reason);
                 long_cooldown()
             }
             Err(BackfillError::Transient(reason)) => {
-                log::debug!("unified-cache: chunk {:?} transient extract error: {}", key, reason);
+                // Aged-out / cancelled fetches aren't a chunk failure — they
+                // just mean the viewport moved on before the source landed.
+                // Surface them as cancellations so they don't look like errors.
+                if reason.contains("aged out") || reason.contains("queue closed") {
+                    log::trace!("[{}] cancelled: {}", key, reason);
+                } else {
+                    log::debug!("[{}] transient: {}", key, reason);
+                }
                 cooldown()
             }
         };
@@ -770,7 +762,7 @@ impl Inner {
                     false
                 };
                 if should_evict {
-                    log::trace!("cache: evicting source {} (last consumer extracted)", source_key);
+                    log::trace!("[{}] evict (last consumer)", source_key);
                     sources.remove(source_key);
                 }
             }
@@ -786,12 +778,12 @@ impl Inner {
     fn cancel_dropped_task(self: &Arc<Self>, entry: TaskEntry, reason: &str) {
         match entry.task {
             Task::FetchSource { key, fetch: _ } => {
-                log::trace!("cache: cancelling source {} ({})", key, reason);
+                log::trace!("[{}] cancel: {}", key, reason);
                 self.complete_source(key, Err(BackfillError::Transient(reason.into())));
             }
             Task::Extract => {
                 let chunk_key = entry.chunk;
-                log::trace!("cache: cancelling extract for {:?} ({})", chunk_key, reason);
+                log::debug!("[{}] dropped: {}", chunk_key, reason);
                 self.chunks.remove(&chunk_key);
                 self.map.insert(chunk_key, short_cooldown());
             }
@@ -912,14 +904,14 @@ fn worker_loop(inner: Arc<Inner>) {
                 match &entry.task {
                     Task::Extract => {
                         if inner.is_chunk_resident(chunk) {
-                            log::trace!("cache: skip Extract {:?} (already resident)", chunk);
+                            log::trace!("[{}] skip extract (already ready)", chunk);
                             inner.chunks.remove(&chunk);
                             continue;
                         }
                     }
                     Task::FetchSource { key, .. } => {
                         if inner.is_source_done(key) {
-                            log::trace!("cache: skip FetchSource {} (already done)", key);
+                            log::trace!("[{}] skip fetch (already done)", key);
                             continue;
                         }
                     }

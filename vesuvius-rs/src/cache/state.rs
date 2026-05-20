@@ -1,4 +1,5 @@
 use memmap::Mmap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -19,6 +20,12 @@ pub struct ChunkKey {
 impl ChunkKey {
     pub fn new(lod: u8, x: u32, y: u32, z: u32) -> Self {
         Self { lod, x, y, z }
+    }
+}
+
+impl fmt::Display for ChunkKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "L{}:{},{},{}", self.lod, self.x, self.y, self.z)
     }
 }
 

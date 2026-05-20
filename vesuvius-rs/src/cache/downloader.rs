@@ -146,11 +146,11 @@ impl Downloader {
         };
         match rejected_on_done {
             None => {
-                log::trace!("downloader: submitted {}", url);
+                log::trace!("[{}] submitted", url);
                 SubmitResult::Submitted
             }
             Some(on_done) => {
-                log::trace!("downloader: shutting down, dropping {}", url);
+                log::trace!("[{}] dropped: downloader closed", url);
                 on_done(Err(DownloadError::Transient("downloader closed".into())));
                 SubmitResult::QueueFull
             }
@@ -180,7 +180,7 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
                 if entry.added_at.elapsed() > max_age {
                     // Stale by age — cancel + loop.
                     drop(q);
-                    log::trace!("downloader: dropping stale {}", entry.url);
+                    log::trace!("[{}] aged out", entry.url);
                     (entry.on_done)(Err(DownloadError::Transient("aged out".into())));
                     q = inner.queue.lock().unwrap();
                     continue;
@@ -190,38 +190,28 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
         };
 
         let t0 = Instant::now();
-        log::trace!("downloader: GET {}", entry.url);
+        log::trace!("[{}] GET", entry.url);
         let outcome: DownloadResult = match client.get(&entry.url).send() {
             Ok(resp) => {
                 let status = resp.status();
                 if status.as_u16() == 200 {
                     match resp.bytes() {
                         Ok(bytes) => {
-                            log::trace!(
-                                "downloader: {} → 200 ({} bytes, {:?})",
-                                entry.url,
-                                bytes.len(),
-                                t0.elapsed()
-                            );
+                            log::trace!("[{}] 200 ({} bytes, {:?})", entry.url, bytes.len(), t0.elapsed());
                             Ok(Some(bytes.to_vec()))
                         }
                         Err(e) => Err(DownloadError::Transient(format!("read body: {}", e))),
                     }
                 } else if status.as_u16() == 404 {
-                    log::trace!("downloader: {} → 404 ({:?})", entry.url, t0.elapsed());
+                    log::trace!("[{}] 404 ({:?})", entry.url, t0.elapsed());
                     Ok(None)
                 } else {
-                    log::debug!(
-                        "downloader: {} → {} ({:?})",
-                        entry.url,
-                        status.as_u16(),
-                        t0.elapsed()
-                    );
+                    log::debug!("[{}] {} ({:?})", entry.url, status.as_u16(), t0.elapsed());
                     Err(DownloadError::Transient(format!("status {}", status.as_u16())))
                 }
             }
             Err(e) => {
-                log::debug!("downloader: {} → transport error: {}", entry.url, e);
+                log::debug!("[{}] transport error: {}", entry.url, e);
                 Err(DownloadError::Transient(format!("transport: {}", e)))
             }
         };

@@ -197,7 +197,9 @@ fn paint_falls_back_to_coarser_lod_when_target_missing() {
 fn get_falls_back_to_coarser_lod_when_target_missing() {
     // Same setup as the paint test: LOD 0 chunks refused, LOD 1 returns 0x11.
     // VoxelVolume::get must return the LOD-1 byte when the target chunk
-    // isn't resident.
+    // isn't resident — and must do so without any caller pre-warming the
+    // coarser LOD, since surface/PPM renderers reach `get()` without going
+    // through `UnifiedVolume::paint`.
     struct LodGated;
     impl ChunkBackfiller for LodGated {
         fn max_lod(&self) -> u8 {
@@ -223,13 +225,82 @@ fn get_falls_back_to_coarser_lod_when_target_missing() {
     let cache = ChunkCache::new(&root, Arc::new(LodGated));
     let volume = UnifiedVolume::new(cache.clone());
 
-    cache.wait_for(ChunkKey::new(1, 0, 0, 0), Duration::from_secs(2));
+    // No manual pre-warm: `get()` itself must kick the coarser-LOD fetch.
+    // Poll until the dispatched L1 chunk lands (the synthetic backfiller is
+    // near-instant but still asynchronous).
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if volume.get([42.0, 17.0, 9.0], 1) == 0x11 {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "L1 fallback never resolved");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 
-    // First call dispatches LOD 0 (→ permanent cooldown) and finds the LOD-1
-    // peek resident; should already return 0x11.
-    assert_eq!(volume.get([42.0, 17.0, 9.0], 1), 0x11);
-    // Subsequent calls stay on the fallback path.
+    // Same target chunk hits the hot slot; a different target chunk that
+    // happens to share the L1 parent re-walks the pyramid and lands on L1
+    // again (L1 (0,0,0,0) covers x∈[0,128), y,z∈[0,128)).
+    assert_eq!(volume.get([43.0, 18.0, 10.0], 1), 0x11);
     assert_eq!(volume.get([100.0, 50.0, 12.0], 1), 0x11);
+}
+
+#[test]
+fn get_uses_downsampled_xyz_convention_at_sfactor_gt_1() {
+    // VoxelVolume::get takes `xyz` in voxel coords at the requested
+    // downsampling (the convention used by VolumeGrid64x4Mapped, ZarrContext,
+    // and the ObjVolume / PPMVolume callers, which pre-divide world coords
+    // by sfactor before calling get). The cache MUST NOT re-divide by scale,
+    // or surface painting at zoom < 1 (sfactor ≥ 2) ends up looking at the
+    // wrong 3D position — visible as "no coarser-LOD fallback at zoom < 1".
+    //
+    // Encoding: a chunk at LOD L, x-index X carries marker (L << 4) | X.
+    // LOD 1 is refused so the sfactor=2 path must reach LOD 2 via fallback.
+    struct PositionMarked;
+    impl ChunkBackfiller for PositionMarked {
+        fn max_lod(&self) -> u8 {
+            3
+        }
+        fn voxel_extent(&self) -> [u32; 3] {
+            [1024, 1024, 1024]
+        }
+        fn volume_id(&self) -> String {
+            "position-marked".into()
+        }
+        fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            if key.lod == 1 {
+                return Err(BackfillError::Permanent("no L1".into()));
+            }
+            let marker = (key.lod << 4) | (key.x as u8 & 0x0f);
+            let extract = Box::new(move |_inputs: &[_]| Ok(vec![marker; CHUNK_VOXELS]));
+            Ok(BackfillPlan { sources: Vec::new(), extract })
+        }
+    }
+
+    let root = tmp_root("get-coord-convention");
+    let cache = ChunkCache::new(&root, Arc::new(PositionMarked));
+    let volume = UnifiedVolume::new(cache.clone());
+
+    // sfactor=2 → target_lod=1. xyz=[200, 5, 5] is in LOD-1 coords:
+    //   correct: shift to LOD 2 → (100, 2, 2) → LOD-2 chunk x=1 → 0x21.
+    //   broken (double-divide): scale away → LOD-2 chunk x=0 → 0x20.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if volume.get([200.0, 5.0, 5.0], 2) == 0x21 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "L2 fallback for sfactor=2 never resolved at the right chunk"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Same hot-slot target chunk: a nearby coord reuses the chosen L2 chunk.
+    assert_eq!(volume.get([201.0, 6.0, 6.0], 2), 0x21);
+
+    // Different target chunk → re-walks; xyz=[50, 5, 5] at LOD 1 →
+    // LOD-2 coord (25, 2, 2) → chunk x=0 → marker 0x20.
+    cache.wait_for(ChunkKey::new(2, 0, 0, 0), Duration::from_secs(2));
+    assert_eq!(volume.get([50.0, 5.0, 5.0], 2), 0x20);
 }
 
 #[test]

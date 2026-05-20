@@ -37,10 +37,11 @@ impl DiskStore {
         let mmap = unsafe { MmapOptions::new().map(&file).ok()? };
         if mmap.len() != CHUNK_VOXELS {
             log::warn!(
-                "unified-cache: file {} has wrong size {} (expected {})",
-                path.display(),
+                "[{}] wrong size {} (expected {}) at {}",
+                key,
                 mmap.len(),
-                CHUNK_VOXELS
+                CHUNK_VOXELS,
+                path.display()
             );
             return None;
         }

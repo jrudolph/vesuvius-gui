@@ -61,10 +61,10 @@ impl SpillStore {
         // left behind for the next run to clean up.
         if let Err(e) = std::fs::remove_file(&path) {
             log::trace!(
-                "spill: failed to unlink {} for source {} ({}); leaving on disk",
-                path.display(),
+                "[{}] spill unlink failed: {} (leaving {} on disk)",
                 source_key,
-                e
+                e,
+                path.display()
             );
         }
         Ok(mmap)

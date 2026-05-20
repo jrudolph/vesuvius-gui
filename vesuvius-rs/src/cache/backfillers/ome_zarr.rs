@@ -95,12 +95,9 @@ impl ChunkBackfiller for OmeZarrBackfiller {
 
         let definitive_missing = array.cache_missing();
         let n_sources = (cz_hi - cz_lo + 1) * (cy_hi - cy_lo + 1) * (cx_hi - cx_lo + 1);
-        log::debug!(
-            "ome-zarr plan: lod={} key=({},{},{}) → {} native sources (range cz={}..={}, cy={}..={}, cx={}..={})",
-            key.lod,
-            key.x,
-            key.y,
-            key.z,
+        log::trace!(
+            "[{}] plan → {} native source(s) (cz={}..={}, cy={}..={}, cx={}..={})",
+            key,
             n_sources,
             cz_lo,
             cz_hi,
@@ -129,14 +126,10 @@ impl ChunkBackfiller for OmeZarrBackfiller {
                             let source_key_log = source_key.clone();
                             let fetch: Box<dyn FnOnce() -> SourceOutcome + Send + 'static> = Box::new(move || {
                                 let t0 = std::time::Instant::now();
-                                log::trace!("ome-zarr local source fetch start: {}", source_key_log);
+                                log::trace!("[{}] local fetch start", source_key_log);
                                 match array_clone.load_chunk(coord) {
                                     Some(ctx) => {
-                                        log::trace!(
-                                            "ome-zarr local source fetch done: {} ({:?})",
-                                            source_key_log,
-                                            t0.elapsed()
-                                        );
+                                        log::trace!("[{}] local fetch done ({:?})", source_key_log, t0.elapsed());
                                         Ok(Some(Arc::new(ctx) as SourcePayload))
                                     }
                                     None => {
@@ -262,12 +255,9 @@ impl ChunkBackfiller for OmeZarrBackfiller {
                     }
                 }
             }
-            log::debug!(
-                "ome-zarr extract: lod={} key=({},{},{}) loaded={} missing={} elapsed={:?}",
-                key_dbg.lod,
-                key_dbg.x,
-                key_dbg.y,
-                key_dbg.z,
+            log::trace!(
+                "[{}] extract: loaded={} missing={} ({:?})",
+                key_dbg,
                 loaded,
                 missing,
                 started.elapsed()

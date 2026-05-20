@@ -10,6 +10,26 @@
 //! LODs into the same region. Pre-dispatch in `paint()` happens coarse-first
 //! so the bounded task queue gives priority to the wider, viewport-covering
 //! parent chunks: a low-res preview shows up promptly while detail streams in.
+//!
+//! `get()` is the per-voxel sampler used by surface (ObjVolume) and PPM
+//! renderers that don't go through `UnifiedVolume::paint`. It can't rely on
+//! a prior pre-dispatch pass, so on a target-LOD miss it dispatches every
+//! coarser LOD along the same column and picks the first resident one. The
+//! per-volume hot slot caches that chosen `(lod, chunk_state)` keyed by the
+//! target-LOD chunk so subsequent pixels in the same target chunk skip the
+//! pyramid walk entirely.
+//!
+//! ## Coordinate conventions
+//!
+//! * `paint()` takes `xyz: [i32; 3]` in **world voxel coords** (LOD 0). The
+//!   per-LOD chunk lookup divides by `64 * (1 << lod)` to land on the right
+//!   chunk and the rendering loop knows how to step samples per pixel.
+//! * `get()` follows the `VoxelVolume::get` convention used everywhere else
+//!   in the codebase (see `VolumeGrid64x4Mapped`, `ZarrContext`, and
+//!   `PPMVolume`/`ObjVolume` callers): `xyz` is in **voxel coords at the
+//!   requested downsampling** — the caller has already divided world coords
+//!   by `downsampling`. This is the convention surface painting depends on,
+//!   so do NOT redivide here.
 
 use super::cache::ChunkCache;
 use super::priority::{LodView, Viewport};
@@ -20,18 +40,19 @@ use std::sync::Arc;
 
 pub struct UnifiedVolume {
     cache: ChunkCache,
-    // Per-volume hot slot for the last chunk touched by `get` at the target
-    // LOD. `paint()` clears this between frames via `reset_for_painting`.
-    // `Volume` clones produce fresh `UnifiedVolume` instances with their own
-    // slot via the `shared()` constructor, so the `RefCell` is never shared
-    // across threads.
+    // Per-volume hot slot for the last target chunk touched by `get`. The
+    // cached `chosen` may be a coarser-LOD parent when the target chunk
+    // wasn't resident on first hit. `paint()` and external callers clear it
+    // between frames via `reset_for_painting`. `Volume` clones produce fresh
+    // `UnifiedVolume` instances with their own slot via the `shared()`
+    // constructor, so the `RefCell` is never shared across threads.
     local: RefCell<LocalSlot>,
 }
 
 #[derive(Default)]
 struct LocalSlot {
-    key: Option<ChunkKey>,
-    state: Option<Arc<ChunkState>>,
+    target_key: Option<ChunkKey>,
+    chosen: Option<(u8, Arc<ChunkState>)>,
 }
 
 impl UnifiedVolume {
@@ -46,28 +67,10 @@ impl UnifiedVolume {
         &self.cache
     }
 
-    /// Per-pixel chunk lookup with the hot-slot shortcut. Dispatches a fetch
-    /// for `key` if it's not yet known to the cache.
-    fn chunk_state(&self, key: ChunkKey) -> Arc<ChunkState> {
-        {
-            let b = self.local.borrow();
-            if b.key == Some(key) {
-                if let Some(s) = &b.state {
-                    return s.clone();
-                }
-            }
-        }
-        let state = self.cache.state_or_fetch(key);
-        let mut b = self.local.borrow_mut();
-        b.key = Some(key);
-        b.state = Some(state.clone());
-        state
-    }
-
     fn drop_hot_slot(&self) {
         let mut b = self.local.borrow_mut();
-        b.key = None;
-        b.state = None;
+        b.target_key = None;
+        b.chosen = None;
     }
 }
 
@@ -82,40 +85,89 @@ impl VoxelVolume for UnifiedVolume {
     }
 
     fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        // Per the `VoxelVolume::get` convention shared with VolumeGrid64x4Mapped,
+        // ZarrContext, and PPMVolume callers (notably `ObjVolume::paint`, which
+        // passes `[x / sfactor, y / sfactor, z / sfactor]`): `xyz` is in
+        // voxel-coords at the requested downsampling. We do NOT re-divide by
+        // scale here. To consult coarser LODs we shift right; to consult finer
+        // LODs (only when target_lod exceeds the volume's `max_lod`) we shift
+        // left.
         let target_lod = lod_for(downsampling.max(1) as u8);
         let max_lod = self.cache.max_lod();
 
-        // Target LOD: dispatch if missing, hot-slot the result.
-        let scale_t = 1u32 << target_lod;
-        let sx = (xyz[0] as i64 / scale_t as i64).max(0) as u32;
-        let sy = (xyz[1] as i64 / scale_t as i64).max(0) as u32;
-        let sz = (xyz[2] as i64 / scale_t as i64).max(0) as u32;
-        let key_t = ChunkKey::new(target_lod, sx / 64, sy / 64, sz / 64);
-        let state = self.chunk_state(key_t);
-        if let Some(mmap) = state.as_resident() {
-            let off = ((sz & 63) as usize) * 64 * 64 + ((sy & 63) as usize) * 64 + (sx & 63) as usize;
-            return mmap[off];
-        }
+        let target_sx = (xyz[0] as i64).max(0) as u64;
+        let target_sy = (xyz[1] as i64).max(0) as u64;
+        let target_sz = (xyz[2] as i64).max(0) as u64;
+        let key_t = ChunkKey::new(
+            target_lod,
+            (target_sx / 64) as u32,
+            (target_sy / 64) as u32,
+            (target_sz / 64) as u32,
+        );
 
-        // Walk up the pyramid: first resident parent wins. Peek-only — we
-        // don't kick fetches from `get`; `paint` is the dispatcher.
-        for lod_try in (target_lod + 1)..=max_lod {
-            let scale = 1u32 << lod_try;
-            let sx_l = (xyz[0] as i64 / scale as i64).max(0) as u32;
-            let sy_l = (xyz[1] as i64 / scale as i64).max(0) as u32;
-            let sz_l = (xyz[2] as i64 / scale as i64).max(0) as u32;
-            let key = ChunkKey::new(lod_try, sx_l / 64, sy_l / 64, sz_l / 64);
-            if let Some(s) = self.cache.peek(key) {
-                if let Some(mmap) = s.as_resident() {
-                    let off = ((sz_l & 63) as usize) * 64 * 64
-                        + ((sy_l & 63) as usize) * 64
-                        + (sx_l & 63) as usize;
-                    return mmap[off];
+        // Hot slot keyed by the target chunk: if we've already resolved this
+        // target chunk (either to itself or to a coarser parent) this frame,
+        // skip the pyramid walk and just sample.
+        {
+            let b = self.local.borrow();
+            if b.target_key == Some(key_t) {
+                if let Some((lod_use, s)) = &b.chosen {
+                    if let Some(mmap) = s.as_resident() {
+                        return sample_at(target_sx, target_sy, target_sz, target_lod, *lod_use, mmap);
+                    }
                 }
             }
         }
-        0
+
+        // Walk target → coarsest (or just `max_lod` when the requested target
+        // is coarser than anything the volume has), dispatching each. Surface
+        // and PPM renderers reach `get()` without going through
+        // `UnifiedVolume::paint`, so we can't assume a prior pre-dispatch
+        // primed the coarser LODs — kick the fetches here.
+        let walk_lo = target_lod.min(max_lod);
+        let walk_hi = max_lod;
+        let mut chosen: Option<(u8, Arc<ChunkState>)> = None;
+        for lod_try in walk_lo..=walk_hi {
+            let (lx, ly, lz) = coord_at_lod(target_sx, target_sy, target_sz, target_lod, lod_try);
+            let key = ChunkKey::new(lod_try, (lx / 64) as u32, (ly / 64) as u32, (lz / 64) as u32);
+            let s = self.cache.state_or_fetch(key);
+            if s.as_resident().is_some() {
+                chosen = Some((lod_try, s));
+                break;
+            }
+        }
+
+        let Some((lod_use, state)) = chosen else {
+            // Nothing resident yet. Don't poison the hot slot — a later
+            // pixel in this frame might land after the dispatch completes.
+            return 0;
+        };
+        let mmap = state.as_resident().expect("just checked resident");
+        let value = sample_at(target_sx, target_sy, target_sz, target_lod, lod_use, mmap);
+
+        let mut b = self.local.borrow_mut();
+        b.target_key = Some(key_t);
+        b.chosen = Some((lod_use, state));
+        value
     }
+}
+
+/// Map a target-LOD voxel coord to its corresponding voxel coord at `lod_use`.
+/// Shifts right when going coarser, left when going finer.
+fn coord_at_lod(sx: u64, sy: u64, sz: u64, from_lod: u8, to_lod: u8) -> (u64, u64, u64) {
+    if to_lod >= from_lod {
+        let shift = to_lod - from_lod;
+        (sx >> shift, sy >> shift, sz >> shift)
+    } else {
+        let shift = from_lod - to_lod;
+        (sx << shift, sy << shift, sz << shift)
+    }
+}
+
+fn sample_at(sx: u64, sy: u64, sz: u64, from_lod: u8, to_lod: u8, mmap: &[u8]) -> u8 {
+    let (lx, ly, lz) = coord_at_lod(sx, sy, sz, from_lod, to_lod);
+    let off = ((lz & 63) as usize) * 64 * 64 + ((ly & 63) as usize) * 64 + ((lx & 63) as usize);
+    mmap[off]
 }
 
 /// Build the paint-loop's view of the chunk grid across all LODs it intends
