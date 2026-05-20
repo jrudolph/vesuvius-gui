@@ -48,9 +48,12 @@ use std::time::{Duration, Instant, SystemTime};
 const COOLDOWN: Duration = Duration::from_secs(10);
 const SHORT_COOLDOWN: Duration = Duration::from_millis(150);
 const PERMANENT_COOLDOWN: Duration = Duration::from_secs(60 * 60 * 24 * 365);
-const DEFAULT_WORKERS: usize = 4;
-/// Generous cap on outstanding cache-side tasks. With per-frame distance
-/// pruning the effective working set stays much smaller.
+/// Small worker pool — extract + decode is CPU-bound but lock-light. Keeping
+/// the count low reduces the chance that a worker stalls behind a
+/// DashMap shard another worker is holding.
+const DEFAULT_WORKERS: usize = 2;
+/// Cap on outstanding cache-side tasks. With age-based pruning the effective
+/// working set stays small.
 const TASK_QUEUE_CAPACITY: usize = 128;
 
 pub struct ChunkCache {
@@ -59,6 +62,14 @@ pub struct ChunkCache {
 
 struct Inner {
     map: DashMap<ChunkKey, Arc<ChunkState>>,
+    /// Chunks currently being dispatched. Acts as an atomic claim so two
+    /// threads racing on the same key don't both run `dispatch_chunk`. We
+    /// can't use `map.entry().or_insert_with` for this because the
+    /// `or_insert_with` closure runs inside a shard-write lock, and
+    /// `dispatch_chunk` synchronously triggers `complete_source` paths
+    /// that may try to insert into the same shard — re-entrant DashMap
+    /// access deadlocks.
+    dispatching: DashMap<ChunkKey, ()>,
     disk: DiskStore,
     backfiller: Arc<dyn ChunkBackfiller>,
     /// `Mutex<HashMap>` rather than `DashMap` so claim-the-slot for a fresh
@@ -161,6 +172,7 @@ impl ChunkCache {
 
         let inner = Arc::new(Inner {
             map: DashMap::new(),
+            dispatching: DashMap::new(),
             disk: DiskStore::new(root),
             backfiller,
             sources: Mutex::new(HashMap::new()),
@@ -199,18 +211,49 @@ impl ChunkCache {
     }
 
     pub fn state_or_fetch_with_priority(&self, key: ChunkKey, priority: Priority) -> Arc<ChunkState> {
+        // Fast path: already-known state. Quick read of the shard, then
+        // drop the guard before any potentially-blocking work.
         if let Some(entry) = self.inner.map.get(&key) {
             let state = entry.clone();
             drop(entry);
-            return self.maybe_retry(key, state, priority);
+            if let ChunkState::CooldownMiss { until } = state.as_ref() {
+                if SystemTime::now() < *until {
+                    return state;
+                }
+                // Cooldown expired — fall through to redispatch.
+            } else {
+                return state;
+            }
         }
-        let inner = self.inner.clone();
-        let entry = self
+
+        // Slow path: dispatch. We do this WITHOUT holding any DashMap shard.
+        // `or_insert_with` would hold a shard write lock across the closure,
+        // and `dispatch_chunk` can synchronously call `complete_source` →
+        // `self.map.insert(...)` (on this key, when a download fails fast),
+        // which would deadlock the shard.
+        //
+        // Instead, atomically claim a slot in `dispatching`. The first
+        // thread for a key wins; concurrent callers see the in-progress
+        // dispatch and return whatever's currently in `map` (or Pending).
+        let claimed = self
             .inner
-            .map
-            .entry(key)
-            .or_insert_with(|| inner.dispatch_chunk(key, priority));
-        entry.clone()
+            .dispatching
+            .insert(key, ())
+            .is_none();
+        if !claimed {
+            return self
+                .inner
+                .map
+                .get(&key)
+                .map(|e| e.clone())
+                .unwrap_or_else(|| Arc::new(ChunkState::Pending));
+        }
+
+        let inner = self.inner.clone();
+        let _guard = DispatchGuard { inner: inner.clone(), key };
+        let state = inner.dispatch_chunk(key, priority);
+        inner.map.insert(key, state.clone());
+        state
     }
 
     /// Cheap state lookup without dispatching a fetch. Returns `None` if no
@@ -218,17 +261,6 @@ impl ChunkCache {
     /// want to render whatever is already resident.
     pub fn peek(&self, key: ChunkKey) -> Option<Arc<ChunkState>> {
         self.inner.map.get(&key).map(|e| e.clone())
-    }
-
-    fn maybe_retry(&self, key: ChunkKey, state: Arc<ChunkState>, priority: Priority) -> Arc<ChunkState> {
-        if let ChunkState::CooldownMiss { until } = state.as_ref() {
-            if SystemTime::now() >= *until {
-                let new_state = self.inner.dispatch_chunk(key, priority);
-                self.inner.map.insert(key, new_state.clone());
-                return new_state;
-            }
-        }
-        state
     }
 
     pub fn voxel_extent(&self) -> [u32; 3] {
@@ -257,6 +289,19 @@ impl ChunkCache {
 impl Clone for ChunkCache {
     fn clone(&self) -> Self {
         Self { inner: self.inner.clone() }
+    }
+}
+
+/// RAII guard that releases a `dispatching` claim no matter how
+/// `state_or_fetch_with_priority` returns — including panics.
+struct DispatchGuard {
+    inner: Arc<Inner>,
+    key: ChunkKey,
+}
+
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        self.inner.dispatching.remove(&self.key);
     }
 }
 
