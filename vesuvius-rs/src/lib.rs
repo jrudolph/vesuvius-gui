@@ -2,6 +2,7 @@
 
 use std::io::{Cursor, Read};
 
+pub mod cache;
 pub mod catalog;
 pub mod downloader;
 pub mod model;
