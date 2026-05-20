@@ -111,14 +111,17 @@ impl VoxelVolume for UnifiedVolume {
         );
 
         // Hot slot keyed by the target chunk: if we've already resolved this
-        // target chunk (either to itself or to a coarser parent) this frame,
-        // skip the pyramid walk and just sample.
+        // target chunk (either to itself or to a coarser parent, or as
+        // Empty) this frame, skip the pyramid walk and just sample.
         {
             let b = self.local.borrow();
             if b.target_key == Some(key_t) {
                 if let Some((lod_use, s)) = &b.chosen {
                     if let Some(mmap) = s.as_resident() {
                         return sample_at(target_sx, target_sy, target_sz, target_lod, *lod_use, mmap);
+                    }
+                    if s.is_empty() {
+                        return 0;
                     }
                 }
             }
@@ -128,7 +131,10 @@ impl VoxelVolume for UnifiedVolume {
         // is coarser than anything the volume has), dispatching each. Surface
         // and PPM renderers reach `get()` without going through
         // `UnifiedVolume::paint`, so we can't assume a prior pre-dispatch
-        // primed the coarser LODs — kick the fetches here.
+        // primed the coarser LODs — kick the fetches here. Stop at the
+        // first *terminal* state (Resident or Empty): `Empty` at a fine LOD
+        // overrides whatever a coarser parent might have, because the
+        // fine-grained data structure is what tells us "no data here".
         let walk_lo = target_lod.min(max_lod);
         let walk_hi = max_lod;
         let mut chosen: Option<(u8, Arc<ChunkState>)> = None;
@@ -136,19 +142,21 @@ impl VoxelVolume for UnifiedVolume {
             let (lx, ly, lz) = coord_at_lod(target_sx, target_sy, target_sz, target_lod, lod_try);
             let key = ChunkKey::new(lod_try, (lx / 64) as u32, (ly / 64) as u32, (lz / 64) as u32);
             let s = self.cache.state_or_fetch(key);
-            if s.as_resident().is_some() {
+            if s.is_terminal() {
                 chosen = Some((lod_try, s));
                 break;
             }
         }
 
         let Some((lod_use, state)) = chosen else {
-            // Nothing resident yet. Don't poison the hot slot — a later
+            // Nothing terminal yet. Don't poison the hot slot — a later
             // pixel in this frame might land after the dispatch completes.
             return 0;
         };
-        let mmap = state.as_resident().expect("just checked resident");
-        let value = sample_at(target_sx, target_sy, target_sz, target_lod, lod_use, mmap);
+        let value = match state.as_resident() {
+            Some(mmap) => sample_at(target_sx, target_sy, target_sz, target_lod, lod_use, mmap),
+            None => 0, // Empty
+        };
 
         let mut b = self.local.borrow_mut();
         b.target_key = Some(key_t);
@@ -173,6 +181,11 @@ fn coord_at_lod(sx: u64, sy: u64, sz: u64, from_lod: u8, to_lod: u8) -> (u64, u6
 /// rendered) to an overlay tint. `None` means "ready at target LOD; no
 /// overlay needed".
 fn overlay_color_for(target_lod: u8, chosen_lod: Option<u8>, target_state: Option<&ChunkState>) -> Option<Color32> {
+    // Empty target wins over any LOD fallback — the chunk is definitively
+    // absent, gray-tint it as a normal "no data here" cell.
+    if matches!(target_state, Some(ChunkState::Empty)) {
+        return Some(Color32::from_rgb(140, 140, 140)); // gray
+    }
     match (chosen_lod, target_state) {
         // Rendered at target LOD with real data — happy path, no tint.
         (Some(l), _) if l == target_lod => None,
@@ -182,9 +195,9 @@ fn overlay_color_for(target_lod: u8, chosen_lod: Option<u8>, target_state: Optio
         (None, Some(ChunkState::Pending)) => Some(Color32::from_rgb(230, 200, 40)), // yellow
         (None, Some(ChunkState::CooldownMiss { .. })) => Some(Color32::from_rgb(220, 60, 60)), // red
         (None, Some(ChunkState::Missing)) | (None, None) => Some(Color32::from_rgb(220, 60, 220)), // magenta
-        // Defensive: Resident but `chosen` is None shouldn't happen, but if
-        // it does, no overlay.
-        (None, Some(ChunkState::Resident(_))) => None,
+        // Defensive: Resident / Empty here mean the LOD-walk produced no
+        // chosen — shouldn't happen, but if it does, no overlay.
+        (None, Some(ChunkState::Resident(_) | ChunkState::Empty)) => None,
     }
 }
 
@@ -362,7 +375,11 @@ impl PaintVolume for UnifiedVolume {
                     continue;
                 }
 
-                // Walk target → coarsest, take the first resident parent.
+                // Walk target → coarsest, stopping at the first *terminal*
+                // state (Resident or Empty). An `Empty` at a finer LOD wins
+                // over coarser data: the fine-grained structure is what tells
+                // us "no data here", so we shouldn't paint coarser-LOD values
+                // through it.
                 let mut chosen: Option<(u8, Arc<ChunkState>)> = None;
                 for lod_try in target_lod..=max_lod {
                     let shift = lod_try - target_lod;
@@ -380,44 +397,60 @@ impl PaintVolume for UnifiedVolume {
                             None => continue,
                         }
                     };
-                    if s.as_resident().is_some() {
+                    if s.is_terminal() {
                         chosen = Some((lod_try, s));
                         break;
                     }
                 }
 
-                if let Some((lod_use, state)) = chosen.as_ref() {
-                    let mmap = state.as_resident().expect("just checked resident");
-                    let scale_use = 1i32 << *lod_use;
-                    let chunk_world_use = 64 * scale_use;
-                    let shift = *lod_use - target_lod;
-                    let parent_tu = tu >> shift;
-                    let parent_tv = tv >> shift;
-                    let parent_tpc = t.tile_pc >> shift;
-                    let chunk_u_lo = parent_tu * chunk_world_use;
-                    let chunk_v_lo = parent_tv * chunk_world_use;
-                    let chunk_pc_lo = parent_tpc * chunk_world_use;
-                    let plane_sample = ((pc - chunk_pc_lo) / scale_use) as usize;
+                let painted = if let Some((lod_use, state)) = chosen.as_ref() {
+                    if let Some(mmap) = state.as_resident() {
+                        let scale_use = 1i32 << *lod_use;
+                        let chunk_world_use = 64 * scale_use;
+                        let shift = *lod_use - target_lod;
+                        let parent_tu = tu >> shift;
+                        let parent_tv = tv >> shift;
+                        let parent_tpc = t.tile_pc >> shift;
+                        let chunk_u_lo = parent_tu * chunk_world_use;
+                        let chunk_v_lo = parent_tv * chunk_world_use;
+                        let chunk_pc_lo = parent_tpc * chunk_world_use;
+                        let plane_sample = ((pc - chunk_pc_lo) / scale_use) as usize;
 
-                    for v_px in v_px_lo..v_px_hi {
-                        let world_v = min_vc + v_px * pzoom;
-                        let sample_v = ((world_v - chunk_v_lo) / scale_use) as usize;
-                        for u_px in u_px_lo..u_px_hi {
-                            let world_u = min_uc + u_px * pzoom;
-                            let sample_u = ((world_u - chunk_u_lo) / scale_use) as usize;
-                            let mut s = [0usize; 3];
-                            s[u_coord] = sample_u;
-                            s[v_coord] = sample_v;
-                            s[plane_coord] = plane_sample;
-                            let off = s[2] * 64 * 64 + s[1] * 64 + s[0];
-                            let value = config.filter(mmap[off]);
-                            buffer.set_gray(u_px as usize, v_px as usize, value);
+                        for v_px in v_px_lo..v_px_hi {
+                            let world_v = min_vc + v_px * pzoom;
+                            let sample_v = ((world_v - chunk_v_lo) / scale_use) as usize;
+                            for u_px in u_px_lo..u_px_hi {
+                                let world_u = min_uc + u_px * pzoom;
+                                let sample_u = ((world_u - chunk_u_lo) / scale_use) as usize;
+                                let mut s = [0usize; 3];
+                                s[u_coord] = sample_u;
+                                s[v_coord] = sample_v;
+                                s[plane_coord] = plane_sample;
+                                let off = s[2] * 64 * 64 + s[1] * 64 + s[0];
+                                let value = config.filter(mmap[off]);
+                                buffer.set_gray(u_px as usize, v_px as usize, value);
+                            }
                         }
+                        true
+                    } else {
+                        // Empty at this LOD — fill the rect with the filtered
+                        // zero value so the user sees a clean "no data" cell
+                        // instead of whatever the buffer happened to contain.
+                        let zero = config.filter(0);
+                        for v_px in v_px_lo..v_px_hi {
+                            for u_px in u_px_lo..u_px_hi {
+                                buffer.set_gray(u_px as usize, v_px as usize, zero);
+                            }
+                        }
+                        true
                     }
-                } else if !config.debug_chunk_overlay {
-                    // Without the overlay we just leave the rect untouched
-                    // (caller cleared the buffer). The overlay path below
-                    // wants to paint a "no data" tint, so fall through.
+                } else {
+                    false
+                };
+
+                if !painted && !config.debug_chunk_overlay {
+                    // Nothing terminal yet, no overlay requested — leave the
+                    // rect alone (caller cleared the buffer).
                     continue;
                 }
 

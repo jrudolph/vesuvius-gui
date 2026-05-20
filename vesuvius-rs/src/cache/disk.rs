@@ -16,6 +16,16 @@ pub struct DiskStore {
     root: PathBuf,
 }
 
+/// Result of consulting on-disk state for a chunk.
+pub enum LoadOutcome {
+    /// A full `.raw` chunk was found and mmap'd.
+    Resident(Mmap),
+    /// A `.empty` sentinel was found — chunk is definitively absent.
+    Empty,
+    /// Nothing on disk yet.
+    Missing,
+}
+
 impl DiskStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -27,6 +37,14 @@ impl DiskStore {
             .join(key.z.to_string())
             .join(key.y.to_string())
             .join(format!("{}.raw", key.x))
+    }
+
+    fn empty_path_for(&self, key: ChunkKey) -> PathBuf {
+        self.root
+            .join(format!("L{:02}", key.lod))
+            .join(key.z.to_string())
+            .join(key.y.to_string())
+            .join(format!("{}.empty", key.x))
     }
 
     /// Try to load and mmap a chunk file. Returns `None` for any failure
@@ -46,6 +64,31 @@ impl DiskStore {
             return None;
         }
         Some(mmap)
+    }
+
+    /// Resolve a chunk against on-disk state: prefer a `.raw` chunk; fall
+    /// back to a `.empty` sentinel; otherwise Missing. Checked atomically
+    /// enough for our purposes — concurrent writes resolve via rename.
+    pub fn load(&self, key: ChunkKey) -> LoadOutcome {
+        if let Some(mmap) = self.try_load(key) {
+            return LoadOutcome::Resident(mmap);
+        }
+        if self.empty_path_for(key).exists() {
+            return LoadOutcome::Empty;
+        }
+        LoadOutcome::Missing
+    }
+
+    /// Persist a definitive-absence sentinel for `key`. Non-fatal on
+    /// failure: returning Err just means the next session will retry the
+    /// fetch (and likely re-mark empty), so log + drop.
+    pub fn mark_empty(&self, key: ChunkKey) -> std::io::Result<()> {
+        let path = self.empty_path_for(key);
+        let parent = path.parent().expect("disk path has parent");
+        std::fs::create_dir_all(parent)?;
+        // Zero-byte file is enough — existence is the signal.
+        std::fs::File::create(&path)?;
+        Ok(())
     }
 
     /// Atomic write: stage to a unique temp name in the same directory, then

@@ -38,7 +38,7 @@
 //!     are already Done. Defensive against cooldown-retry races.
 
 use super::backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourcePayload, SourceSpec};
-use super::disk::DiskStore;
+use super::disk::{DiskStore, LoadOutcome};
 use super::downloader::{DownloadError, DownloadResult, Downloader, OnDone, SubmitResult};
 use super::priority::{Priority, MAX_AGE};
 use super::spill::SpillStore;
@@ -332,26 +332,29 @@ impl Inner {
         let _guard = DispatchGuard { inner: self.clone(), key };
         let state = self.dispatch_chunk(key, priority);
         self.map.insert(key, state.clone());
-        self.publish_resident(key, &state);
+        self.publish_terminal(key, &state);
         state
     }
 
     /// Called right after a chunk is written into `self.map`. If the new
-    /// state is `Resident`, drain `pending_chunk_sources[key]` and complete
-    /// each waiting source with the chunk's `Arc<ChunkState>` as payload.
-    /// Source completion is idempotent (`complete_source` no-ops on a
-    /// Done source), so double-fires from racing publishers are safe.
-    fn publish_resident(self: &Arc<Self>, key: ChunkKey, state: &Arc<ChunkState>) {
-        if !matches!(state.as_ref(), ChunkState::Resident(_)) {
-            return;
-        }
+    /// state is terminal (`Resident` or `Empty`), drain
+    /// `pending_chunk_sources[key]` and complete each waiting source:
+    ///   - `Resident` → payload is the chunk's `Arc<ChunkState>`.
+    ///   - `Empty`    → `Ok(None)` (parent sees the child as absent).
+    /// Source completion is idempotent (`complete_source` no-ops on a Done
+    /// source), so double-fires from racing publishers are safe.
+    fn publish_terminal(self: &Arc<Self>, key: ChunkKey, state: &Arc<ChunkState>) {
+        let outcome: SourceOutcome = match state.as_ref() {
+            ChunkState::Resident(_) => Ok(Some(state.clone() as SourcePayload)),
+            ChunkState::Empty => Ok(None),
+            _ => return,
+        };
         let waiters: Vec<String> = match self.pending_chunk_sources.remove(&key) {
             Some((_, v)) => v,
             None => return,
         };
-        let payload: SourcePayload = state.clone();
         for source_key in waiters {
-            self.complete_source(source_key, Ok(Some(payload.clone())));
+            self.complete_source(source_key, outcome.clone());
         }
     }
 
@@ -363,9 +366,16 @@ impl Inner {
     /// `or_insert_with` closure on the entry guard — we must NEVER call
     /// `self.map.insert(key, …)` for this same key from here.
     fn dispatch_chunk(self: &Arc<Self>, key: ChunkKey, priority: Priority) -> Arc<ChunkState> {
-        if let Some(mmap) = self.disk.try_load(key) {
-            log::trace!("[{}] disk hit", key);
-            return Arc::new(ChunkState::Resident(mmap));
+        match self.disk.load(key) {
+            LoadOutcome::Resident(mmap) => {
+                log::trace!("[{}] disk hit", key);
+                return Arc::new(ChunkState::Resident(mmap));
+            }
+            LoadOutcome::Empty => {
+                log::trace!("[{}] disk hit (empty)", key);
+                return Arc::new(ChunkState::Empty);
+            }
+            LoadOutcome::Missing => {}
         }
         if self.is_out_of_bounds(key) {
             log::trace!("[{}] out of bounds", key);
@@ -549,7 +559,7 @@ impl Inner {
                 let child_state = self.state_or_fetch_with_priority(child_key, priority);
                 match child_state.as_ref() {
                     ChunkState::Resident(_) => {
-                        // publish_resident either fired during the dispatch
+                        // publish_terminal either fired during the dispatch
                         // call above or is about to via the disk path; in
                         // both cases the source is (or will be) Done.
                         log::trace!(
@@ -560,8 +570,11 @@ impl Inner {
                         );
                         RegisterResult::Queued
                     }
-                    ChunkState::CooldownMiss { .. } => {
-                        // Child won't load — resolve our source as absent.
+                    ChunkState::Empty | ChunkState::CooldownMiss { .. } => {
+                        // Child is definitively absent or won't load — resolve
+                        // our source as absent. (Empty also gets handled by
+                        // publish_terminal, but we may have raced ahead of
+                        // that; complete_source is idempotent.)
                         log::trace!(
                             "[{}] chunk dep on {} unresolvable (chunk {})",
                             source_key,
@@ -572,8 +585,8 @@ impl Inner {
                         RegisterResult::Queued
                     }
                     _ => {
-                        // Pending / Missing — publish_resident will satisfy
-                        // us when the child completes extract.
+                        // Pending / Missing — publish_terminal will satisfy
+                        // us when the child reaches a terminal state.
                         log::trace!(
                             "[{}] chunk dep on {} pending (chunk {})",
                             source_key,
@@ -774,6 +787,26 @@ impl Inner {
             inputs.push(results.remove(k).unwrap_or_else(|| Ok(None)));
         }
 
+        // All sources resolved to "definitively absent" (404/403 from the
+        // downloader, or an explicit `Ok(None)` from a Compute fetch). The
+        // chunk has no data anywhere — persist an `.empty` sentinel and
+        // transition to `Empty` so future sessions hit the disk path
+        // immediately without re-fetching, and so the LOD-fallback walk in
+        // paint/get can stop here rather than serving stale coarser data.
+        let all_absent = !inputs.is_empty() && inputs.iter().all(|o| matches!(o, Ok(None)));
+        if all_absent {
+            if let Err(e) = self.disk.mark_empty(key) {
+                log::warn!("[{}] mark_empty failed ({}); empty still cached in-memory only", key, e);
+            }
+            log::debug!("[{}] empty ({:?})", key, t0.elapsed());
+            let new_state = Arc::new(ChunkState::Empty);
+            drop(inputs);
+            self.release_sources(&order);
+            self.map.insert(key, new_state.clone());
+            self.publish_terminal(key, &new_state);
+            return;
+        }
+
         let new_state = match extract(&inputs) {
             Ok(bytes) => match self.disk.write_atomic(key, &bytes) {
                 Ok(()) => match self.disk.try_load(key) {
@@ -812,35 +845,38 @@ impl Inner {
         // download path) only stay alive while the refcount-eviction loop
         // can see them — Arc clones inside the source entries remain.
         drop(inputs);
+        self.release_sources(&order);
+        self.map.insert(key, new_state.clone());
+        self.publish_terminal(key, &new_state);
+    }
 
-        // Decrement consumer refcounts for each source this chunk used.
-        // When a count hits zero we evict the source entry from
-        // `self.sources`; that drops its `Arc<Mmap>`, the kernel reclaims
-        // the spill file's pages, and (because the spill file was already
-        // unlinked) the disk space is freed too.
-        if !order.is_empty() {
-            let mut sources = self.sources.lock().unwrap();
-            for source_key in &order {
-                let should_evict = if let Some(arc) = sources.get(source_key) {
-                    let mut s = arc.lock().unwrap();
-                    if let SourceState::Done { remaining_consumers, .. } = &mut *s {
-                        *remaining_consumers = remaining_consumers.saturating_sub(1);
-                        *remaining_consumers == 0
-                    } else {
-                        false
-                    }
+    /// Decrement consumer refcounts for each source this chunk used. When a
+    /// count hits zero we evict the source entry from `self.sources`; that
+    /// drops its `Arc<Mmap>`, the kernel reclaims the spill file's pages,
+    /// and (because the spill file was already unlinked) the disk space is
+    /// freed too.
+    fn release_sources(&self, order: &[String]) {
+        if order.is_empty() {
+            return;
+        }
+        let mut sources = self.sources.lock().unwrap();
+        for source_key in order {
+            let should_evict = if let Some(arc) = sources.get(source_key) {
+                let mut s = arc.lock().unwrap();
+                if let SourceState::Done { remaining_consumers, .. } = &mut *s {
+                    *remaining_consumers = remaining_consumers.saturating_sub(1);
+                    *remaining_consumers == 0
                 } else {
                     false
-                };
-                if should_evict {
-                    log::trace!("[{}] evict (last consumer)", source_key);
-                    sources.remove(source_key);
                 }
+            } else {
+                false
+            };
+            if should_evict {
+                log::trace!("[{}] evict (last consumer)", source_key);
+                sources.remove(source_key);
             }
         }
-
-        self.map.insert(key, new_state.clone());
-        self.publish_resident(key, &new_state);
     }
 
     /// Handle a `TaskEntry` that the priority queue dropped (age / distance
@@ -862,10 +898,10 @@ impl Inner {
         }
     }
 
-    fn is_chunk_resident(&self, key: ChunkKey) -> bool {
+    fn is_chunk_done(&self, key: ChunkKey) -> bool {
         self.map
             .get(&key)
-            .map(|s| matches!(s.as_ref(), ChunkState::Resident(_)))
+            .map(|s| s.as_ref().is_terminal())
             .unwrap_or(false)
     }
 
@@ -975,8 +1011,8 @@ fn worker_loop(inner: Arc<Inner>) {
                 let chunk = entry.chunk;
                 match &entry.task {
                     Task::Extract => {
-                        if inner.is_chunk_resident(chunk) {
-                            log::trace!("[{}] skip extract (already ready)", chunk);
+                        if inner.is_chunk_done(chunk) {
+                            log::trace!("[{}] skip extract (already terminal)", chunk);
                             inner.chunks.remove(&chunk);
                             continue;
                         }

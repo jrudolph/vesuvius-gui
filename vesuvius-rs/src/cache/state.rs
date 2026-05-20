@@ -38,6 +38,11 @@ pub enum ChunkState {
     Pending,
     /// Loaded, mmap'd from disk.
     Resident(Mmap),
+    /// Definitively absent: every backing source reported "not present"
+    /// (e.g., 404 / 403). Sampling returns 0 without consulting any LOD
+    /// fallback. Persisted on disk via a sentinel, so subsequent sessions
+    /// hit this without re-fetching.
+    Empty,
     /// Most recent fetch failed; don't retry until `until`.
     CooldownMiss { until: SystemTime },
 }
@@ -48,5 +53,17 @@ impl ChunkState {
             ChunkState::Resident(m) => Some(m),
             _ => None,
         }
+    }
+
+    /// True for states the cache will not revisit — sampling is final.
+    /// Used by the paint/get LOD-fallback walks: stop at the first terminal
+    /// state, because `Empty` at the fine LOD overrides any data at a
+    /// coarser LOD.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, ChunkState::Resident(_) | ChunkState::Empty)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self, ChunkState::Empty)
     }
 }

@@ -202,8 +202,13 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
                         }
                         Err(e) => Err(DownloadError::Transient(format!("read body: {}", e))),
                     }
-                } else if status.as_u16() == 404 {
-                    log::trace!("[{}] 404 ({:?})", entry.url, t0.elapsed());
+                } else if status.as_u16() == 404 || status.as_u16() == 403 {
+                    // 404 (not found) and 403 (forbidden) are both definitive
+                    // absences for our purposes: many static-object stores
+                    // serve 403 instead of 404 for unlisted keys. Surface as
+                    // `Ok(None)` so the cache can negatively cache the chunk
+                    // rather than retry on a cooldown loop.
+                    log::trace!("[{}] {} ({:?})", entry.url, status.as_u16(), t0.elapsed());
                     Ok(None)
                 } else {
                     log::debug!("[{}] {} ({:?})", entry.url, status.as_u16(), t0.elapsed());

@@ -44,6 +44,91 @@ fn miss_then_fetch_then_resident() {
     assert_eq!(v, (1u32 ^ 2 ^ 3) as u8);
 }
 
+/// Backfiller whose plan declares N `Compute` sources that all resolve to
+/// `Ok(None)`. Used to exercise the all-absent → `Empty` path.
+struct AllAbsentBackfiller {
+    volume_id: String,
+    extent: [u32; 3],
+    /// Counts how many `Compute` fetches were actually invoked. After a
+    /// fresh fetch + persisted reload, this should not increment on the
+    /// reload — the disk sentinel short-circuits.
+    fetch_count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::cache::backfiller::ChunkBackfiller for AllAbsentBackfiller {
+    fn max_lod(&self) -> u8 {
+        0
+    }
+    fn voxel_extent(&self) -> [u32; 3] {
+        self.extent
+    }
+    fn volume_id(&self) -> String {
+        self.volume_id.clone()
+    }
+    fn plan(
+        &self,
+        key: ChunkKey,
+    ) -> Result<crate::cache::backfiller::BackfillPlan, crate::cache::backfiller::BackfillError> {
+        use crate::cache::backfiller::{BackfillPlan, SourceOutcome, SourceSpec};
+        let counter = self.fetch_count.clone();
+        let source_key = format!("absent/{}/{}/{}/{}", key.lod, key.z, key.y, key.x);
+        let fetch: Box<dyn FnOnce() -> SourceOutcome + Send + 'static> = Box::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        });
+        let sources = vec![SourceSpec::Compute { key: source_key, fetch }];
+        let extract = Box::new(|_inputs: &[SourceOutcome]| -> Result<Vec<u8>, BackfillError> {
+            panic!("extract must not run when every source is absent")
+        });
+        Ok(BackfillPlan { sources, extract })
+    }
+}
+
+#[test]
+fn all_absent_sources_transition_to_empty_and_persist() {
+    let root = tmp_root("all-absent");
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let backfiller = Arc::new(AllAbsentBackfiller {
+        volume_id: "absent-test".to_string(),
+        extent: [128, 128, 128],
+        fetch_count: counter.clone(),
+    });
+    let cache = ChunkCache::new(&root, backfiller.clone());
+
+    let key = ChunkKey::new(0, 0, 0, 0);
+    let state = cache.wait_for(key, Duration::from_secs(2));
+    assert!(matches!(state.as_ref(), ChunkState::Empty), "expected Empty, got {:?}", state);
+    assert!(state.is_terminal());
+    assert!(state.as_resident().is_none());
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "fetch should have run exactly once"
+    );
+
+    // Reopen with a fresh cache (same disk root). The `.empty` sentinel
+    // should short-circuit dispatch — no second fetch.
+    drop(cache);
+    let backfiller2 = Arc::new(AllAbsentBackfiller {
+        volume_id: "absent-test".to_string(),
+        extent: [128, 128, 128],
+        fetch_count: counter.clone(),
+    });
+    let cache2 = ChunkCache::new(&root, backfiller2);
+    let state2 = cache2.state_or_fetch(key);
+    assert!(matches!(state2.as_ref(), ChunkState::Empty), "expected Empty on reload, got {:?}", state2);
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "no refetch expected after disk sentinel hit"
+    );
+
+    // Voxel sampler on an Empty chunk returns 0 (zero data) without any
+    // refetch attempt.
+    let v = cache2.voxel(5, 5, 5, 0);
+    assert_eq!(v, 0);
+}
+
 #[test]
 fn out_of_bounds_short_circuits() {
     let root = tmp_root("oob");
@@ -335,7 +420,7 @@ fn synth_lod_one_level_above_native_averages_children() {
 
     let root = tmp_root("synth-l1");
     let inner: Arc<dyn ChunkBackfiller> = Arc::new(PerChunkConst);
-    let synth = Arc::new(SynthesizedLodBackfiller::new(inner, 1));
+    let synth = Arc::new(SynthesizedLodBackfiller::with_extra_levels(inner, 1));
     let cache = ChunkCache::new(&root, synth);
     assert_eq!(cache.max_lod(), 1);
 
@@ -388,7 +473,7 @@ fn synth_lod_two_levels_above_native_recurses() {
 
     let root = tmp_root("synth-l2");
     let inner: Arc<dyn ChunkBackfiller> = Arc::new(Const(123));
-    let synth = Arc::new(SynthesizedLodBackfiller::new(inner, 2));
+    let synth = Arc::new(SynthesizedLodBackfiller::with_extra_levels(inner, 2));
     let cache = ChunkCache::new(&root, synth);
     assert_eq!(cache.max_lod(), 2);
 
@@ -427,7 +512,7 @@ fn unified_volume_renders_at_target_lod_above_native_max() {
 
     let root = tmp_root("synth-volume-get");
     let inner: Arc<dyn ChunkBackfiller> = Arc::new(Const(200));
-    let synth = Arc::new(SynthesizedLodBackfiller::new(inner, 1));
+    let synth = Arc::new(SynthesizedLodBackfiller::with_extra_levels(inner, 1));
     let cache = ChunkCache::new(&root, synth);
     let volume = UnifiedVolume::new(cache.clone());
 
@@ -435,6 +520,89 @@ fn unified_volume_renders_at_target_lod_above_native_max() {
     // LOD-1 coords; the LOD-1 chunk needed is the synthesized (0,0,0).
     cache.wait_for(ChunkKey::new(1, 0, 0, 0), Duration::from_secs(5));
     assert_eq!(volume.get([10.0, 10.0, 10.0], 2), 200);
+}
+
+#[test]
+fn synth_gate_disables_when_source_has_too_many_native_chunks() {
+    // Budget = 32, inner has a single native LOD over a huge extent
+    // (1024³ voxels at LOD 0 → 16³ = 4096 native chunks). That's way over
+    // budget, so synthesis must be disabled — `cache.max_lod()` should
+    // report the inner's max_lod unchanged and chunks above it should
+    // cooldown-miss as if no wrapper were present.
+    struct WideSingleLod;
+    impl ChunkBackfiller for WideSingleLod {
+        fn max_lod(&self) -> u8 {
+            0
+        }
+        fn voxel_extent(&self) -> [u32; 3] {
+            [1024, 1024, 1024]
+        }
+        fn volume_id(&self) -> String {
+            "wide-single-lod".into()
+        }
+        fn plan(&self, _key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            let extract = Box::new(move |_inputs: &[_]| Ok(vec![55u8; CHUNK_VOXELS]));
+            Ok(BackfillPlan { sources: Vec::new(), extract })
+        }
+    }
+
+    let root = tmp_root("synth-gate-off");
+    let inner: Arc<dyn ChunkBackfiller> = Arc::new(WideSingleLod);
+    let synth = Arc::new(SynthesizedLodBackfiller::new(inner, 32));
+    let cache = ChunkCache::new(&root, synth);
+    assert_eq!(cache.max_lod(), 0, "budget exceeded → no synth levels added");
+
+    // LOD 1 is genuinely out of bounds when synth is disabled — the cache's
+    // is_out_of_bounds check refuses any key.lod > backfiller.max_lod().
+    // Without the gate, we'd see a Resident chunk synthesized from 4096
+    // native LOD-0 chunks; with the gate firing, it cooldown-misses
+    // immediately.
+    let state = cache.wait_for(ChunkKey::new(1, 0, 0, 0), Duration::from_secs(5));
+    assert!(
+        matches!(state.as_ref(), ChunkState::CooldownMiss { .. }),
+        "expected CooldownMiss for above-max_lod key when synth is gated off, got {:?}",
+        state
+    );
+
+    // The inner's native LOD 0 still works.
+    let l0 = cache.wait_for(ChunkKey::new(0, 0, 0, 0), Duration::from_secs(5));
+    assert!(l0.as_resident().is_some());
+}
+
+#[test]
+fn synth_gate_enables_when_source_is_pyramidal_enough() {
+    // Inner reports a coarsest level where the whole volume is 2x2x2 = 8
+    // native chunks — well under budget=32. With synthesis enabled, the
+    // wrapper exposes one extra level on top.
+    struct SmallPyramid;
+    impl ChunkBackfiller for SmallPyramid {
+        fn max_lod(&self) -> u8 {
+            3
+        }
+        fn voxel_extent(&self) -> [u32; 3] {
+            // 2 chunks per axis at LOD 3 (each chunk covers 512 world voxels).
+            [1024, 1024, 1024]
+        }
+        fn volume_id(&self) -> String {
+            "small-pyramid".into()
+        }
+        fn plan(&self, _key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            let extract = Box::new(move |_inputs: &[_]| Ok(vec![77u8; CHUNK_VOXELS]));
+            Ok(BackfillPlan { sources: Vec::new(), extract })
+        }
+    }
+
+    let root = tmp_root("synth-gate-on");
+    let inner: Arc<dyn ChunkBackfiller> = Arc::new(SmallPyramid);
+    let synth = Arc::new(SynthesizedLodBackfiller::new(inner, 32));
+    let cache = ChunkCache::new(&root, synth);
+    assert_eq!(cache.max_lod(), 4, "8 native chunks ≤ 32 → 1 synth level added");
+
+    let state = cache.wait_for(ChunkKey::new(4, 0, 0, 0), Duration::from_secs(5));
+    let mmap = state
+        .as_resident()
+        .unwrap_or_else(|| panic!("synth L4 should be resident: {:?}", state));
+    assert!(mmap.iter().all(|&b| b == 77), "uniform source averages to 77");
 }
 
 #[test]
