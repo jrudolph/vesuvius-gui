@@ -6,23 +6,20 @@
 //! workers, hundreds of in-flight chunks per frame) that easily costs
 //! hundreds of MB of resident memory.
 //!
-//! The spill store writes those bytes to disk atomically (temp + rename)
-//! and hands back an `Mmap`. Extract reads the bytes through the mmap, so
-//! the kernel — not the process heap — decides what's resident. Sibling
-//! cache chunks consuming the same source share one mmap via the
+//! The spill store writes those bytes to a temp file, mmaps it, then
+//! **immediately unlinks the file**. Linux keeps the inode alive while
+//! the open fd or mmap references it — the spill becomes an anonymous,
+//! never-directory-listed kernel blob. The kernel reclaims the disk space
+//! and any resident pages as soon as the last `Mmap` drops, or as soon as
+//! the process exits (no orphan files left in the cache dir).
+//!
+//! Sibling cache chunks consuming the same source share one mmap via the
 //! `Arc<Mmap>` SourcePayload, so we get free sharing across the 64
-//! cache-chunks-per-native-chunk fan-out.
-//!
-//! Layout: `{root}/{aa}/{rest}.bin`, where `{aa}` is the first two hex
-//! chars of the SHA-256 of the source key (filesystem-safe regardless of
-//! the backfiller's key format) and `{rest}` is the remaining hex.
-//!
-//! No automatic cleanup — spill files accumulate alongside chunk files in
-//! the cache dir. Users can wipe the directory on demand; a future LRU
-//! pass over the on-disk cache will treat spill files the same way.
+//! cache-chunks-per-native-chunk fan-out. The cache evicts the source
+//! entry (last `Arc<Mmap>` reference) when its consumer refcount drops to
+//! zero — see `cache::Inner::extract_chunk`.
 
 use memmap::{Mmap, MmapOptions};
-use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -38,56 +35,38 @@ impl SpillStore {
         Self { root: root.into() }
     }
 
-    fn path_for(&self, source_key: &str) -> PathBuf {
-        let hex = format!("{:x}", Sha256::digest(source_key.as_bytes()));
-        self.root.join(&hex[..2]).join(format!("{}.bin", &hex[2..]))
-    }
-
-    /// Try to mmap an already-spilled source. Returns `None` if the file
-    /// doesn't exist or can't be opened. Currently used by tests only —
-    /// production reuses the `Mmap` returned from `write_and_mmap`, since
-    /// the source state holds it for the lifetime of the consuming chunks.
-    #[allow(dead_code)]
-    pub fn try_mmap(&self, source_key: &str) -> Option<Mmap> {
-        let path = self.path_for(source_key);
-        let file = File::open(&path).ok()?;
-        unsafe { MmapOptions::new().map(&file).ok() }
-    }
-
-    /// Write `bytes` to the spill location for `source_key` and return an
-    /// mmap of the final file. Stages to a temp name in the same
-    /// directory, then renames atomically — concurrent writers race
-    /// harmlessly (the final state is some valid copy of the bytes).
+    /// Write `bytes` to a temp file under `root`, mmap, then unlink. The
+    /// returned `Mmap` is the only reference to the inode after this
+    /// returns — drop it and the kernel reclaims the file. The
+    /// `source_key` parameter is accepted for symmetry with previous
+    /// designs but currently used only in log messages: spill files are
+    /// single-use and never looked up by key.
     pub fn write_and_mmap(&self, source_key: &str, bytes: &[u8]) -> std::io::Result<Mmap> {
-        let final_path = self.path_for(source_key);
-        let parent = final_path
-            .parent()
-            .expect("spill path always has a parent");
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(&self.root)?;
 
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
         let tid = std::thread::current().id();
-        let tmp = parent.join(format!(
-            "{}.bin.tmp.{}.{:?}",
-            final_path.file_stem().and_then(|s| s.to_str()).unwrap_or("spill"),
-            n,
-            tid
-        ));
+        let path = self.root.join(format!("spill-{}-{:?}-{}.bin", pid, tid, n));
 
         {
-            let mut f = File::create(&tmp).map_err(|e| {
-                log::warn!("spill: create tmp failed at {}: {}", tmp.display(), e);
-                e
-            })?;
+            let mut f = File::create(&path)?;
             f.write_all(bytes)?;
         }
-        if let Err(e) = std::fs::rename(&tmp, &final_path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-        let file = File::open(&final_path)?;
+        let file = File::open(&path)?;
         let mmap = unsafe { MmapOptions::new().map(&file)? };
+        // Anonymise: drop the directory entry; the open fd + mmap keep the
+        // file alive. Failure here is non-fatal — worst case the file is
+        // left behind for the next run to clean up.
+        if let Err(e) = std::fs::remove_file(&path) {
+            log::trace!(
+                "spill: failed to unlink {} for source {} ({}); leaving on disk",
+                path.display(),
+                source_key,
+                e
+            );
+        }
         Ok(mmap)
     }
 }
@@ -118,19 +97,31 @@ mod tests {
     }
 
     #[test]
-    fn try_mmap_returns_none_for_missing() {
+    fn file_is_unlinked_after_write() {
         let root = tmp_root();
         let store = SpillStore::new(&root);
-        assert!(store.try_mmap("never-written").is_none());
+        let _mmap = store.write_and_mmap("vol/L00/0/0/0", &[42u8; 128]).unwrap();
+        // The mmap holds the inode but the directory entry must be gone.
+        let listing: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .collect();
+        assert!(
+            listing.is_empty(),
+            "spill files must be unlinked; found: {:?}",
+            listing.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
-    fn try_mmap_finds_previously_written() {
+    fn mmap_outlives_unlink() {
+        // After unlink the mmap must still read the original bytes — that's
+        // the whole point of the anonymous-file trick.
         let root = tmp_root();
         let store = SpillStore::new(&root);
-        let _ = store.write_and_mmap("vol/L00/1/2/3", &[7u8; 256]).unwrap();
-        let again = store.try_mmap("vol/L00/1/2/3").expect("mmap after write");
-        assert_eq!(again.len(), 256);
-        assert!(again.iter().all(|b| *b == 7));
+        let bytes: Vec<u8> = (0..1024u32).map(|i| (i * 31 & 0xff) as u8).collect();
+        let mmap = store.write_and_mmap("anon-test", &bytes).unwrap();
+        assert_eq!(&mmap[..], &bytes[..]);
     }
 }

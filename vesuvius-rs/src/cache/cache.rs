@@ -88,8 +88,19 @@ struct Inner {
 }
 
 enum SourceState {
-    Pending { waiters: Vec<ChunkKey> },
-    Done(SourceOutcome),
+    Pending {
+        waiters: Vec<ChunkKey>,
+    },
+    /// Source completed. `remaining_consumers` counts chunks that have
+    /// claimed this source but haven't yet finished `extract_chunk`. When
+    /// it reaches zero the source entry is evicted from
+    /// `Inner::sources`, dropping its `SourcePayload` (typically an
+    /// `Arc<Mmap>`) so the kernel reclaims the spilled file's pages and
+    /// disk space.
+    Done {
+        outcome: SourceOutcome,
+        remaining_consumers: usize,
+    },
 }
 
 struct ChunkProgress {
@@ -458,11 +469,19 @@ impl Inner {
                     );
                     RegisterResult::AttachedPending
                 }
-                SourceState::Done(outcome) => {
+                SourceState::Done {
+                    outcome,
+                    remaining_consumers,
+                } => {
+                    // New consumer for an already-completed source — bump
+                    // the refcount so `extract_chunk`'s eviction logic
+                    // waits for this chunk too.
+                    *remaining_consumers += 1;
                     log::trace!(
-                        "cache: source {} dedup-done (chunk {:?} → immediate satisfy)",
+                        "cache: source {} dedup-done (chunk {:?} → immediate satisfy, refcount {})",
                         source_key,
-                        chunk_key
+                        chunk_key,
+                        remaining_consumers
                     );
                     RegisterResult::AlreadyDone(outcome.clone())
                 }
@@ -581,10 +600,20 @@ impl Inner {
 
         let waiters = {
             let mut s = arc.lock().unwrap();
-            let prev = std::mem::replace(&mut *s, SourceState::Done(outcome.clone()));
+            let n = match &*s {
+                SourceState::Pending { waiters } => waiters.len(),
+                _ => 0,
+            };
+            let prev = std::mem::replace(
+                &mut *s,
+                SourceState::Done {
+                    outcome: outcome.clone(),
+                    remaining_consumers: n,
+                },
+            );
             match prev {
                 SourceState::Pending { waiters } => waiters,
-                SourceState::Done(_) => return,
+                SourceState::Done { .. } => return,
             }
         };
 
@@ -716,6 +745,37 @@ impl Inner {
                 cooldown()
             }
         };
+        // Drop our inputs so the per-source payloads (mmaps in the
+        // download path) only stay alive while the refcount-eviction loop
+        // can see them — Arc clones inside the source entries remain.
+        drop(inputs);
+
+        // Decrement consumer refcounts for each source this chunk used.
+        // When a count hits zero we evict the source entry from
+        // `self.sources`; that drops its `Arc<Mmap>`, the kernel reclaims
+        // the spill file's pages, and (because the spill file was already
+        // unlinked) the disk space is freed too.
+        if !order.is_empty() {
+            let mut sources = self.sources.lock().unwrap();
+            for source_key in &order {
+                let should_evict = if let Some(arc) = sources.get(source_key) {
+                    let mut s = arc.lock().unwrap();
+                    if let SourceState::Done { remaining_consumers, .. } = &mut *s {
+                        *remaining_consumers = remaining_consumers.saturating_sub(1);
+                        *remaining_consumers == 0
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if should_evict {
+                    log::trace!("cache: evicting source {} (last consumer extracted)", source_key);
+                    sources.remove(source_key);
+                }
+            }
+        }
+
         self.map.insert(key, new_state);
     }
 
@@ -748,7 +808,7 @@ impl Inner {
     fn is_source_done(&self, source_key: &str) -> bool {
         let sources = self.sources.lock().unwrap();
         match sources.get(source_key) {
-            Some(arc) => matches!(*arc.lock().unwrap(), SourceState::Done(_)),
+            Some(arc) => matches!(*arc.lock().unwrap(), SourceState::Done { .. }),
             None => false,
         }
     }
