@@ -32,3 +32,6 @@ wavefront_obj   = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memmap = { workspace = true }
+
+[dev-dependencies]
+env_logger = { workspace = true }

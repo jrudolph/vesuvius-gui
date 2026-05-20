@@ -303,7 +303,10 @@ impl NewVolumeReference {
             }
             NewVolumeReference::OmeZarr { id, location } => {
                 let (ome, source_key) = match location {
-                    VolumeLocation::RemoteUrl(url) => (OmeZarrContext::from_url_to_default_cache_dir(url), url.clone()),
+                    VolumeLocation::RemoteUrl(url) => (
+                        OmeZarrContext::from_url_blocking_to_default_cache_dir(url),
+                        url.clone(),
+                    ),
                     VolumeLocation::LocalPath(path) => (OmeZarrContext::from_path(path), format!("file://{}", path)),
                 };
                 let cache_root = std::path::PathBuf::from(default_cache_dir_for_url(&source_key));

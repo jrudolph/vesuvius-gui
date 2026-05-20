@@ -399,9 +399,17 @@ impl BlockingRemoteZarrDirectory {
             let parent_dir = std::path::Path::new(&target_file).parent().unwrap();
             std::fs::create_dir_all(parent_dir).unwrap();
 
-            let mut file = File::create(&target_file).unwrap();
-            file.write_all(&data).unwrap();
-            let file = Arc::new(file);
+            // Write atomically then reopen for reading. `File::create` returns
+            // a write-only handle; mmap'ing it would later fail with EACCES
+            // for uncompressed (`RawContext`) chunks that go through
+            // `memmap::Mmap::map`.
+            let tmp_file = format!("{}.tmp", target_file);
+            {
+                let mut tmp = File::create(&tmp_file).unwrap();
+                tmp.write_all(&data).unwrap();
+            }
+            std::fs::rename(&tmp_file, &target_file).unwrap();
+            let file = Arc::new(File::open(&target_file).unwrap());
 
             *entry = Some(file.clone());
 

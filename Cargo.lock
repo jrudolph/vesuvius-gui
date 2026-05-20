@@ -4047,6 +4047,7 @@ dependencies = [
  "directories",
  "ecolor",
  "ehttp",
+ "env_logger",
  "fxhash",
  "itertools",
  "libm",

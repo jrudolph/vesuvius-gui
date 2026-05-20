@@ -151,6 +151,62 @@ impl OmeZarrContext {
         let url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
         Self::from_url(url, &default_cache_dir_for_url(url))
     }
+    /// Blocking variant of `from_url`: every per-dataset `ZarrArray` is built
+    /// with `from_url_blocking`, so `load_chunk` always blocks until the
+    /// chunk is on disk (or returns `None` definitively for 404s). Designed
+    /// for the unified-cache backfillers, where the cache layer drives its
+    /// own dedup + scheduling and the async download path in v2 would
+    /// otherwise hide in-flight state behind `None`.
+    pub fn from_url_blocking(url: &str, local_cache_dir: &str) -> Self {
+        let client = build_blocking_client();
+        if let Some(attrs_value) = super::v3::read_v3_group_attributes_remote(url, local_cache_dir, &client) {
+            let attrs: OmeZarrAttrs =
+                serde_json::from_value(attrs_value).expect("v3 group attributes missing valid `multiscales`");
+            let ome_zarr = OmeZarr { attrs };
+            let zarr_contexts = ome_zarr.attrs.multiscales[0]
+                .datasets
+                .iter()
+                .filter_map(|dataset| {
+                    let url_path = format!("{}/{}", url, dataset.path);
+                    let cache_path = format!("{}/{}", local_cache_dir, dataset.path);
+                    if !remote_dataset_present(&url_path, &cache_path, &client) {
+                        log::warn!(
+                            "OmeZarrContext::from_url_blocking: skipping missing dataset `{}`",
+                            dataset.path
+                        );
+                        return None;
+                    }
+                    Some(
+                        ZarrArray::<3, u8>::from_url_auto(&url_path, &cache_path, client.clone())
+                            .into_ctx()
+                            .into_ctx(),
+                    )
+                })
+                .collect();
+            return Self { ome_zarr, zarr_contexts, cache_missing: true };
+        }
+
+        // v2 path, but via the blocking accessor so all `load_chunk` calls
+        // synchronously resolve to bytes-or-None.
+        let attrs = Self::load_attrs(url, local_cache_dir);
+        let ome_zarr = OmeZarr { attrs };
+        let zarr_contexts = ome_zarr.attrs.multiscales[0]
+            .datasets
+            .iter()
+            .map(|dataset| {
+                let url_path = format!("{}/{}", url, dataset.path);
+                let cache_path = format!("{}/{}", local_cache_dir, dataset.path);
+                ZarrArray::from_url_blocking(&url_path, &cache_path, client.clone())
+                    .into_ctx()
+                    .into_ctx()
+            })
+            .collect();
+        Self { ome_zarr, zarr_contexts, cache_missing: true }
+    }
+    pub fn from_url_blocking_to_default_cache_dir(url: &str) -> Self {
+        let url = if url.ends_with("/") { &url[..url.len() - 1] } else { url };
+        Self::from_url_blocking(url, &default_cache_dir_for_url(url))
+    }
     pub fn from_path(path: &str) -> Self {
         // Prefer v3 group `zarr.json` (the c3d-compressed volumes) over the
         // legacy v2 `.zattrs`. Both have the same `multiscales` shape inside.
