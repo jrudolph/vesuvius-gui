@@ -59,28 +59,31 @@ fn main() {
         let mut resident = 0;
         let mut pending = 0;
         let mut cooldown = 0;
+        let mut empty = 0;
         for k in &keys {
             let s = cache.state_or_fetch(*k);
             match s.as_ref() {
                 ChunkState::Resident(_) => resident += 1,
                 ChunkState::Pending => pending += 1,
                 ChunkState::CooldownMiss { .. } => cooldown += 1,
+                ChunkState::Empty => empty += 1,
                 ChunkState::Missing => {}
             }
         }
         let summary = format!(
-            "resident={}/{} pending={} cooldown={}",
+            "resident={}/{} pending={} cooldown={} empty={}",
             resident,
             keys.len(),
             pending,
-            cooldown
+            cooldown,
+            empty
         );
         if summary != last_summary {
             println!("  [{:>6.2}s] {}", t0.elapsed().as_secs_f32(), summary);
             last_summary = summary.clone();
         }
-        if resident == keys.len() {
-            println!("all chunks resident after {:?}", t0.elapsed());
+        if resident + empty == keys.len() {
+            println!("all chunks settled after {:?} (resident={}, empty={})", t0.elapsed(), resident, empty);
             return;
         }
         if Instant::now() >= deadline {

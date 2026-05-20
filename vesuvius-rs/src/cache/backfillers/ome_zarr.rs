@@ -67,6 +67,16 @@ impl ChunkBackfiller for OmeZarrBackfiller {
     fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
         let lod = key.lod as usize;
         let array = self.arrays.get(lod).ok_or(BackfillError::OutOfBounds)?;
+
+        // V3 sharded c3d remote arrays take a specialized planning path
+        // that issues HTTP Range requests for individual sub-chunks
+        // through the central downloader pool. Everything else (v2, local
+        // v3, anything that doesn't expose a v3 remote handle) keeps the
+        // existing native-chunk path below.
+        if let Some(v3) = array.v3_remote_sharded() {
+            return super::ome_zarr_v3::plan_v3_chunk(&v3, &self.volume_id, key, lod);
+        }
+
         let def = array.def();
         let shape = def.shape.clone();
         let nchunk = def.chunks.clone();
@@ -119,7 +129,11 @@ impl ChunkBackfiller for OmeZarrBackfiller {
                         self.volume_id, lod, coord[0], coord[1], coord[2]
                     );
                     let spec = match array.chunk_url(coord) {
-                        Some(url) => SourceSpec::Download { key: source_key, url },
+                        Some(url) => SourceSpec::Download {
+                            key: source_key,
+                            url,
+                            range: None,
+                        },
                         None => {
                             // Local-disk array: no URL, fall back to a
                             // synchronous compute source.

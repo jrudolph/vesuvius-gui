@@ -73,6 +73,12 @@ pub enum SourceSpec {
         /// `extract` closure receives the raw bytes and is responsible for
         /// any decompression.
         url: String,
+        /// Optional byte range `(offset, len)` to request. When `Some`, the
+        /// downloader issues a `Range: bytes=offset-(offset+len-1)` request
+        /// and treats `206 Partial Content` as success. Used by sharded
+        /// formats (e.g. zarr v3 c3d) where one URL backs many sub-chunks
+        /// addressed by offset+length pairs derived from a shard index.
+        range: Option<(u64, u64)>,
     },
     /// Depend on another cache chunk. The cache dispatches the child chunk
     /// (no worker thread blocks waiting on it) and, when the child becomes

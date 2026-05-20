@@ -4063,6 +4063,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tiff 0.10.3",
+ "vesuvius-c3d",
  "vesuvius-zarr",
  "wavefront_obj",
 ]

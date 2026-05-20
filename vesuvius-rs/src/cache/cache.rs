@@ -611,7 +611,7 @@ impl Inner {
                     }
                 }
             }
-            SourceSpec::Download { key: _, url } => {
+            SourceSpec::Download { key: _, url, range } => {
                 let inner = self.clone();
                 let key_for_done = source_key.clone();
                 let on_done: OnDone = Box::new(move |result: DownloadResult| {
@@ -640,7 +640,7 @@ impl Inner {
                 // synchronously fire `on_done` (queue full / eviction), which
                 // calls complete_source — that path now safely re-locks
                 // self.sources.
-                match self.downloader.try_submit(&url, chunk_key, priority, on_done) {
+                match self.downloader.try_submit(&url, range, chunk_key, priority, on_done) {
                     SubmitResult::Submitted => {
                         log::trace!("[{}] submitted (chunk {})", source_key, chunk_key);
                         RegisterResult::Queued

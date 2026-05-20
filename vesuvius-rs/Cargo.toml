@@ -6,6 +6,7 @@ rust-version = "1.70"
 
 [dependencies]
 vesuvius-zarr   = { path = "../vesuvius-zarr" }
+vesuvius-c3d    = { path = "../vesuvius-c3d" }
 
 anyhow          = { workspace = true }
 base64          = { workspace = true }

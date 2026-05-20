@@ -107,6 +107,12 @@ pub struct ZarrArrayDef {
 #[derive(Clone)]
 pub struct ZarrArray<const N: usize, T> {
     access: Arc<dyn ZarrFileAccess>,
+    /// Backend-specific handle for v3 sharded c3d arrays hosted remotely.
+    /// Populated by `v3::open_v3_array_remote`; all other constructors
+    /// leave it `None`. The unified-cache backfiller uses this to bypass
+    /// `load_chunk` and issue HTTP Range requests against shard files
+    /// directly through its central downloader pool.
+    v3_remote: Option<Arc<dyn v3::V3RemoteShardedAccess>>,
     def: ZarrArrayDef,
     phantom_t: std::marker::PhantomData<T>,
 }
@@ -574,6 +580,7 @@ impl<const N: usize> ZarrArray<N, u8> {
         let def = access.load_array_def();
         ZarrArray {
             access,
+            v3_remote: None,
             def,
             phantom_t: std::marker::PhantomData,
         }
@@ -581,9 +588,36 @@ impl<const N: usize> ZarrArray<N, u8> {
     pub fn from_def_and_access(def: ZarrArrayDef, access: Arc<dyn ZarrFileAccess>) -> Self {
         ZarrArray {
             access,
+            v3_remote: None,
             def,
             phantom_t: std::marker::PhantomData,
         }
+    }
+    /// Construct a ZarrArray backed by a v3-sharded-c3d remote access. The
+    /// caller supplies both the type-erased `ZarrFileAccess` for the
+    /// shared `load_chunk` pipeline and the same impl exposed as a
+    /// `V3RemoteShardedAccess` so the unified cache can plan HTTP Range
+    /// fetches directly. Typical caller is `v3::open_v3_array_remote`.
+    pub fn from_def_access_and_v3(
+        def: ZarrArrayDef,
+        access: Arc<dyn ZarrFileAccess>,
+        v3_remote: Option<Arc<dyn v3::V3RemoteShardedAccess>>,
+    ) -> Self {
+        ZarrArray {
+            access,
+            v3_remote,
+            def,
+            phantom_t: std::marker::PhantomData,
+        }
+    }
+
+    /// Returns the remote v3 sharded handle when this array is backed by
+    /// a remote v3 c3d-sharded zarr. Returns `None` for v2 arrays, local
+    /// v3 arrays, and any other backend. The cache backfiller uses this
+    /// to switch between the existing `decode_chunk_bytes` path and the
+    /// Range-request planner.
+    pub fn v3_remote_sharded(&self) -> Option<Arc<dyn v3::V3RemoteShardedAccess>> {
+        self.v3_remote.clone()
     }
 
     pub fn into_ctx(self) -> ZarrContextBase<N> {

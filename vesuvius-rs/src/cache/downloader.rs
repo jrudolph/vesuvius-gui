@@ -71,6 +71,9 @@ struct Queue {
 
 struct Entry {
     url: String,
+    /// Optional byte range `(offset, len)`. When set, the worker sends a
+    /// `Range: bytes=offset-(offset+len-1)` header and accepts 206.
+    range: Option<(u64, u64)>,
     /// The cache chunk this download is on behalf of. Used for logging and
     /// for the per-chunk "active GET in flight" counter exposed via
     /// `is_active_chunk` — the downloader still does not order or schedule
@@ -125,13 +128,22 @@ impl Downloader {
     /// Non-blocking submission with explicit priority + chunk identity.
     ///
     /// `chunk` is the cache chunk this download is on behalf of (used for
-    /// logging only — the downloader doesn't otherwise care).
+    /// logging only — the downloader doesn't otherwise care). `range`, when
+    /// `Some((offset, len))`, becomes a `Range: bytes=offset-(offset+len-1)`
+    /// header on the request; 206 Partial Content is accepted as success.
     ///
     /// On `QueueFull`, `on_done` is invoked synchronously with
     /// `Err(Transient(...))` so the caller's cancellation path runs
     /// uniformly with stale-pop cancellation. Callers MUST NOT hold any
     /// lock that `on_done` re-enters.
-    pub fn try_submit(&self, url: &str, chunk: ChunkKey, priority: Priority, on_done: OnDone) -> SubmitResult {
+    pub fn try_submit(
+        &self,
+        url: &str,
+        range: Option<(u64, u64)>,
+        chunk: ChunkKey,
+        priority: Priority,
+        on_done: OnDone,
+    ) -> SubmitResult {
         let rejected_on_done = {
             let mut q = self.inner.queue.lock().unwrap();
             if q.closed {
@@ -143,6 +155,7 @@ impl Downloader {
                     key,
                     Entry {
                         url: url.to_string(),
+                        range,
                         chunk,
                         added_at: Instant::now(),
                         on_done,
@@ -235,34 +248,50 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
         };
 
         let t0 = Instant::now();
-        log::trace!("[{}] GET", entry.url);
+        let mut req = client.get(&entry.url);
+        if let Some((off, len)) = entry.range {
+            // bytes=off-end is inclusive on both ends; end = off + len - 1.
+            let end = off.saturating_add(len.saturating_sub(1));
+            let header = format!("bytes={}-{}", off, end);
+            log::trace!("[{}] GET {}", entry.url, header);
+            req = req.header(reqwest::header::RANGE, header);
+        } else {
+            log::trace!("[{}] GET", entry.url);
+        }
         inner.mark_active(entry.chunk);
         let _active = ActiveGuard {
             inner: &inner,
             chunk: entry.chunk,
         };
-        let outcome: DownloadResult = match client.get(&entry.url).send() {
+        let outcome: DownloadResult = match req.send() {
             Ok(resp) => {
                 let status = resp.status();
-                if status.as_u16() == 200 {
+                let code = status.as_u16();
+                // 200 OK is the un-ranged success; 206 Partial Content is the
+                // ranged success. Some servers return 200 with the full body
+                // when they ignore Range — caller decides whether that's
+                // acceptable. Here we surface either as Ok(Some(bytes)).
+                if code == 200 || code == 206 {
                     match resp.bytes() {
                         Ok(bytes) => {
-                            log::trace!("[{}] 200 ({} bytes, {:?})", entry.url, bytes.len(), t0.elapsed());
+                            log::trace!("[{}] {} ({} bytes, {:?})", entry.url, code, bytes.len(), t0.elapsed());
                             Ok(Some(bytes.to_vec()))
                         }
                         Err(e) => Err(DownloadError::Transient(format!("read body: {}", e))),
                     }
-                } else if status.as_u16() == 404 || status.as_u16() == 403 {
+                } else if code == 404 || code == 403 {
                     // 404 (not found) and 403 (forbidden) are both definitive
                     // absences for our purposes: many static-object stores
                     // serve 403 instead of 404 for unlisted keys. Surface as
                     // `Ok(None)` so the cache can negatively cache the chunk
                     // rather than retry on a cooldown loop.
-                    log::trace!("[{}] {} ({:?})", entry.url, status.as_u16(), t0.elapsed());
+                    log::trace!("[{}] {} ({:?})", entry.url, code, t0.elapsed());
                     Ok(None)
                 } else {
-                    log::debug!("[{}] {} ({:?})", entry.url, status.as_u16(), t0.elapsed());
-                    Err(DownloadError::Transient(format!("status {}", status.as_u16())))
+                    // 416 Range Not Satisfiable: shouldn't happen post-index
+                    // lookup. Treat as transient so the cooldown surfaces it.
+                    log::debug!("[{}] {} ({:?})", entry.url, code, t0.elapsed());
+                    Err(DownloadError::Transient(format!("status {}", code)))
                 }
             }
             Err(e) => {

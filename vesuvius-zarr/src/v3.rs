@@ -17,7 +17,27 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// Public handle into a remote v3 sharded c3d array. Exposes the shard
+/// grid metadata, shard URL builder, and a single-flight, blocking
+/// shard-index fetcher — i.e. everything a planner needs to issue HTTP
+/// Range requests against sub-chunks without going through `load_chunk`.
+///
+/// Implementations cache shard indices in-memory + on-disk; the first
+/// call for a given shard does the network fetch and concurrent callers
+/// for that same shard block on the result rather than racing.
+pub trait V3RemoteShardedAccess: Send + Sync {
+    fn sub_chunk_shape(&self) -> [usize; 3];
+    fn sub_chunks_per_shard(&self) -> [usize; 3];
+    fn shape(&self) -> &[usize];
+    fn shard_url(&self, shard: [usize; 3]) -> String;
+    /// Blocking, single-flight: returns the parsed shard index, or `None`
+    /// if the shard is definitively absent (404/403 on first fetch, or a
+    /// previously persisted `_missing` marker on disk). Concurrent
+    /// callers for the same shard coalesce to a single HTTP fetch.
+    fn shard_index(&self, shard: [usize; 3]) -> Option<Arc<ShardIndex>>;
+}
 
 #[derive(Debug, Deserialize)]
 pub struct V3ArrayJson {
@@ -427,19 +447,22 @@ struct RemoteV3ShardedAccess {
     client: Client,
     sharded: Sharded,
     shape: Vec<usize>,
-    // In-memory caches. The on-disk caches (under `compressed_dir` and
-    // `decoded_cache.root`) survive restarts; this in-memory layer just avoids
-    // re-reading the disk file on every miss.
-    index_cache: DashMap<[usize; 3], Arc<ShardIndex>, FxBuildHasher>,
-    // None = we tried to fetch the shard index and the shard is missing (404).
-    // Some(idx) = present. Avoids re-fetching the index for empty shards.
-    index_known_missing: DashMap<[usize; 3], (), FxBuildHasher>,
+    // Single-flight shard-index cache. Each shard has its own `OnceLock`;
+    // the first caller into `get_index(shard)` runs `fetch_index_blocking`
+    // while concurrent callers for that same shard block inside
+    // `get_or_init`. The persisted Option is `Some` when present and
+    // `None` when the shard is definitively absent (404/403, or a
+    // pre-existing `_missing` marker on disk). The on-disk caches (under
+    // `compressed_dir` and `decoded_cache.root`) survive restarts; this
+    // in-memory layer just coalesces concurrent fetches and avoids
+    // re-reading the disk file on every miss within one process.
+    index_cells: DashMap<[usize; 3], Arc<OnceLock<Option<Arc<ShardIndex>>>>, FxBuildHasher>,
     // Layer 2: persisted decoded sub-chunks.
     decoded_cache: DecodedCache,
 }
 
 impl RemoteV3ShardedAccess {
-    fn shard_url(&self, shard: [usize; 3]) -> String {
+    fn shard_url_inner(&self, shard: [usize; 3]) -> String {
         let sep = &self.sharded.separator;
         format!("{}/c/{}{sep}{}{sep}{}", self.array_url, shard[0], shard[1], shard[2])
     }
@@ -463,32 +486,37 @@ impl RemoteV3ShardedAccess {
     }
 
     fn get_index(&self, shard: [usize; 3]) -> Option<Arc<ShardIndex>> {
-        if let Some(entry) = self.index_cache.get(&shard) {
-            return Some(entry.clone());
-        }
-        if self.index_known_missing.contains_key(&shard) {
-            return None;
-        }
+        // Resolve (or create) the per-shard cell. The clone+drop pattern
+        // releases the dashmap bucket lock before we block inside
+        // `get_or_init`, so concurrent callers for different shards never
+        // contend on the dashmap and concurrent callers for the same
+        // shard coalesce inside the OnceLock.
+        let cell = {
+            let entry = self
+                .index_cells
+                .entry(shard)
+                .or_insert_with(|| Arc::new(OnceLock::new()));
+            entry.value().clone()
+        };
+        cell.get_or_init(|| self.fetch_index_blocking(shard)).clone()
+    }
 
+    fn fetch_index_blocking(&self, shard: [usize; 3]) -> Option<Arc<ShardIndex>> {
         let disk_idx = self.index_disk_path(shard);
         let missing = self.missing_marker_path(shard);
         if missing.exists() {
-            self.index_known_missing.insert(shard, ());
             return None;
         }
         if let Ok(bytes) = std::fs::read(&disk_idx) {
-            let parsed = Arc::new(ShardIndex::parse_bytes_codec(
+            return Some(Arc::new(ShardIndex::parse_bytes_codec(
                 &bytes,
                 self.sharded.n_sub_chunks_per_shard,
-            ));
-            self.index_cache.insert(shard, parsed.clone());
-            return Some(parsed);
+            )));
         }
 
-        // Range-fetch the index.
-        let url = self.shard_url(shard);
+        let url = self.shard_url_inner(shard);
         let remote = RemoteShard {
-            url: url.clone(),
+            url,
             client: self.client.clone(),
         };
         let bytes = match remote.read_index_bytes(self.sharded.n_sub_chunks_per_shard) {
@@ -497,7 +525,6 @@ impl RemoteV3ShardedAccess {
                 // Persist a "missing" marker so the next process doesn't retry.
                 let _ = std::fs::create_dir_all(self.shard_cache_dir(shard));
                 let _ = std::fs::write(&missing, b"");
-                self.index_known_missing.insert(shard, ());
                 return None;
             }
         };
@@ -511,8 +538,6 @@ impl RemoteV3ShardedAccess {
         if std::fs::write(&tmp, &bytes).is_ok() {
             let _ = std::fs::rename(&tmp, &disk_idx);
         }
-
-        self.index_cache.insert(shard, parsed.clone());
         Some(parsed)
     }
 
@@ -522,9 +547,9 @@ impl RemoteV3ShardedAccess {
             return Some(bytes);
         }
 
-        let url = self.shard_url(shard);
+        let url = self.shard_url_inner(shard);
         let remote = RemoteShard {
-            url: url.clone(),
+            url,
             client: self.client.clone(),
         };
         let bytes = remote.read_range(off, len)?;
@@ -535,6 +560,24 @@ impl RemoteV3ShardedAccess {
             let _ = std::fs::rename(&tmp, &disk_path);
         }
         Some(bytes)
+    }
+}
+
+impl V3RemoteShardedAccess for RemoteV3ShardedAccess {
+    fn sub_chunk_shape(&self) -> [usize; 3] {
+        self.sharded.sub_chunk_shape
+    }
+    fn sub_chunks_per_shard(&self) -> [usize; 3] {
+        self.sharded.sub_chunks_per_shard
+    }
+    fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+    fn shard_url(&self, shard: [usize; 3]) -> String {
+        self.shard_url_inner(shard)
+    }
+    fn shard_index(&self, shard: [usize; 3]) -> Option<Arc<ShardIndex>> {
+        self.get_index(shard)
     }
 }
 
@@ -610,11 +653,12 @@ pub fn open_v3_array_remote(url: &str, cache_dir: &str, client: Client) -> ZarrA
         client,
         sharded,
         shape,
-        index_cache: DashMap::with_hasher(FxBuildHasher::default()),
-        index_known_missing: DashMap::with_hasher(FxBuildHasher::default()),
+        index_cells: DashMap::with_hasher(FxBuildHasher::default()),
         decoded_cache: DecodedCache::new(decoded_dir),
     });
-    ZarrArray::from_def_and_access(def, access)
+    let v3_handle: Arc<dyn V3RemoteShardedAccess> = access.clone();
+    let access_dyn: Arc<dyn ZarrFileAccess> = access;
+    ZarrArray::from_def_access_and_v3(def, access_dyn, Some(v3_handle))
 }
 
 pub fn open_v3_array_local(path: &str) -> ZarrArray<3, u8> {
