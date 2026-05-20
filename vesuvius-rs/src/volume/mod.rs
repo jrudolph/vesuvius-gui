@@ -71,6 +71,8 @@ pub struct DrawingConfig {
     pub show_segment_outlines: bool,
     pub draw_outline_vertices: bool,
     pub compositing: CompositingSettings,
+    /// Debug: tint each painted chunk by its cache state.
+    pub debug_chunk_overlay: bool,
 }
 impl DrawingConfig {
     pub fn filters_active(&self) -> bool {
@@ -124,6 +126,7 @@ impl Default for DrawingConfig {
                 opacity: 1,
                 reverse_direction: false,
             },
+            debug_chunk_overlay: false,
         }
     }
 }

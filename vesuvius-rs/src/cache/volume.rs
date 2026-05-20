@@ -35,8 +35,13 @@ use super::cache::ChunkCache;
 use super::priority::{LodView, Viewport};
 use super::state::{ChunkKey, ChunkState};
 use crate::volume::{DrawingConfig, Image, PaintVolume, VolumeCons, VoxelPaintVolume, VoxelVolume};
+use ecolor::Color32;
 use std::cell::RefCell;
 use std::sync::Arc;
+
+/// Overlay alpha for `debug_chunk_overlay`. Low enough that voxel detail is
+/// still readable underneath.
+const OVERLAY_ALPHA: f32 = 0.35;
 
 pub struct UnifiedVolume {
     cache: ChunkCache,
@@ -161,6 +166,25 @@ fn coord_at_lod(sx: u64, sy: u64, sz: u64, from_lod: u8, to_lod: u8) -> (u64, u6
     } else {
         let shift = from_lod - to_lod;
         (sx << shift, sy << shift, sz << shift)
+    }
+}
+
+/// Map the cache state of one target-LOD chunk (plus which LOD actually
+/// rendered) to an overlay tint. `None` means "ready at target LOD; no
+/// overlay needed".
+fn overlay_color_for(target_lod: u8, chosen_lod: Option<u8>, target_state: Option<&ChunkState>) -> Option<Color32> {
+    match (chosen_lod, target_state) {
+        // Rendered at target LOD with real data — happy path, no tint.
+        (Some(l), _) if l == target_lod => None,
+        // Rendered via a coarser parent (target not ready).
+        (Some(_), _) => Some(Color32::from_rgb(60, 130, 230)), // blue
+        // Nothing resident yet — inspect target state for finer signal.
+        (None, Some(ChunkState::Pending)) => Some(Color32::from_rgb(230, 200, 40)), // yellow
+        (None, Some(ChunkState::CooldownMiss { .. })) => Some(Color32::from_rgb(220, 60, 60)), // red
+        (None, Some(ChunkState::Missing)) | (None, None) => Some(Color32::from_rgb(220, 60, 220)), // magenta
+        // Defensive: Resident but `chosen` is None shouldn't happen, but if
+        // it does, no overlay.
+        (None, Some(ChunkState::Resident(_))) => None,
     }
 }
 
@@ -361,33 +385,57 @@ impl PaintVolume for UnifiedVolume {
                         break;
                     }
                 }
-                let Some((lod_use, state)) = chosen else { continue };
-                let mmap = state.as_resident().expect("just checked resident");
 
-                let scale_use = 1i32 << lod_use;
-                let chunk_world_use = 64 * scale_use;
-                let shift = lod_use - target_lod;
-                let parent_tu = tu >> shift;
-                let parent_tv = tv >> shift;
-                let parent_tpc = t.tile_pc >> shift;
-                let chunk_u_lo = parent_tu * chunk_world_use;
-                let chunk_v_lo = parent_tv * chunk_world_use;
-                let chunk_pc_lo = parent_tpc * chunk_world_use;
-                let plane_sample = ((pc - chunk_pc_lo) / scale_use) as usize;
+                if let Some((lod_use, state)) = chosen.as_ref() {
+                    let mmap = state.as_resident().expect("just checked resident");
+                    let scale_use = 1i32 << *lod_use;
+                    let chunk_world_use = 64 * scale_use;
+                    let shift = *lod_use - target_lod;
+                    let parent_tu = tu >> shift;
+                    let parent_tv = tv >> shift;
+                    let parent_tpc = t.tile_pc >> shift;
+                    let chunk_u_lo = parent_tu * chunk_world_use;
+                    let chunk_v_lo = parent_tv * chunk_world_use;
+                    let chunk_pc_lo = parent_tpc * chunk_world_use;
+                    let plane_sample = ((pc - chunk_pc_lo) / scale_use) as usize;
 
-                for v_px in v_px_lo..v_px_hi {
-                    let world_v = min_vc + v_px * pzoom;
-                    let sample_v = ((world_v - chunk_v_lo) / scale_use) as usize;
-                    for u_px in u_px_lo..u_px_hi {
-                        let world_u = min_uc + u_px * pzoom;
-                        let sample_u = ((world_u - chunk_u_lo) / scale_use) as usize;
-                        let mut s = [0usize; 3];
-                        s[u_coord] = sample_u;
-                        s[v_coord] = sample_v;
-                        s[plane_coord] = plane_sample;
-                        let off = s[2] * 64 * 64 + s[1] * 64 + s[0];
-                        let value = config.filter(mmap[off]);
-                        buffer.set_gray(u_px as usize, v_px as usize, value);
+                    for v_px in v_px_lo..v_px_hi {
+                        let world_v = min_vc + v_px * pzoom;
+                        let sample_v = ((world_v - chunk_v_lo) / scale_use) as usize;
+                        for u_px in u_px_lo..u_px_hi {
+                            let world_u = min_uc + u_px * pzoom;
+                            let sample_u = ((world_u - chunk_u_lo) / scale_use) as usize;
+                            let mut s = [0usize; 3];
+                            s[u_coord] = sample_u;
+                            s[v_coord] = sample_v;
+                            s[plane_coord] = plane_sample;
+                            let off = s[2] * 64 * 64 + s[1] * 64 + s[0];
+                            let value = config.filter(mmap[off]);
+                            buffer.set_gray(u_px as usize, v_px as usize, value);
+                        }
+                    }
+                } else if !config.debug_chunk_overlay {
+                    // Without the overlay we just leave the rect untouched
+                    // (caller cleared the buffer). The overlay path below
+                    // wants to paint a "no data" tint, so fall through.
+                    continue;
+                }
+
+                if config.debug_chunk_overlay {
+                    let mut chunk = [0u32; 3];
+                    chunk[u_coord] = tu as u32;
+                    chunk[v_coord] = tv as u32;
+                    chunk[plane_coord] = t.tile_pc as u32;
+                    let target_key = ChunkKey::new(target_lod, chunk[0], chunk[1], chunk[2]);
+                    let target_state = self.cache.peek(target_key);
+                    let chosen_lod = chosen.as_ref().map(|(l, _)| *l);
+                    let color = overlay_color_for(target_lod, chosen_lod, target_state.as_deref());
+                    if let Some(c) = color {
+                        for v_px in v_px_lo..v_px_hi {
+                            for u_px in u_px_lo..u_px_hi {
+                                buffer.blend(u_px as usize, v_px as usize, c, OVERLAY_ALPHA);
+                            }
+                        }
                     }
                 }
             }

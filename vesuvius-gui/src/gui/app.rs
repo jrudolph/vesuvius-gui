@@ -960,6 +960,17 @@ impl TemplateApp {
                 }
             });
 
+        ui.collapsing("Debug", |ui| {
+            ui.checkbox(
+                &mut self.drawing_config.debug_chunk_overlay,
+                "Chunk cache state overlay",
+            )
+            .on_hover_text(
+                "Tint each chunk by its cache state: blue = served from coarser LOD, \
+                 yellow = pending, red = cooldown, magenta = missing.",
+            );
+        });
+
         if self.overlay.is_some() {
             ui.collapsing("Overlay coloring", |ui| {
                 let label = match self.overlay_coloring {
