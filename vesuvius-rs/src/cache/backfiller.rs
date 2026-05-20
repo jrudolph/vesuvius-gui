@@ -99,12 +99,39 @@ impl SourceSpec {
     }
 }
 
+/// Outcome of materializing one cache chunk inside an `extract` call.
+#[derive(Debug)]
+pub enum ExtractedChunk {
+    /// Bytes for the chunk — exactly `CHUNK_VOXELS`. Cache writes them via
+    /// `write_atomic` and (for the chunk that triggered the extract) mmaps
+    /// for in-memory residency.
+    Bytes(Vec<u8>),
+    /// Chunk is definitively absent — cache writes a `.empty` sentinel and
+    /// (for the chunk that triggered the extract) transitions to
+    /// `ChunkState::Empty`. Use this when the backfiller can determine,
+    /// given the resolved sources, that no data exists for this chunk at
+    /// this LOD.
+    Empty,
+}
+
 /// Plan for filling one 64³ cache chunk.
 pub struct BackfillPlan {
     pub sources: Vec<SourceSpec>,
     /// Run once every source in `sources` has resolved. Receives outcomes
-    /// in the same order as `sources`. Returns exactly `CHUNK_VOXELS` bytes.
-    pub extract: Box<dyn FnOnce(&[SourceOutcome]) -> Result<Vec<u8>, BackfillError> + Send + 'static>,
+    /// in the same order as `sources`. Returns one or more `(ChunkKey,
+    /// ExtractedChunk)` entries.
+    ///
+    /// One entry MUST match the `ChunkKey` that the cache passed to `plan`
+    /// — that entry is published into the in-memory cache map as
+    /// `Resident` / `Empty`. Any additional entries are written to disk as
+    /// a byproduct, so that future dispatches for those keys skip the
+    /// download + decode entirely. They do NOT touch the in-memory map.
+    ///
+    /// The flat shape lets backfillers express "I have full data for these
+    /// 8 cache chunks because I downloaded one 128³ native chunk that
+    /// covers them" without a separate primary/siblings split.
+    pub extract:
+        Box<dyn FnOnce(&[SourceOutcome]) -> Result<Vec<(ChunkKey, ExtractedChunk)>, BackfillError> + Send + 'static>,
 }
 
 pub trait ChunkBackfiller: Send + Sync {

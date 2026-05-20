@@ -5,7 +5,7 @@
 //! Has no external sources — `plan` returns an empty source list plus an
 //! `extract` closure that synthesizes the 64³ bytes directly.
 
-use crate::cache::backfiller::{BackfillError, BackfillPlan, ChunkBackfiller};
+use crate::cache::backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, ExtractedChunk};
 use crate::cache::state::ChunkKey;
 use crate::cache::{CHUNK_SIDE, CHUNK_VOXELS};
 use std::sync::Arc;
@@ -55,7 +55,7 @@ impl ChunkBackfiller for SyntheticBackfiller {
                     }
                 }
             }
-            Ok(out)
+            Ok(vec![(key, ExtractedChunk::Bytes(out))])
         });
         Ok(BackfillPlan { sources: Vec::new(), extract })
     }

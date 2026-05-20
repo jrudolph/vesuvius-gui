@@ -37,7 +37,9 @@
 //!     Resident through another path, and FetchSource for sources that
 //!     are already Done. Defensive against cooldown-retry races.
 
-use super::backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourcePayload, SourceSpec};
+use super::backfiller::{
+    BackfillError, BackfillPlan, ChunkBackfiller, ExtractedChunk, SourceOutcome, SourcePayload, SourceSpec,
+};
 use super::disk::{DiskStore, LoadOutcome};
 use super::downloader::{DownloadError, DownloadResult, Downloader, OnDone, SubmitResult};
 use super::priority::{Priority, MAX_AGE};
@@ -117,7 +119,9 @@ struct ChunkProgress {
     order: Vec<String>,
     remaining: usize,
     results: HashMap<String, SourceOutcome>,
-    extract: Option<Box<dyn FnOnce(&[SourceOutcome]) -> Result<Vec<u8>, BackfillError> + Send + 'static>>,
+    extract: Option<
+        Box<dyn FnOnce(&[SourceOutcome]) -> Result<Vec<(ChunkKey, ExtractedChunk)>, BackfillError> + Send + 'static>,
+    >,
     /// Priority captured at dispatch time. Used to enqueue the `Extract`
     /// task once all sources resolve, so late-arriving completions inherit
     /// the original chunk priority instead of falling back to `worst`.
@@ -797,43 +801,32 @@ impl Inner {
             inputs.push(results.remove(k).unwrap_or_else(|| Ok(None)));
         }
 
-        // All sources resolved to "definitively absent" (404/403 from the
-        // downloader, or an explicit `Ok(None)` from a Compute fetch). The
-        // chunk has no data anywhere — persist an `.empty` sentinel and
-        // transition to `Empty` so future sessions hit the disk path
-        // immediately without re-fetching, and so the LOD-fallback walk in
-        // paint/get can stop here rather than serving stale coarser data.
-        let all_absent = !inputs.is_empty() && inputs.iter().all(|o| matches!(o, Ok(None)));
-        if all_absent {
-            if let Err(e) = self.disk.mark_empty(key) {
-                log::warn!("[{}] mark_empty failed ({}); empty still cached in-memory only", key, e);
-            }
-            log::debug!("[{}] empty ({:?})", key, t0.elapsed());
-            let new_state = Arc::new(ChunkState::Empty);
-            drop(inputs);
-            self.release_sources(&order);
-            self.map.insert(key, new_state.clone());
-            self.publish_terminal(key, &new_state);
-            return;
-        }
-
         let new_state = match extract(&inputs) {
-            Ok(bytes) => match self.disk.write_atomic(key, &bytes) {
-                Ok(()) => match self.disk.try_load(key) {
-                    Some(mmap) => {
-                        log::debug!("[{}] ready ({:?})", key, t0.elapsed());
-                        Arc::new(ChunkState::Resident(mmap))
+            Ok(fills) => {
+                // The dispatched chunk's fill becomes Resident/Empty in the
+                // in-memory map. Every other entry is a "free" byproduct
+                // (the backfiller had enough source data to materialize
+                // adjacent cache chunks too) — persist those straight to disk
+                // so a future dispatch hits the disk path without re-fetching
+                // or re-decoding the shared native chunks. They deliberately
+                // don't touch `self.map`: the next dispatch picks them up via
+                // `disk.load`, which keeps memory bounded.
+                let mut primary: Option<ExtractedChunk> = None;
+                for (k, data) in fills {
+                    if k == key && primary.is_none() {
+                        primary = Some(data);
+                    } else {
+                        self.persist_fill(key, k, data);
                     }
+                }
+                match primary {
+                    Some(p) => self.primary_state(key, p, t0),
                     None => {
-                        log::warn!("[{}] write ok but mmap reload failed", key);
+                        log::warn!("[{}] extract produced no entry for the dispatched key", key);
                         cooldown()
                     }
-                },
-                Err(e) => {
-                    log::warn!("[{}] disk write failed: {}", key, e);
-                    cooldown()
                 }
-            },
+            }
             Err(BackfillError::OutOfBounds) => long_cooldown(),
             Err(BackfillError::Permanent(reason)) => {
                 log::warn!("[{}] permanent: {}", key, reason);
@@ -858,6 +851,62 @@ impl Inner {
         self.release_sources(&order);
         self.map.insert(key, new_state.clone());
         self.publish_terminal(key, &new_state);
+    }
+
+    /// Translate a primary `ExtractedChunk` into the in-memory state to
+    /// publish. `Bytes` → write to disk, mmap, `Resident`. `Empty` → persist
+    /// the `.empty` sentinel, `Empty`. IO failures fall back to a cooldown
+    /// so paint retries.
+    fn primary_state(&self, key: ChunkKey, primary: ExtractedChunk, t0: std::time::Instant) -> Arc<ChunkState> {
+        match primary {
+            ExtractedChunk::Bytes(bytes) => match self.disk.write_atomic(key, &bytes) {
+                Ok(()) => match self.disk.try_load(key) {
+                    Some(mmap) => {
+                        log::debug!("[{}] ready ({:?})", key, t0.elapsed());
+                        Arc::new(ChunkState::Resident(mmap))
+                    }
+                    None => {
+                        log::warn!("[{}] write ok but mmap reload failed", key);
+                        cooldown()
+                    }
+                },
+                Err(e) => {
+                    log::warn!("[{}] disk write failed: {}", key, e);
+                    cooldown()
+                }
+            },
+            ExtractedChunk::Empty => {
+                if let Err(e) = self.disk.mark_empty(key) {
+                    log::warn!("[{}] mark_empty failed ({}); empty still cached in-memory only", key, e);
+                }
+                log::debug!("[{}] empty ({:?})", key, t0.elapsed());
+                Arc::new(ChunkState::Empty)
+            }
+        }
+    }
+
+    /// Persist one byproduct fill (a cache chunk other than the one whose
+    /// dispatch triggered this extract) straight to disk without touching
+    /// the in-memory map. Next dispatch for `key` picks it up via
+    /// `disk.load`. IO failures are logged and skipped — worst case the
+    /// future dispatch re-fetches the underlying source.
+    fn persist_fill(&self, primary: ChunkKey, key: ChunkKey, data: ExtractedChunk) {
+        match data {
+            ExtractedChunk::Bytes(bytes) => {
+                if let Err(e) = self.disk.write_atomic(key, &bytes) {
+                    log::debug!("[{}] sibling write failed ({}); skipped", key, e);
+                } else {
+                    log::trace!("[{}] sibling filled (from {})", key, primary);
+                }
+            }
+            ExtractedChunk::Empty => {
+                if let Err(e) = self.disk.mark_empty(key) {
+                    log::debug!("[{}] sibling mark_empty failed ({}); skipped", key, e);
+                } else {
+                    log::trace!("[{}] sibling empty (from {})", key, primary);
+                }
+            }
+        }
     }
 
     /// Decrement consumer refcounts for each source this chunk used. When a

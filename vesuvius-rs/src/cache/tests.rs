@@ -1,4 +1,4 @@
-use super::backfiller::{BackfillError, BackfillPlan};
+use super::backfiller::{BackfillError, BackfillPlan, ExtractedChunk};
 use super::backfillers::synthesized_lod::SynthesizedLodBackfiller;
 use super::backfillers::synthetic::SyntheticBackfiller;
 use super::priority::{LodView, Priority};
@@ -77,9 +77,12 @@ impl crate::cache::backfiller::ChunkBackfiller for AllAbsentBackfiller {
             Ok(None)
         });
         let sources = vec![SourceSpec::Compute { key: source_key, fetch }];
-        let extract = Box::new(|_inputs: &[SourceOutcome]| -> Result<Vec<u8>, BackfillError> {
-            panic!("extract must not run when every source is absent")
-        });
+        // With every source absent the backfiller knows the chunk is
+        // definitively empty — surface that explicitly so the cache marks
+        // it Empty on disk + in the map. (Pre-sibling-fill, the cache had
+        // an all-absent fast path that skipped extract; we now expect
+        // extract to encode this itself.)
+        let extract = Box::new(move |_inputs: &[SourceOutcome]| Ok(vec![(key, ExtractedChunk::Empty)]));
         Ok(BackfillPlan { sources, extract })
     }
 }
@@ -127,6 +130,130 @@ fn all_absent_sources_transition_to_empty_and_persist() {
     // refetch attempt.
     let v = cache2.voxel(5, 5, 5, 0);
     assert_eq!(v, 0);
+}
+
+/// Backfiller that simulates one native chunk feeding 8 sibling 64³ cache
+/// chunks. Its plan lists a single Compute source; the extract closure
+/// emits an `ExtractedChunk` entry for every cache chunk in the 2×2×2
+/// volume regardless of which one triggered the dispatch.
+///
+/// Used to exercise the sibling-fill machinery in `extract_chunk`: a
+/// dispatch for any of the 8 chunks should fetch + extract exactly once,
+/// and dispatching the other 7 afterwards should hit the disk path without
+/// triggering another fetch.
+struct SiblingFillBackfiller {
+    volume_id: String,
+    fetch_count: Arc<std::sync::atomic::AtomicUsize>,
+    extract_count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::cache::backfiller::ChunkBackfiller for SiblingFillBackfiller {
+    fn max_lod(&self) -> u8 {
+        0
+    }
+    fn voxel_extent(&self) -> [u32; 3] {
+        [128, 128, 128]
+    }
+    fn volume_id(&self) -> String {
+        self.volume_id.clone()
+    }
+    fn plan(
+        &self,
+        _key: ChunkKey,
+    ) -> Result<crate::cache::backfiller::BackfillPlan, crate::cache::backfiller::BackfillError> {
+        use crate::cache::backfiller::{BackfillPlan, SourceOutcome, SourcePayload, SourceSpec};
+        let fetch_counter = self.fetch_count.clone();
+        let extract_counter = self.extract_count.clone();
+        // One source standing in for the single 128³ native chunk that
+        // covers all 8 sibling cache chunks. The source key is shared
+        // across plans, so the cache dedupes within a frame; the disk
+        // path dedupes across frames.
+        let source_key = "native/0/0/0".to_string();
+        let fetch: Box<dyn FnOnce() -> SourceOutcome + Send + 'static> = Box::new(move || {
+            fetch_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Payload contents don't matter — the extract ignores them.
+            Ok(Some(Arc::new(vec![0u8; 1]) as SourcePayload))
+        });
+        let sources = vec![SourceSpec::Compute { key: source_key, fetch }];
+        let extract = Box::new(move |_inputs: &[SourceOutcome]| {
+            extract_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut out = Vec::with_capacity(8);
+            for kz in 0..2u32 {
+                for ky in 0..2u32 {
+                    for kx in 0..2u32 {
+                        // Marker uniquely identifies the cache chunk so the
+                        // disk-path assertion can verify byte-for-byte
+                        // correctness.
+                        let marker = (kz * 4 + ky * 2 + kx) as u8;
+                        let sib_key = ChunkKey::new(0, kx, ky, kz);
+                        out.push((sib_key, ExtractedChunk::Bytes(vec![marker; CHUNK_VOXELS])));
+                    }
+                }
+            }
+            Ok(out)
+        });
+        Ok(BackfillPlan { sources, extract })
+    }
+}
+
+#[test]
+fn extract_writes_sibling_chunks_so_subsequent_dispatches_skip_fetch() {
+    let root = tmp_root("sibling-fill");
+    let fetch_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let extract_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let backfiller = Arc::new(SiblingFillBackfiller {
+        volume_id: "sibling-fill".to_string(),
+        fetch_count: fetch_counter.clone(),
+        extract_count: extract_counter.clone(),
+    });
+    let cache = ChunkCache::new(&root, backfiller);
+
+    // Dispatch ONE primary chunk and wait for it to land.
+    let primary = ChunkKey::new(0, 0, 0, 0);
+    let state = cache.wait_for(primary, Duration::from_secs(2));
+    assert!(state.as_resident().is_some(), "primary should be resident: {:?}", state);
+    assert_eq!(state.as_resident().unwrap()[0], 0, "primary marker");
+    assert_eq!(
+        fetch_counter.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "fetch should have run exactly once for the shared source"
+    );
+    assert_eq!(extract_counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // All 7 sibling cache chunks were written to disk inside the same
+    // extract call. Dispatching any of them now must short-circuit on the
+    // disk path — no second fetch, no second extract.
+    for kz in 0..2u32 {
+        for ky in 0..2u32 {
+            for kx in 0..2u32 {
+                let sib_key = ChunkKey::new(0, kx, ky, kz);
+                let sib_state = cache.state_or_fetch(sib_key);
+                assert!(
+                    sib_state.as_resident().is_some(),
+                    "sibling {:?} should be resident from disk: {:?}",
+                    sib_key,
+                    sib_state
+                );
+                let marker = (kz * 4 + ky * 2 + kx) as u8;
+                assert_eq!(
+                    sib_state.as_resident().unwrap()[0],
+                    marker,
+                    "sibling {:?} should carry its own marker",
+                    sib_key
+                );
+            }
+        }
+    }
+    assert_eq!(
+        fetch_counter.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "siblings must come from disk — no additional fetch"
+    );
+    assert_eq!(
+        extract_counter.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "siblings must come from disk — no additional extract"
+    );
 }
 
 #[test]
@@ -255,7 +382,8 @@ fn paint_falls_back_to_coarser_lod_when_target_missing() {
                 return Err(BackfillError::Permanent("no L0".into()));
             }
             let marker = 0x10u8 + key.lod;
-            let extract = Box::new(move |_inputs: &[_]| Ok(vec![marker; CHUNK_VOXELS]));
+            let extract =
+                Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![marker; CHUNK_VOXELS]))]));
             Ok(BackfillPlan { sources: Vec::new(), extract })
         }
     }
@@ -302,7 +430,8 @@ fn get_falls_back_to_coarser_lod_when_target_missing() {
                 return Err(BackfillError::Permanent("no L0".into()));
             }
             let marker = 0x10u8 + key.lod;
-            let extract = Box::new(move |_inputs: &[_]| Ok(vec![marker; CHUNK_VOXELS]));
+            let extract =
+                Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![marker; CHUNK_VOXELS]))]));
             Ok(BackfillPlan { sources: Vec::new(), extract })
         }
     }
@@ -357,7 +486,8 @@ fn get_uses_downsampled_xyz_convention_at_sfactor_gt_1() {
                 return Err(BackfillError::Permanent("no L1".into()));
             }
             let marker = (key.lod << 4) | (key.x as u8 & 0x0f);
-            let extract = Box::new(move |_inputs: &[_]| Ok(vec![marker; CHUNK_VOXELS]));
+            let extract =
+                Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![marker; CHUNK_VOXELS]))]));
             Ok(BackfillPlan { sources: Vec::new(), extract })
         }
     }
@@ -413,7 +543,8 @@ fn synth_lod_one_level_above_native_averages_children() {
         }
         fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
             let marker = (key.z as u8) * 4 + (key.y as u8) * 2 + (key.x as u8);
-            let extract = Box::new(move |_inputs: &[_]| Ok(vec![marker; CHUNK_VOXELS]));
+            let extract =
+                Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![marker; CHUNK_VOXELS]))]));
             Ok(BackfillPlan { sources: Vec::new(), extract })
         }
     }
@@ -464,9 +595,10 @@ fn synth_lod_two_levels_above_native_recurses() {
         fn volume_id(&self) -> String {
             "synth-recurse".into()
         }
-        fn plan(&self, _key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+        fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
             let v = self.0;
-            let extract = Box::new(move |_inputs: &[_]| Ok(vec![v; CHUNK_VOXELS]));
+            let extract =
+                Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![v; CHUNK_VOXELS]))]));
             Ok(BackfillPlan { sources: Vec::new(), extract })
         }
     }
@@ -503,9 +635,10 @@ fn unified_volume_renders_at_target_lod_above_native_max() {
         fn volume_id(&self) -> String {
             "synth-get".into()
         }
-        fn plan(&self, _key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+        fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
             let v = self.0;
-            let extract = Box::new(move |_inputs: &[_]| Ok(vec![v; CHUNK_VOXELS]));
+            let extract =
+                Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![v; CHUNK_VOXELS]))]));
             Ok(BackfillPlan { sources: Vec::new(), extract })
         }
     }
@@ -540,8 +673,9 @@ fn synth_gate_disables_when_source_has_too_many_native_chunks() {
         fn volume_id(&self) -> String {
             "wide-single-lod".into()
         }
-        fn plan(&self, _key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
-            let extract = Box::new(move |_inputs: &[_]| Ok(vec![55u8; CHUNK_VOXELS]));
+        fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            let extract =
+                Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![55u8; CHUNK_VOXELS]))]));
             Ok(BackfillPlan { sources: Vec::new(), extract })
         }
     }
@@ -586,8 +720,9 @@ fn synth_gate_enables_when_source_is_pyramidal_enough() {
         fn volume_id(&self) -> String {
             "small-pyramid".into()
         }
-        fn plan(&self, _key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
-            let extract = Box::new(move |_inputs: &[_]| Ok(vec![77u8; CHUNK_VOXELS]));
+        fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            let extract =
+                Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![77u8; CHUNK_VOXELS]))]));
             Ok(BackfillPlan { sources: Vec::new(), extract })
         }
     }

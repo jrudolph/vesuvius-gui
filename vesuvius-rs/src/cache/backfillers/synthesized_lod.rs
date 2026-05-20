@@ -14,7 +14,7 @@
 //! (slice paint, surface paint, PPM, …). The hot slot in `UnifiedVolume::get`
 //! also keeps per-pixel sampling at one mmap hit even at extreme zoom-out.
 
-use crate::cache::backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourceSpec};
+use crate::cache::backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, ExtractedChunk, SourceOutcome, SourceSpec};
 use crate::cache::state::{ChunkKey, ChunkState};
 use crate::cache::{CHUNK_SIDE, CHUNK_VOXELS};
 use std::sync::Arc;
@@ -125,83 +125,93 @@ impl ChunkBackfiller for SynthesizedLodBackfiller {
             }
         }
 
-        let extract = Box::new(move |outcomes: &[SourceOutcome]| -> Result<Vec<u8>, BackfillError> {
-            if outcomes.len() != 8 {
-                return Err(BackfillError::Permanent(format!(
-                    "synth lod {}: expected 8 child outcomes, got {}",
-                    key.lod,
-                    outcomes.len()
-                )));
-            }
-
-            // Resolve each child to a `&[u8]` view into its 64³ chunk mmap,
-            // or `None` if the child is missing (extract treats that as zeros
-            // for that octant).
-            let children: [Option<&[u8]>; 8] = {
-                let mut arr: [Option<&[u8]>; 8] = [None; 8];
-                for (i, outcome) in outcomes.iter().enumerate() {
-                    match outcome {
-                        Ok(Some(payload)) => {
-                            // Sources from the chunk-dep path carry the
-                            // child's `ChunkState` (wrapped in the
-                            // `Arc<dyn Any + Send + Sync>` SourcePayload);
-                            // native-source payloads (Compute / Download)
-                            // never reach a synth plan.
-                            let state = payload.downcast_ref::<ChunkState>().ok_or_else(|| {
-                                BackfillError::Permanent(format!(
-                                    "synth lod {}: unexpected payload type for child {}",
-                                    key.lod, i
-                                ))
-                            })?;
-                            if let ChunkState::Resident(mmap) = state {
-                                arr[i] = Some(&mmap[..]);
-                            } else {
-                                arr[i] = None;
-                            }
-                        }
-                        Ok(None) => arr[i] = None,
-                        Err(e) => return Err(e.clone()),
-                    }
+        let extract =
+            Box::new(move |outcomes: &[SourceOutcome]| -> Result<Vec<(ChunkKey, ExtractedChunk)>, BackfillError> {
+                if outcomes.len() != 8 {
+                    return Err(BackfillError::Permanent(format!(
+                        "synth lod {}: expected 8 child outcomes, got {}",
+                        key.lod,
+                        outcomes.len()
+                    )));
                 }
-                arr
-            };
 
-            let mut out = vec![0u8; CHUNK_VOXELS];
-            // Each output voxel (ox, oy, oz) maps to exactly one child
-            // (dx, dy, dz) = (ox / 32, oy / 32, oz / 32) and to a 2×2×2 block
-            // within that child starting at (2*(ox%32), 2*(oy%32), 2*(oz%32)).
-            for oz in 0..CHUNK_SIDE {
-                let dz = oz / 32;
-                let bz = (oz % 32) * 2;
-                for oy in 0..CHUNK_SIDE {
-                    let dy = oy / 32;
-                    let by = (oy % 32) * 2;
-                    for ox in 0..CHUNK_SIDE {
-                        let dx = ox / 32;
-                        let bx = (ox % 32) * 2;
-                        let child_idx = dz * 4 + dy * 2 + dx;
-                        let Some(child) = children[child_idx] else {
-                            continue;
-                        };
-                        // Average 2×2×2 = 8 source voxels. Promote to u16 to
-                        // avoid overflow when summing 8 u8s.
-                        let mut sum: u16 = 0;
-                        for ddz in 0..2 {
-                            for ddy in 0..2 {
-                                for ddx in 0..2 {
-                                    let src_off =
-                                        (bz + ddz) * CHUNK_SIDE * CHUNK_SIDE + (by + ddy) * CHUNK_SIDE + (bx + ddx);
-                                    sum += child[src_off] as u16;
+                // Resolve each child to a `&[u8]` view into its 64³ chunk mmap,
+                // or `None` if the child is missing (extract treats that as zeros
+                // for that octant).
+                let children: [Option<&[u8]>; 8] = {
+                    let mut arr: [Option<&[u8]>; 8] = [None; 8];
+                    for (i, outcome) in outcomes.iter().enumerate() {
+                        match outcome {
+                            Ok(Some(payload)) => {
+                                // Sources from the chunk-dep path carry the
+                                // child's `ChunkState` (wrapped in the
+                                // `Arc<dyn Any + Send + Sync>` SourcePayload);
+                                // native-source payloads (Compute / Download)
+                                // never reach a synth plan.
+                                let state = payload.downcast_ref::<ChunkState>().ok_or_else(|| {
+                                    BackfillError::Permanent(format!(
+                                        "synth lod {}: unexpected payload type for child {}",
+                                        key.lod, i
+                                    ))
+                                })?;
+                                if let ChunkState::Resident(mmap) = state {
+                                    arr[i] = Some(&mmap[..]);
+                                } else {
+                                    arr[i] = None;
                                 }
                             }
+                            Ok(None) => arr[i] = None,
+                            Err(e) => return Err(e.clone()),
                         }
-                        let out_off = oz * CHUNK_SIDE * CHUNK_SIDE + oy * CHUNK_SIDE + ox;
-                        out[out_off] = (sum / 8) as u8;
+                    }
+                    arr
+                };
+
+                // If every child is missing (Empty or absent), this synth
+                // chunk has nothing to average and is itself definitively
+                // empty — preserves the Empty semantics the cache used to
+                // produce via the all-absent fast path.
+                if children.iter().all(|c| c.is_none()) {
+                    return Ok(vec![(key, ExtractedChunk::Empty)]);
+                }
+
+                let mut out = vec![0u8; CHUNK_VOXELS];
+                // Each output voxel (ox, oy, oz) maps to exactly one child
+                // (dx, dy, dz) = (ox / 32, oy / 32, oz / 32) and to a 2×2×2 block
+                // within that child starting at (2*(ox%32), 2*(oy%32), 2*(oz%32)).
+                for oz in 0..CHUNK_SIDE {
+                    let dz = oz / 32;
+                    let bz = (oz % 32) * 2;
+                    for oy in 0..CHUNK_SIDE {
+                        let dy = oy / 32;
+                        let by = (oy % 32) * 2;
+                        for ox in 0..CHUNK_SIDE {
+                            let dx = ox / 32;
+                            let bx = (ox % 32) * 2;
+                            let child_idx = dz * 4 + dy * 2 + dx;
+                            let Some(child) = children[child_idx] else {
+                                continue;
+                            };
+                            // Average 2×2×2 = 8 source voxels. Promote to u16 to
+                            // avoid overflow when summing 8 u8s.
+                            let mut sum: u16 = 0;
+                            for ddz in 0..2 {
+                                for ddy in 0..2 {
+                                    for ddx in 0..2 {
+                                        let src_off = (bz + ddz) * CHUNK_SIDE * CHUNK_SIDE
+                                            + (by + ddy) * CHUNK_SIDE
+                                            + (bx + ddx);
+                                        sum += child[src_off] as u16;
+                                    }
+                                }
+                            }
+                            let out_off = oz * CHUNK_SIDE * CHUNK_SIDE + oy * CHUNK_SIDE + ox;
+                            out[out_off] = (sum / 8) as u8;
+                        }
                     }
                 }
-            }
-            Ok(out)
-        });
+                Ok(vec![(key, ExtractedChunk::Bytes(out))])
+            });
 
         Ok(BackfillPlan { sources, extract })
     }

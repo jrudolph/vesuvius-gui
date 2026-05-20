@@ -19,11 +19,12 @@
 //! is fast enough that an async path here would be needless complexity.
 
 use crate::cache::backfiller::{
-    BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourcePayload, SourceSpec,
+    BackfillError, BackfillPlan, ChunkBackfiller, ExtractedChunk, SourceOutcome, SourcePayload, SourceSpec,
 };
 use crate::cache::state::ChunkKey;
 use crate::cache::{CHUNK_SIDE, CHUNK_VOXELS};
 use memmap::Mmap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use vesuvius_zarr::{ChunkContext, OmeZarrContext, ZarrArray};
 
@@ -154,116 +155,222 @@ impl ChunkBackfiller for OmeZarrBackfiller {
         }
 
         let key_dbg = key;
-        let base = [base_z, base_y, base_x];
-        let end = [end_z, end_y, end_x];
         let array_for_decode = array.clone();
-        let extract = Box::new(move |outcomes: &[SourceOutcome]| -> Result<Vec<u8>, BackfillError> {
-            let started = std::time::Instant::now();
-            // Bail fast on errors. Pick worst severity.
-            let mut transient: Option<String> = None;
-            let mut permanent: Option<String> = None;
-            for o in outcomes {
-                if let Err(e) = o {
-                    match e {
-                        BackfillError::OutOfBounds => permanent = Some("oob source".into()),
-                        BackfillError::Permanent(s) => permanent = Some(s.clone()),
-                        BackfillError::Transient(s) => {
-                            if transient.is_none() {
-                                transient = Some(s.clone());
+        let extract = Box::new(
+            move |outcomes: &[SourceOutcome]| -> Result<Vec<(ChunkKey, ExtractedChunk)>, BackfillError> {
+                let started = std::time::Instant::now();
+                // Bail fast on errors. Pick worst severity.
+                let mut transient: Option<String> = None;
+                let mut permanent: Option<String> = None;
+                for o in outcomes {
+                    if let Err(e) = o {
+                        match e {
+                            BackfillError::OutOfBounds => permanent = Some("oob source".into()),
+                            BackfillError::Permanent(s) => permanent = Some(s.clone()),
+                            BackfillError::Transient(s) => {
+                                if transient.is_none() {
+                                    transient = Some(s.clone());
+                                }
                             }
                         }
                     }
                 }
-            }
-            if let Some(s) = permanent {
-                return Err(BackfillError::Permanent(s));
-            }
-            if let Some(s) = transient {
-                return Err(BackfillError::Transient(s));
-            }
+                if let Some(s) = permanent {
+                    return Err(BackfillError::Permanent(s));
+                }
+                if let Some(s) = transient {
+                    return Err(BackfillError::Transient(s));
+                }
 
-            let mut out = vec![0u8; CHUNK_VOXELS];
-            let mut loaded = 0usize;
-            let mut missing = 0usize;
+                let stride_y = nchunk[2];
+                let stride_z = nchunk[1] * nchunk[2];
 
-            let stride_y = nchunk[2];
-            let stride_z = nchunk[1] * nchunk[2];
+                // coord → outcome index for O(1) "is this native in our
+                // source set?" checks.
+                let coord_idx: HashMap<[usize; 3], usize> =
+                    coords.iter().copied().enumerate().map(|(i, c)| (c, i)).collect();
 
-            // Cache one decoded chunk per source, since extract owns the
-            // bytes payload via Arc and decoding from raw bytes is the
-            // hot CPU work. We do it lazily inside the loop so absent
-            // sources don't pay for it.
-            for (idx, coord) in coords.iter().enumerate() {
-                let cz = coord[0];
-                let cy = coord[1];
-                let cx = coord[2];
-                let nz_lo = (cz * nchunk[0]).max(base[0]);
-                let nz_hi = ((cz + 1) * nchunk[0]).min(end[0]);
-                let ny_lo = (cy * nchunk[1]).max(base[1]);
-                let ny_hi = ((cy + 1) * nchunk[1]).min(end[1]);
-                let nx_lo = (cx * nchunk[2]).max(base[2]);
-                let nx_hi = ((cx + 1) * nchunk[2]).min(end[2]);
+                // Decode each loaded source upfront. With 128³ native chunks
+                // each one feeds 8 sibling 64³ cache chunks; doing the decode
+                // once and then slicing into all siblings is the whole point
+                // of this extract path.
+                let mut decoded: HashMap<[usize; 3], Arc<ChunkContext>> = HashMap::new();
+                for (i, coord) in coords.iter().enumerate() {
+                    let payload_opt: &Option<SourcePayload> = match &outcomes[i] {
+                        Ok(p) => p,
+                        Err(_) => unreachable!("error already short-circuited"),
+                    };
+                    let Some(payload) = payload_opt else { continue };
+                    let ctx = if let Ok(ctx_arc) = payload.clone().downcast::<ChunkContext>() {
+                        // Local-fallback Compute payload, already decoded.
+                        ctx_arc
+                    } else if let Ok(mmap_arc) = payload.clone().downcast::<Mmap>() {
+                        // Download payload — bytes were spilled to disk by
+                        // the cache's on_done handler. Decode from the mmap
+                        // so we don't materialize the compressed payload
+                        // back into the heap.
+                        Arc::new(array_for_decode.decode_chunk_bytes(&mmap_arc[..]))
+                    } else if let Ok(bytes_arc) = payload.clone().downcast::<Vec<u8>>() {
+                        // Fallback when spill write failed: bytes still in
+                        // memory.
+                        Arc::new(array_for_decode.decode_chunk_bytes(&bytes_arc))
+                    } else {
+                        return Err(BackfillError::Permanent("source payload type".into()));
+                    };
+                    decoded.insert(*coord, ctx);
+                }
 
-                let payload_opt: &Option<SourcePayload> = match &outcomes[idx] {
-                    Ok(p) => p,
-                    Err(_) => unreachable!("error already short-circuited"),
-                };
-                let ctx: Arc<ChunkContext> = match payload_opt {
-                    Some(p) => {
-                        if let Ok(ctx_arc) = p.clone().downcast::<ChunkContext>() {
-                            // Local-fallback Compute payload, already
-                            // decoded.
-                            ctx_arc
-                        } else if let Ok(mmap_arc) = p.clone().downcast::<Mmap>() {
-                            // Download payload — bytes were spilled to disk
-                            // by the cache's on_done handler. Decode from
-                            // the mmap so we don't materialize the
-                            // compressed payload back into the heap.
-                            Arc::new(array_for_decode.decode_chunk_bytes(&mmap_arc[..]))
-                        } else if let Ok(bytes_arc) = p.clone().downcast::<Vec<u8>>() {
-                            // Fallback when spill write failed: bytes still
-                            // in memory.
-                            Arc::new(array_for_decode.decode_chunk_bytes(&bytes_arc))
-                        } else {
-                            return Err(BackfillError::Permanent("source payload type".into()));
-                        }
+                // Bounding box (in cache-chunk coords at the current LOD)
+                // of cache chunks that the loaded source set could possibly
+                // cover. Iterating this box and filtering by "all overlaps
+                // in source set" yields every cache chunk we have full data
+                // for — the primary and its siblings.
+                let mut bbox_lo = [usize::MAX; 3];
+                let mut bbox_hi = [0usize; 3];
+                for coord in coords.iter() {
+                    let voxel_lo = [coord[0] * nchunk[0], coord[1] * nchunk[1], coord[2] * nchunk[2]];
+                    let voxel_hi = [
+                        ((coord[0] + 1) * nchunk[0]).min(shape[0]),
+                        ((coord[1] + 1) * nchunk[1]).min(shape[1]),
+                        ((coord[2] + 1) * nchunk[2]).min(shape[2]),
+                    ];
+                    let cache_lo = [voxel_lo[0] / CHUNK_SIDE, voxel_lo[1] / CHUNK_SIDE, voxel_lo[2] / CHUNK_SIDE];
+                    let cache_hi = [
+                        voxel_hi[0].div_ceil(CHUNK_SIDE),
+                        voxel_hi[1].div_ceil(CHUNK_SIDE),
+                        voxel_hi[2].div_ceil(CHUNK_SIDE),
+                    ];
+                    for i in 0..3 {
+                        bbox_lo[i] = bbox_lo[i].min(cache_lo[i]);
+                        bbox_hi[i] = bbox_hi[i].max(cache_hi[i]);
                     }
-                    None => {
-                        missing += 1;
-                        continue;
-                    }
-                };
-                loaded += 1;
+                }
 
-                let chunk_base_z = cz * nchunk[0];
-                let chunk_base_y = cy * nchunk[1];
-                let chunk_base_x = cx * nchunk[2];
+                let mut output: Vec<(ChunkKey, ExtractedChunk)> = Vec::new();
+                let mut primary_found = false;
+                let mut empty_count = 0usize;
+                let mut bytes_count = 0usize;
 
-                for sz in nz_lo..nz_hi {
-                    let lz = sz - base[0];
-                    let in_z = (sz - chunk_base_z) * stride_z;
-                    let out_z = lz * CHUNK_SIDE * CHUNK_SIDE;
-                    for sy in ny_lo..ny_hi {
-                        let ly = sy - base[1];
-                        let in_y = in_z + (sy - chunk_base_y) * stride_y;
-                        let out_y = out_z + ly * CHUNK_SIDE;
-                        for sx in nx_lo..nx_hi {
-                            let lx = sx - base[2];
-                            let in_idx = in_y + (sx - chunk_base_x);
-                            out[out_y + lx] = ctx.get(in_idx);
+                for kz in bbox_lo[0]..bbox_hi[0] {
+                    for ky in bbox_lo[1]..bbox_hi[1] {
+                        for kx in bbox_lo[2]..bbox_hi[2] {
+                            let cv_base = [kz * CHUNK_SIDE, ky * CHUNK_SIDE, kx * CHUNK_SIDE];
+                            // Fully out of volume bounds → skip. OOB chunks
+                            // are never dispatched (dispatch_chunk rejects
+                            // them) so we shouldn't fabricate Empties for
+                            // them here.
+                            if cv_base[0] >= shape[0] || cv_base[1] >= shape[1] || cv_base[2] >= shape[2] {
+                                continue;
+                            }
+                            let cv_end = [
+                                (cv_base[0] + CHUNK_SIDE).min(shape[0]),
+                                (cv_base[1] + CHUNK_SIDE).min(shape[1]),
+                                (cv_base[2] + CHUNK_SIDE).min(shape[2]),
+                            ];
+
+                            // Native chunks overlapping this cache chunk.
+                            let ncz_lo = cv_base[0] / nchunk[0];
+                            let ncz_hi = (cv_end[0] - 1) / nchunk[0];
+                            let ncy_lo = cv_base[1] / nchunk[1];
+                            let ncy_hi = (cv_end[1] - 1) / nchunk[1];
+                            let ncx_lo = cv_base[2] / nchunk[2];
+                            let ncx_hi = (cv_end[2] - 1) / nchunk[2];
+
+                            // All overlapping native chunks must be in our
+                            // source set. If not, we can't fill this cache
+                            // chunk from this extract.
+                            let mut covered = true;
+                            let mut all_absent = true;
+                            'check: for ncz in ncz_lo..=ncz_hi {
+                                for ncy in ncy_lo..=ncy_hi {
+                                    for ncx in ncx_lo..=ncx_hi {
+                                        let coord = [ncz, ncy, ncx];
+                                        let Some(&idx) = coord_idx.get(&coord) else {
+                                            covered = false;
+                                            break 'check;
+                                        };
+                                        if matches!(&outcomes[idx], Ok(Some(_))) {
+                                            all_absent = false;
+                                        }
+                                    }
+                                }
+                            }
+                            if !covered {
+                                continue;
+                            }
+
+                            let chunk_key = ChunkKey::new(key.lod, kx as u32, ky as u32, kz as u32);
+                            if chunk_key == key {
+                                primary_found = true;
+                            }
+
+                            if all_absent {
+                                output.push((chunk_key, ExtractedChunk::Empty));
+                                empty_count += 1;
+                                continue;
+                            }
+
+                            // Slice each overlapping loaded native chunk into
+                            // this cache chunk's buffer. Absent (Ok(None))
+                            // overlaps leave their region zero-filled.
+                            let mut out = vec![0u8; CHUNK_VOXELS];
+                            for ncz in ncz_lo..=ncz_hi {
+                                for ncy in ncy_lo..=ncy_hi {
+                                    for ncx in ncx_lo..=ncx_hi {
+                                        let coord = [ncz, ncy, ncx];
+                                        let Some(ctx) = decoded.get(&coord) else {
+                                            continue;
+                                        };
+                                        let chunk_base_z = ncz * nchunk[0];
+                                        let chunk_base_y = ncy * nchunk[1];
+                                        let chunk_base_x = ncx * nchunk[2];
+                                        let nz_lo = chunk_base_z.max(cv_base[0]);
+                                        let nz_hi = (chunk_base_z + nchunk[0]).min(cv_end[0]);
+                                        let ny_lo = chunk_base_y.max(cv_base[1]);
+                                        let ny_hi = (chunk_base_y + nchunk[1]).min(cv_end[1]);
+                                        let nx_lo = chunk_base_x.max(cv_base[2]);
+                                        let nx_hi = (chunk_base_x + nchunk[2]).min(cv_end[2]);
+                                        for sz in nz_lo..nz_hi {
+                                            let lz = sz - cv_base[0];
+                                            let in_z = (sz - chunk_base_z) * stride_z;
+                                            let out_z = lz * CHUNK_SIDE * CHUNK_SIDE;
+                                            for sy in ny_lo..ny_hi {
+                                                let ly = sy - cv_base[1];
+                                                let in_y = in_z + (sy - chunk_base_y) * stride_y;
+                                                let out_y = out_z + ly * CHUNK_SIDE;
+                                                for sx in nx_lo..nx_hi {
+                                                    let lx = sx - cv_base[2];
+                                                    let in_idx = in_y + (sx - chunk_base_x);
+                                                    out[out_y + lx] = ctx.get(in_idx);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            output.push((chunk_key, ExtractedChunk::Bytes(out)));
+                            bytes_count += 1;
                         }
                     }
                 }
-            }
-            log::trace!(
-                "[{}] extract: loaded={} missing={} ({:?})",
-                key_dbg,
-                loaded,
-                missing,
-                started.elapsed()
-            );
-            Ok(out)
-        });
+
+                if !primary_found {
+                    // The primary's overlap set IS our source set by
+                    // construction, so this is structurally impossible —
+                    // log loudly and let the cache fall back to cooldown.
+                    log::warn!("[{}] sibling enumeration missed the primary key", key_dbg);
+                }
+
+                log::trace!(
+                    "[{}] extract: {} bytes + {} empty ({:?})",
+                    key_dbg,
+                    bytes_count,
+                    empty_count,
+                    started.elapsed()
+                );
+                Ok(output)
+            },
+        );
 
         Ok(BackfillPlan { sources, extract })
     }
