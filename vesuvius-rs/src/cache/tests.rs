@@ -1,6 +1,7 @@
+use super::backfiller::{BackfillError, BackfillPlan};
 use super::backfillers::synthetic::SyntheticBackfiller;
 use super::*;
-use crate::volume::{DrawingConfig, Image, PaintVolume};
+use crate::volume::{DrawingConfig, Image, PaintVolume, VoxelVolume};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -139,6 +140,95 @@ fn paint_no_gaps_at_higher_lod() {
     for (i, px) in img.data.iter().enumerate() {
         assert_eq!(px.r(), 0x42, "pixel {} = {:?}, expected 0x42", i, px);
     }
+}
+
+#[test]
+fn paint_falls_back_to_coarser_lod_when_target_missing() {
+    // Refuse all LOD-0 chunks (Permanent → CooldownMiss in the cache).
+    // Coarser LODs return a marker byte equal to `0x10 + lod`. Pre-warm the
+    // LOD-1 chunk that covers the viewport; then paint at sfactor=1
+    // (target_lod=0). Every pixel must be 0x11 — proof we sampled from the
+    // coarser parent because the target chunk isn't resident.
+    struct LodGated {
+        extent: [u32; 3],
+        max_lod: u8,
+    }
+    impl ChunkBackfiller for LodGated {
+        fn max_lod(&self) -> u8 {
+            self.max_lod
+        }
+        fn voxel_extent(&self) -> [u32; 3] {
+            self.extent
+        }
+        fn volume_id(&self) -> String {
+            "lod-gated".into()
+        }
+        fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            if key.lod == 0 {
+                return Err(BackfillError::Permanent("no L0".into()));
+            }
+            let marker = 0x10u8 + key.lod;
+            let extract = Box::new(move |_inputs: &[_]| Ok(vec![marker; CHUNK_VOXELS]));
+            Ok(BackfillPlan { sources: Vec::new(), extract })
+        }
+    }
+
+    let root = tmp_root("paint-lod-fallback");
+    let backfiller = Arc::new(LodGated { extent: [256, 256, 256], max_lod: 2 });
+    let cache = ChunkCache::new(&root, backfiller);
+    let volume = UnifiedVolume::new(cache.clone());
+
+    // Pre-warm the LOD-1 chunk covering the viewport.
+    let s1 = cache.wait_for(ChunkKey::new(1, 0, 0, 0), Duration::from_secs(2));
+    assert!(s1.as_resident().is_some(), "L1 should be resident: {:?}", s1);
+
+    let mut img = Image::new(64, 64);
+    let cfg = DrawingConfig::default();
+    // sfactor=1 → target_lod=0. paint_zoom=1.
+    volume.paint([64, 64, 16], 0, 1, 2, 64, 64, 1, 1, &cfg, &mut img);
+
+    for (i, px) in img.data.iter().enumerate() {
+        assert_eq!(px.r(), 0x11, "pixel {} = {:?}, expected 0x11 (L1 fallback)", i, px);
+    }
+}
+
+#[test]
+fn get_falls_back_to_coarser_lod_when_target_missing() {
+    // Same setup as the paint test: LOD 0 chunks refused, LOD 1 returns 0x11.
+    // VoxelVolume::get must return the LOD-1 byte when the target chunk
+    // isn't resident.
+    struct LodGated;
+    impl ChunkBackfiller for LodGated {
+        fn max_lod(&self) -> u8 {
+            2
+        }
+        fn voxel_extent(&self) -> [u32; 3] {
+            [256, 256, 256]
+        }
+        fn volume_id(&self) -> String {
+            "lod-gated-get".into()
+        }
+        fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            if key.lod == 0 {
+                return Err(BackfillError::Permanent("no L0".into()));
+            }
+            let marker = 0x10u8 + key.lod;
+            let extract = Box::new(move |_inputs: &[_]| Ok(vec![marker; CHUNK_VOXELS]));
+            Ok(BackfillPlan { sources: Vec::new(), extract })
+        }
+    }
+
+    let root = tmp_root("get-lod-fallback");
+    let cache = ChunkCache::new(&root, Arc::new(LodGated));
+    let volume = UnifiedVolume::new(cache.clone());
+
+    cache.wait_for(ChunkKey::new(1, 0, 0, 0), Duration::from_secs(2));
+
+    // First call dispatches LOD 0 (→ permanent cooldown) and finds the LOD-1
+    // peek resident; should already return 0x11.
+    assert_eq!(volume.get([42.0, 17.0, 9.0], 1), 0x11);
+    // Subsequent calls stay on the fallback path.
+    assert_eq!(volume.get([100.0, 50.0, 12.0], 1), 0x11);
 }
 
 #[test]

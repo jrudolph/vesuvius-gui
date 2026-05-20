@@ -163,6 +163,13 @@ impl ChunkCache {
         entry.clone()
     }
 
+    /// Cheap state lookup without dispatching a fetch. Returns `None` if no
+    /// entry exists for `key` yet. Useful for LOD-fallback paths that only
+    /// want to render whatever is already resident.
+    pub fn peek(&self, key: ChunkKey) -> Option<Arc<ChunkState>> {
+        self.inner.map.get(&key).map(|e| e.clone())
+    }
+
     fn maybe_retry(&self, key: ChunkKey, state: Arc<ChunkState>) -> Arc<ChunkState> {
         if let ChunkState::CooldownMiss { until } = state.as_ref() {
             if SystemTime::now() >= *until {
