@@ -139,11 +139,15 @@ pub(super) fn plan_v3_chunk(
         }
     }
 
+    let coord_set: HashSet<[usize; 3]> = all_coords.iter().copied().collect();
+    let covered = super::ome_zarr::covered_cache_chunks(&coord_set, &sub, &shape, key.lod);
+
     log::trace!(
-        "[{}] v3 plan → {} download(s) over {} considered sub-chunk(s)",
+        "[{}] v3 plan → {} download(s) over {} considered sub-chunk(s), covers {} cache chunk(s)",
         key,
         sources.len(),
-        all_coords.len()
+        all_coords.len(),
+        covered.len()
     );
 
     let key_dbg = key;
@@ -352,5 +356,9 @@ pub(super) fn plan_v3_chunk(
         },
     );
 
-    Ok(BackfillPlan { sources, extract })
+    Ok(BackfillPlan {
+        covered,
+        sources,
+        extract,
+    })
 }

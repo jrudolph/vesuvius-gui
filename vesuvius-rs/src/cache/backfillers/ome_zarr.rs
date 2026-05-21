@@ -120,6 +120,18 @@ impl ChunkBackfiller for OmeZarrBackfiller {
 
         let mut sources: Vec<SourceSpec> = Vec::new();
         let mut coords: Vec<[usize; 3]> = Vec::new();
+        let coord_set: std::collections::HashSet<[usize; 3]> = {
+            let mut s = std::collections::HashSet::new();
+            for cz in cz_lo..=cz_hi {
+                for cy in cy_lo..=cy_hi {
+                    for cx in cx_lo..=cx_hi {
+                        s.insert([cz, cy, cx]);
+                    }
+                }
+            }
+            s
+        };
+        let covered = covered_cache_chunks(&coord_set, &nchunk, &shape, key.lod);
         for cz in cz_lo..=cz_hi {
             for cy in cy_lo..=cy_hi {
                 for cx in cx_lo..=cx_hi {
@@ -386,10 +398,89 @@ impl ChunkBackfiller for OmeZarrBackfiller {
             },
         );
 
-        Ok(BackfillPlan { sources, extract })
+        Ok(BackfillPlan {
+            covered,
+            sources,
+            extract,
+        })
     }
 
     fn volume_id(&self) -> String {
         self.volume_id.clone()
     }
+}
+
+/// Compute the set of cache chunks whose every overlapping native chunk
+/// lies inside `coord_set`. That's exactly the set of cache chunks an
+/// extract over `coord_set` could fully materialize — its `covered` list.
+///
+/// Shared between the v2 OME-Zarr planner and the v3 sub-chunk planner;
+/// the math is identical once the native-chunk shape is plugged in
+/// (`nchunk` for v2 = native chunk shape, for v3 = c3d sub-chunk shape).
+pub(super) fn covered_cache_chunks(
+    coord_set: &std::collections::HashSet<[usize; 3]>,
+    nchunk: &[usize],
+    shape: &[usize],
+    lod: u8,
+) -> Vec<ChunkKey> {
+    let mut bbox_lo = [usize::MAX; 3];
+    let mut bbox_hi = [0usize; 3];
+    for coord in coord_set.iter() {
+        let voxel_lo = [coord[0] * nchunk[0], coord[1] * nchunk[1], coord[2] * nchunk[2]];
+        let voxel_hi = [
+            ((coord[0] + 1) * nchunk[0]).min(shape[0]),
+            ((coord[1] + 1) * nchunk[1]).min(shape[1]),
+            ((coord[2] + 1) * nchunk[2]).min(shape[2]),
+        ];
+        let cache_lo = [voxel_lo[0] / CHUNK_SIDE, voxel_lo[1] / CHUNK_SIDE, voxel_lo[2] / CHUNK_SIDE];
+        let cache_hi = [
+            voxel_hi[0].div_ceil(CHUNK_SIDE),
+            voxel_hi[1].div_ceil(CHUNK_SIDE),
+            voxel_hi[2].div_ceil(CHUNK_SIDE),
+        ];
+        for i in 0..3 {
+            bbox_lo[i] = bbox_lo[i].min(cache_lo[i]);
+            bbox_hi[i] = bbox_hi[i].max(cache_hi[i]);
+        }
+    }
+    if bbox_lo[0] == usize::MAX {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for kz in bbox_lo[0]..bbox_hi[0] {
+        for ky in bbox_lo[1]..bbox_hi[1] {
+            for kx in bbox_lo[2]..bbox_hi[2] {
+                let cv_base = [kz * CHUNK_SIDE, ky * CHUNK_SIDE, kx * CHUNK_SIDE];
+                if cv_base[0] >= shape[0] || cv_base[1] >= shape[1] || cv_base[2] >= shape[2] {
+                    continue;
+                }
+                let cv_end = [
+                    (cv_base[0] + CHUNK_SIDE).min(shape[0]),
+                    (cv_base[1] + CHUNK_SIDE).min(shape[1]),
+                    (cv_base[2] + CHUNK_SIDE).min(shape[2]),
+                ];
+                let ncz_lo = cv_base[0] / nchunk[0];
+                let ncz_hi = (cv_end[0] - 1) / nchunk[0];
+                let ncy_lo = cv_base[1] / nchunk[1];
+                let ncy_hi = (cv_end[1] - 1) / nchunk[1];
+                let ncx_lo = cv_base[2] / nchunk[2];
+                let ncx_hi = (cv_end[2] - 1) / nchunk[2];
+                let mut covered = true;
+                'check: for ncz in ncz_lo..=ncz_hi {
+                    for ncy in ncy_lo..=ncy_hi {
+                        for ncx in ncx_lo..=ncx_hi {
+                            if !coord_set.contains(&[ncz, ncy, ncx]) {
+                                covered = false;
+                                break 'check;
+                            }
+                        }
+                    }
+                }
+                if covered {
+                    out.push(ChunkKey::new(lod, kx as u32, ky as u32, kz as u32));
+                }
+            }
+        }
+    }
+    out
 }

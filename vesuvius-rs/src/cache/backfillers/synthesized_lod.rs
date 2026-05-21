@@ -213,6 +213,10 @@ impl ChunkBackfiller for SynthesizedLodBackfiller {
                 Ok(vec![(key, ExtractedChunk::Bytes(out))])
             });
 
-        Ok(BackfillPlan { sources, extract })
+        Ok(BackfillPlan {
+            covered: vec![key],
+            sources,
+            extract,
+        })
     }
 }

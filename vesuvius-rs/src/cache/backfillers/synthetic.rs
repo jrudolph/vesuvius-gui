@@ -57,7 +57,11 @@ impl ChunkBackfiller for SyntheticBackfiller {
             }
             Ok(vec![(key, ExtractedChunk::Bytes(out))])
         });
-        Ok(BackfillPlan { sources: Vec::new(), extract })
+        Ok(BackfillPlan {
+            covered: vec![key],
+            sources: Vec::new(),
+            extract,
+        })
     }
 
     fn volume_id(&self) -> String {

@@ -83,7 +83,11 @@ impl crate::cache::backfiller::ChunkBackfiller for AllAbsentBackfiller {
         // an all-absent fast path that skipped extract; we now expect
         // extract to encode this itself.)
         let extract = Box::new(move |_inputs: &[SourceOutcome]| Ok(vec![(key, ExtractedChunk::Empty)]));
-        Ok(BackfillPlan { sources, extract })
+        Ok(BackfillPlan {
+            covered: vec![key],
+            sources,
+            extract,
+        })
     }
 }
 
@@ -192,7 +196,19 @@ impl crate::cache::backfiller::ChunkBackfiller for SiblingFillBackfiller {
             }
             Ok(out)
         });
-        Ok(BackfillPlan { sources, extract })
+        let mut covered = Vec::with_capacity(8);
+        for kz in 0..2u32 {
+            for ky in 0..2u32 {
+                for kx in 0..2u32 {
+                    covered.push(ChunkKey::new(0, kx, ky, kz));
+                }
+            }
+        }
+        Ok(BackfillPlan {
+            covered,
+            sources,
+            extract,
+        })
     }
 }
 
@@ -384,7 +400,11 @@ fn paint_falls_back_to_coarser_lod_when_target_missing() {
             let marker = 0x10u8 + key.lod;
             let extract =
                 Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![marker; CHUNK_VOXELS]))]));
-            Ok(BackfillPlan { sources: Vec::new(), extract })
+            Ok(BackfillPlan {
+                covered: vec![key],
+                sources: Vec::new(),
+                extract,
+            })
         }
     }
 
@@ -432,7 +452,11 @@ fn get_falls_back_to_coarser_lod_when_target_missing() {
             let marker = 0x10u8 + key.lod;
             let extract =
                 Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![marker; CHUNK_VOXELS]))]));
-            Ok(BackfillPlan { sources: Vec::new(), extract })
+            Ok(BackfillPlan {
+                covered: vec![key],
+                sources: Vec::new(),
+                extract,
+            })
         }
     }
 
@@ -488,7 +512,11 @@ fn get_uses_downsampled_xyz_convention_at_sfactor_gt_1() {
             let marker = (key.lod << 4) | (key.x as u8 & 0x0f);
             let extract =
                 Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![marker; CHUNK_VOXELS]))]));
-            Ok(BackfillPlan { sources: Vec::new(), extract })
+            Ok(BackfillPlan {
+                covered: vec![key],
+                sources: Vec::new(),
+                extract,
+            })
         }
     }
 
@@ -545,7 +573,11 @@ fn synth_lod_one_level_above_native_averages_children() {
             let marker = (key.z as u8) * 4 + (key.y as u8) * 2 + (key.x as u8);
             let extract =
                 Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![marker; CHUNK_VOXELS]))]));
-            Ok(BackfillPlan { sources: Vec::new(), extract })
+            Ok(BackfillPlan {
+                covered: vec![key],
+                sources: Vec::new(),
+                extract,
+            })
         }
     }
 
@@ -599,7 +631,11 @@ fn synth_lod_two_levels_above_native_recurses() {
             let v = self.0;
             let extract =
                 Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![v; CHUNK_VOXELS]))]));
-            Ok(BackfillPlan { sources: Vec::new(), extract })
+            Ok(BackfillPlan {
+                covered: vec![key],
+                sources: Vec::new(),
+                extract,
+            })
         }
     }
 
@@ -639,7 +675,11 @@ fn unified_volume_renders_at_target_lod_above_native_max() {
             let v = self.0;
             let extract =
                 Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![v; CHUNK_VOXELS]))]));
-            Ok(BackfillPlan { sources: Vec::new(), extract })
+            Ok(BackfillPlan {
+                covered: vec![key],
+                sources: Vec::new(),
+                extract,
+            })
         }
     }
 
@@ -676,7 +716,11 @@ fn synth_gate_disables_when_source_has_too_many_native_chunks() {
         fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
             let extract =
                 Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![55u8; CHUNK_VOXELS]))]));
-            Ok(BackfillPlan { sources: Vec::new(), extract })
+            Ok(BackfillPlan {
+                covered: vec![key],
+                sources: Vec::new(),
+                extract,
+            })
         }
     }
 
@@ -723,7 +767,11 @@ fn synth_gate_enables_when_source_is_pyramidal_enough() {
         fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
             let extract =
                 Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![77u8; CHUNK_VOXELS]))]));
-            Ok(BackfillPlan { sources: Vec::new(), extract })
+            Ok(BackfillPlan {
+                covered: vec![key],
+                sources: Vec::new(),
+                extract,
+            })
         }
     }
 

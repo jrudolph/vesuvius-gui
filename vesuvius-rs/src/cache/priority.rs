@@ -15,7 +15,7 @@ use super::state::ChunkKey;
 use std::time::Duration;
 
 /// Queued work older than this is treated as stale and dropped at pop time.
-pub const MAX_AGE: Duration = Duration::from_secs(5);
+pub const MAX_AGE: Duration = Duration::from_secs(1);
 
 /// Packed priority value. Smaller is more urgent.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -174,12 +174,7 @@ mod tests {
         // Same chunk position but different LODs. Coarse should win.
         let coarse = v.priority_for(ChunkKey::new(2, 100, 100, 100));
         let fine = v.priority_for(ChunkKey::new(0, 10, 20, 30));
-        assert!(
-            coarse < fine,
-            "coarse {:?} should be < fine {:?}",
-            coarse,
-            fine
-        );
+        assert!(coarse < fine, "coarse {:?} should be < fine {:?}", coarse, fine);
     }
 
     #[test]

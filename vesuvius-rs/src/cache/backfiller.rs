@@ -122,20 +122,33 @@ pub enum ExtractedChunk {
 
 /// Plan for filling one 64³ cache chunk.
 pub struct BackfillPlan {
+    /// Every cache chunk this plan will fill. MUST contain the primary —
+    /// the same `ChunkKey` the cache passed to `plan` — plus any siblings
+    /// the same extract will materialize as a byproduct (typically
+    /// because one downloaded native chunk covers them all). Order is
+    /// not significant.
+    ///
+    /// The cache claims every sibling as `ChunkState::Pending` the moment
+    /// dispatch returns, so a viewport that fans out into 8 sibling cache
+    /// chunks sharing one native source doesn't trigger 8 redundant plans +
+    /// extracts: only the first observer plans, and the others see Pending
+    /// immediately. When extract finishes, every covered key transitions
+    /// straight to `Resident` / `Empty` in-memory — no need for a follow-up
+    /// dispatch + disk reload.
+    ///
+    /// Plans whose extract only fills the primary (e.g. synthesized-LOD)
+    /// should set `covered = vec![primary]`.
+    pub covered: Vec<ChunkKey>,
     pub sources: Vec<SourceSpec>,
     /// Run once every source in `sources` has resolved. Receives outcomes
     /// in the same order as `sources`. Returns one or more `(ChunkKey,
     /// ExtractedChunk)` entries.
     ///
-    /// One entry MUST match the `ChunkKey` that the cache passed to `plan`
-    /// — that entry is published into the in-memory cache map as
-    /// `Resident` / `Empty`. Any additional entries are written to disk as
-    /// a byproduct, so that future dispatches for those keys skip the
-    /// download + decode entirely. They do NOT touch the in-memory map.
-    ///
-    /// The flat shape lets backfillers express "I have full data for these
-    /// 8 cache chunks because I downloaded one 128³ native chunk that
-    /// covers them" without a separate primary/siblings split.
+    /// Every entry's key SHOULD appear in `covered`; any entry whose key
+    /// is not in `covered` is still persisted to disk but won't be promoted
+    /// to in-memory `Resident`. Conversely, any `covered` key not present in
+    /// the extract output is treated as transient (its Pending claim is
+    /// cleared so a later dispatch can retry).
     pub extract:
         Box<dyn FnOnce(&[SourceOutcome]) -> Result<Vec<(ChunkKey, ExtractedChunk)>, BackfillError> + Send + 'static>,
 }

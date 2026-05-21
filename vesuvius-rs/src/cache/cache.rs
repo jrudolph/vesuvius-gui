@@ -57,7 +57,7 @@ const PERMANENT_COOLDOWN: Duration = Duration::from_secs(60 * 60 * 24 * 365);
 /// Small worker pool — extract + decode is CPU-bound but lock-light. Keeping
 /// the count low reduces the chance that a worker stalls behind a
 /// DashMap shard another worker is holding.
-const DEFAULT_WORKERS: usize = 2;
+const DEFAULT_WORKERS: usize = 8;
 
 pub struct ChunkCache {
     inner: Arc<Inner>,
@@ -122,6 +122,12 @@ struct ChunkProgress {
     extract: Option<
         Box<dyn FnOnce(&[SourceOutcome]) -> Result<Vec<(ChunkKey, ExtractedChunk)>, BackfillError> + Send + 'static>,
     >,
+    /// Sibling chunks pre-claimed as Pending at dispatch time. The
+    /// extract task consults this list to (a) promote each sibling to its
+    /// Resident/Empty state in-memory on success, and (b) clear the
+    /// Pending claim on transient/permanent failure so retries can happen
+    /// via a fresh dispatch.
+    covered: Vec<ChunkKey>,
     /// Priority captured at dispatch time. Used to enqueue the `Extract`
     /// task once all sources resolve, so late-arriving completions inherit
     /// the original chunk priority instead of falling back to `worst`.
@@ -409,14 +415,42 @@ impl Inner {
             }
         };
 
-        let BackfillPlan { sources, extract } = plan;
+        let BackfillPlan { covered, sources, extract } = plan;
         let order: Vec<String> = sources.iter().map(|s| s.key().to_string()).collect();
-        log::debug!("[{}] miss → fetching {} source(s)", key, order.len());
+        log::debug!(
+            "[{}] miss → fetching {} source(s), covers {} chunk(s)",
+            key,
+            order.len(),
+            covered.len()
+        );
+        // Pre-claim sibling cache chunks as Pending. Subsequent
+        // `state_or_fetch` calls for any of them return Pending immediately
+        // instead of running another plan() + extract that would redo the
+        // same decode the primary extract is about to do.
+        //
+        // Only insert into the map if the slot is genuinely free (no entry,
+        // or a stale CooldownMiss that we'd retry anyway). If a sibling is
+        // already Resident / Empty / Pending we leave it alone. The
+        // `dispatching` DashMap is the per-key claim guard, but here we're
+        // claiming *other* keys' map slots — so we use map.entry with a
+        // CAS-style check on what's already there.
+        for sib in &covered {
+            if *sib == key {
+                continue;
+            }
+            let mut entry = self.map.entry(*sib).or_insert_with(|| Arc::new(ChunkState::Pending));
+            if let ChunkState::CooldownMiss { until } = entry.as_ref() {
+                if SystemTime::now() >= *until {
+                    *entry = Arc::new(ChunkState::Pending);
+                }
+            }
+        }
         let progress_arc = Arc::new(Mutex::new(ChunkProgress {
             order: order.clone(),
             remaining: order.len(),
             results: HashMap::new(),
             extract: Some(extract),
+            covered,
             priority,
         }));
         self.chunks.insert(key, progress_arc.clone());
@@ -785,7 +819,7 @@ impl Inner {
             Some(v) => v,
             None => return,
         };
-        let (order, results, extract) = {
+        let (order, results, extract, covered) = {
             let mut p = arc.lock().unwrap();
             let extract = match p.extract.take() {
                 Some(e) => e,
@@ -793,7 +827,8 @@ impl Inner {
             };
             let order = std::mem::take(&mut p.order);
             let results = std::mem::take(&mut p.results);
-            (order, results, extract)
+            let covered = std::mem::take(&mut p.covered);
+            (order, results, extract, covered)
         };
         let mut inputs: Vec<SourceOutcome> = Vec::with_capacity(order.len());
         let mut results = results;
@@ -801,36 +836,40 @@ impl Inner {
             inputs.push(results.remove(k).unwrap_or_else(|| Ok(None)));
         }
 
-        let new_state = match extract(&inputs) {
+        let mut primary_state: Option<Arc<ChunkState>> = None;
+        let mut sibling_states: Vec<(ChunkKey, Arc<ChunkState>)> = Vec::new();
+        let mut failure_state: Option<Arc<ChunkState>> = None;
+        match extract(&inputs) {
             Ok(fills) => {
-                // The dispatched chunk's fill becomes Resident/Empty in the
-                // in-memory map. Every other entry is a "free" byproduct
-                // (the backfiller had enough source data to materialize
-                // adjacent cache chunks too) — persist those straight to disk
-                // so a future dispatch hits the disk path without re-fetching
-                // or re-decoding the shared native chunks. They deliberately
-                // don't touch `self.map`: the next dispatch picks them up via
-                // `disk.load`, which keeps memory bounded.
-                let mut primary: Option<ExtractedChunk> = None;
+                // Each fill is materialized to its terminal state (disk
+                // write + mmap → Resident, or .empty sentinel → Empty).
+                // Promoting *every* fill — not just the primary — means
+                // sibling chunks claimed Pending in dispatch_chunk
+                // transition directly to Resident here without needing a
+                // follow-up disk-load round trip.
+                let mut seen_primary = false;
                 for (k, data) in fills {
-                    if k == key && primary.is_none() {
-                        primary = Some(data);
+                    let state = if k == key {
+                        let s = self.primary_state(k, data, t0);
+                        seen_primary = true;
+                        primary_state = Some(s.clone());
+                        s
                     } else {
-                        self.persist_fill(key, k, data);
+                        self.primary_state(k, data, t0)
+                    };
+                    if k != key {
+                        sibling_states.push((k, state));
                     }
                 }
-                match primary {
-                    Some(p) => self.primary_state(key, p, t0),
-                    None => {
-                        log::warn!("[{}] extract produced no entry for the dispatched key", key);
-                        cooldown()
-                    }
+                if !seen_primary {
+                    log::warn!("[{}] extract produced no entry for the dispatched key", key);
+                    failure_state = Some(cooldown());
                 }
             }
-            Err(BackfillError::OutOfBounds) => long_cooldown(),
+            Err(BackfillError::OutOfBounds) => failure_state = Some(long_cooldown()),
             Err(BackfillError::Permanent(reason)) => {
                 log::warn!("[{}] permanent: {}", key, reason);
-                long_cooldown()
+                failure_state = Some(long_cooldown());
             }
             Err(BackfillError::Transient(reason)) => {
                 // Aged-out / cancelled fetches aren't a chunk failure — they
@@ -841,16 +880,44 @@ impl Inner {
                 } else {
                     log::debug!("[{}] transient: {}", key, reason);
                 }
-                cooldown()
+                failure_state = Some(cooldown());
             }
-        };
+        }
         // Drop our inputs so the per-source payloads (mmaps in the
         // download path) only stay alive while the refcount-eviction loop
         // can see them — Arc clones inside the source entries remain.
         drop(inputs);
         self.release_sources(&order);
+
+        let new_state = primary_state.unwrap_or_else(|| failure_state.clone().unwrap_or_else(cooldown));
         self.map.insert(key, new_state.clone());
         self.publish_terminal(key, &new_state);
+
+        // Promote siblings to their terminal states. The set of keys we
+        // touched is `{primary} ∪ {fills}`; any covered key not in that
+        // set didn't get a fill — clear its Pending claim with the same
+        // failure state we'd use for the primary in that case (so a
+        // future dispatch can retry it without confusion).
+        let mut touched: std::collections::HashSet<ChunkKey> = std::collections::HashSet::new();
+        touched.insert(key);
+        for (k, state) in &sibling_states {
+            touched.insert(*k);
+            self.map.insert(*k, state.clone());
+            self.publish_terminal(*k, state);
+        }
+        for c in &covered {
+            if touched.contains(c) {
+                continue;
+            }
+            // A covered slot that the extract didn't fill — leave it as
+            // a short cooldown so the next dispatch (post-cooldown) will
+            // re-plan instead of being stuck on a stale Pending. On
+            // extract failure we use the same fallback state as the
+            // primary; on success this is an unexpected gap we surface
+            // with a short cooldown.
+            let s = failure_state.clone().unwrap_or_else(short_cooldown);
+            self.map.insert(*c, s);
+        }
     }
 
     /// Translate a primary `ExtractedChunk` into the in-memory state to
@@ -881,30 +948,6 @@ impl Inner {
                 }
                 log::debug!("[{}] empty ({:?})", key, t0.elapsed());
                 Arc::new(ChunkState::Empty)
-            }
-        }
-    }
-
-    /// Persist one byproduct fill (a cache chunk other than the one whose
-    /// dispatch triggered this extract) straight to disk without touching
-    /// the in-memory map. Next dispatch for `key` picks it up via
-    /// `disk.load`. IO failures are logged and skipped — worst case the
-    /// future dispatch re-fetches the underlying source.
-    fn persist_fill(&self, primary: ChunkKey, key: ChunkKey, data: ExtractedChunk) {
-        match data {
-            ExtractedChunk::Bytes(bytes) => {
-                if let Err(e) = self.disk.write_atomic(key, &bytes) {
-                    log::debug!("[{}] sibling write failed ({}); skipped", key, e);
-                } else {
-                    log::trace!("[{}] sibling filled (from {})", key, primary);
-                }
-            }
-            ExtractedChunk::Empty => {
-                if let Err(e) = self.disk.mark_empty(key) {
-                    log::debug!("[{}] sibling mark_empty failed ({}); skipped", key, e);
-                } else {
-                    log::trace!("[{}] sibling empty (from {})", key, primary);
-                }
             }
         }
     }
