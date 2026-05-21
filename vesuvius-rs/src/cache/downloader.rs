@@ -18,7 +18,7 @@ use super::priority::{Priority, MAX_AGE};
 use super::state::ChunkKey;
 use dashmap::DashMap;
 use reqwest::blocking::Client;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -62,11 +62,23 @@ struct DownloaderInner {
 }
 
 struct Queue {
-    /// Key: (priority value, monotonic seq). Lower keys = popped first.
-    /// `next_seq` is the FIFO tiebreaker for entries with identical priority.
+    /// Key: `(priority value, !seq)`. Lower keys = popped first. The
+    /// `!seq` tiebreaker is **LIFO** — newer submissions within the same
+    /// priority class win, matching the paint loop's "the chunk I just
+    /// asked for is the one I most want" semantics. Combined with
+    /// `update_priority` on every state_or_fetch, this keeps the head of
+    /// the queue aligned with the current viewport even when MAX_AGE is
+    /// long enough that old entries don't auto-expire quickly.
     entries: BTreeMap<(u64, u64), Entry>,
+    /// Reverse index by chunk for O(1) `update_priority`. Maintained in
+    /// lockstep with `entries` on submit, pop, and reprioritise.
+    chunk_index: HashMap<ChunkKey, Vec<(u64, u64)>>,
     next_seq: u64,
     closed: bool,
+}
+
+fn rev_seq(seq: u64) -> u64 {
+    !seq
 }
 
 struct Entry {
@@ -96,6 +108,7 @@ impl Downloader {
         let inner = Arc::new(DownloaderInner {
             queue: Mutex::new(Queue {
                 entries: BTreeMap::new(),
+                chunk_index: HashMap::new(),
                 next_seq: 0,
                 closed: false,
             }),
@@ -150,7 +163,7 @@ impl Downloader {
                 Some(on_done)
             } else {
                 q.next_seq += 1;
-                let key = (priority.value(), q.next_seq);
+                let key = (priority.value(), rev_seq(q.next_seq));
                 q.entries.insert(
                     key,
                     Entry {
@@ -161,6 +174,7 @@ impl Downloader {
                         on_done,
                     },
                 );
+                q.chunk_index.entry(chunk).or_default().push(key);
                 self.inner.not_empty.notify_one();
                 None
             }
@@ -184,6 +198,36 @@ impl Downloader {
     /// "waiting in queue" from "bytes coming over the wire right now".
     pub fn is_active_chunk(&self, chunk: ChunkKey) -> bool {
         self.inner.active.contains_key(&chunk)
+    }
+
+    /// Bump every queued download for `chunk` to `new_priority` with a
+    /// fresh seq, resetting `added_at` so MAX_AGE re-counts from now.
+    /// No-op when the chunk has no queued downloads (it may be entirely
+    /// in flight, already done, or never submitted). Called from the
+    /// cache's `state_or_fetch_with_priority` on every paint poll so the
+    /// queue head tracks the current viewport.
+    pub fn update_priority(&self, chunk: ChunkKey, new_priority: Priority) {
+        let mut q = self.inner.queue.lock().unwrap();
+        let old_keys = match q.chunk_index.remove(&chunk) {
+            Some(v) if !v.is_empty() => v,
+            _ => return,
+        };
+        let mut new_keys = Vec::with_capacity(old_keys.len());
+        let now = Instant::now();
+        for old_key in old_keys {
+            let Some(mut entry) = q.entries.remove(&old_key) else {
+                continue;
+            };
+            entry.added_at = now;
+            q.next_seq += 1;
+            let new_key = (new_priority.value(), rev_seq(q.next_seq));
+            q.entries.insert(new_key, entry);
+            new_keys.push(new_key);
+        }
+        if !new_keys.is_empty() {
+            q.chunk_index.insert(chunk, new_keys);
+            self.inner.not_empty.notify_one();
+        }
     }
 }
 
@@ -231,10 +275,16 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
                 if q.closed && q.entries.is_empty() {
                     return;
                 }
-                let Some((_, entry)) = q.entries.pop_first() else {
+                let Some((key, entry)) = q.entries.pop_first() else {
                     q = inner.not_empty.wait(q).unwrap();
                     continue;
                 };
+                if let Some(keys) = q.chunk_index.get_mut(&entry.chunk) {
+                    keys.retain(|k| *k != key);
+                    if keys.is_empty() {
+                        q.chunk_index.remove(&entry.chunk);
+                    }
+                }
                 if entry.added_at.elapsed() > max_age {
                     // Stale by age — cancel + loop.
                     drop(q);

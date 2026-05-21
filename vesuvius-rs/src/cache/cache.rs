@@ -143,9 +143,19 @@ enum Task {
 }
 
 /// Priority queue for cache-side `Task`s. BTreeMap keyed by `(priority,
-/// seq)` so workers always pop the most-urgent submitted entry. Unbounded;
-/// dedup happens at the cache layer (source-key + chunk-key uniqueness).
-/// The only staleness check is age — see the module docs.
+/// reverse_seq)` so workers always pop the most-urgent submitted entry,
+/// breaking ties in **LIFO** order — most recently (re-)submitted within a
+/// priority class wins. That matches the paint loop semantics: each frame
+/// re-asserts the current viewport via `state_or_fetch_with_priority`,
+/// which calls `update_priority` to bump in-flight entries' priorities and
+/// give them a fresh seq. Older un-refreshed entries naturally fall to the
+/// tail and age out via `MAX_AGE`.
+///
+/// `chunk_index` mirrors `entries` keyed by `ChunkKey` for the O(1) lookup
+/// `update_priority` needs.
+///
+/// Unbounded; dedup happens at the cache layer (source-key + chunk-key
+/// uniqueness). The only staleness check is age — see the module docs.
 struct TaskQueue {
     inner: Mutex<TaskQueueInner>,
     not_empty: Condvar,
@@ -154,8 +164,20 @@ struct TaskQueue {
 
 struct TaskQueueInner {
     entries: BTreeMap<(u64, u64), TaskEntry>,
+    /// Reverse lookup: every queue key currently registered for a given
+    /// chunk. A chunk can have several (its sources' FetchSource tasks,
+    /// plus an Extract task once sources resolve). Maintained in lockstep
+    /// with `entries`.
+    chunk_index: HashMap<ChunkKey, Vec<(u64, u64)>>,
     next_seq: u64,
     closed: bool,
+}
+
+/// Encode `seq` so that **larger** seq sorts BEFORE smaller within a
+/// priority class (BTreeMap pops smallest key first → LIFO). `seq` is
+/// monotonically increasing so `!seq` is monotonically decreasing.
+fn rev_seq(seq: u64) -> u64 {
+    !seq
 }
 
 struct TaskEntry {
@@ -331,6 +353,18 @@ impl Inner {
         if let Some(entry) = self.map.get(&key) {
             let state = entry.clone();
             drop(entry);
+            // Pending chunks: refresh their priority in both the cache
+            // task queue and the downloader queue so viewport movements
+            // propagate to in-flight work. Always overwrite — last
+            // caller's intent wins. Out-of-frame chunks no longer get
+            // refreshed and age out via MAX_AGE.
+            if matches!(state.as_ref(), ChunkState::Pending) {
+                if let Some(p) = self.chunks.get(&key) {
+                    p.lock().unwrap().priority = priority;
+                }
+                self.task_queue.update_priority(key, priority);
+                self.downloader.update_priority(key, priority);
+            }
             if let ChunkState::CooldownMiss { until } = state.as_ref() {
                 if SystemTime::now() < *until {
                     return state;
@@ -1036,6 +1070,7 @@ impl TaskQueue {
         Self {
             inner: Mutex::new(TaskQueueInner {
                 entries: BTreeMap::new(),
+                chunk_index: HashMap::new(),
                 next_seq: 0,
                 closed: false,
             }),
@@ -1053,7 +1088,7 @@ impl TaskQueue {
             return Err(task);
         }
         q.next_seq += 1;
-        let key = (priority.value(), q.next_seq);
+        let key = (priority.value(), rev_seq(q.next_seq));
         q.entries.insert(
             key,
             TaskEntry {
@@ -1062,8 +1097,37 @@ impl TaskQueue {
                 task,
             },
         );
+        q.chunk_index.entry(chunk).or_default().push(key);
         self.not_empty.notify_one();
         Ok(())
+    }
+
+    /// Bump every queued entry for `chunk` to `new_priority` with a fresh
+    /// seq (i.e. moves them to the head of the new priority class) and
+    /// resets their `added_at` so MAX_AGE re-counts from now. No-op when
+    /// the chunk has no queued entries.
+    fn update_priority(&self, chunk: ChunkKey, new_priority: Priority) {
+        let mut q = self.inner.lock().unwrap();
+        let old_keys = match q.chunk_index.remove(&chunk) {
+            Some(v) if !v.is_empty() => v,
+            _ => return,
+        };
+        let mut new_keys = Vec::with_capacity(old_keys.len());
+        let now = Instant::now();
+        for old_key in old_keys {
+            let Some(mut entry) = q.entries.remove(&old_key) else {
+                continue;
+            };
+            entry.added_at = now;
+            q.next_seq += 1;
+            let new_key = (new_priority.value(), rev_seq(q.next_seq));
+            q.entries.insert(new_key, entry);
+            new_keys.push(new_key);
+        }
+        if !new_keys.is_empty() {
+            q.chunk_index.insert(chunk, new_keys);
+            self.not_empty.notify_one();
+        }
     }
 
     /// Block until either a non-stale entry is available (returned) or the
@@ -1077,15 +1141,25 @@ impl TaskQueue {
             if q.closed && q.entries.is_empty() {
                 return PopResult::Closed { dropped };
             }
-            let Some((_, entry)) = q.entries.pop_first() else {
+            let Some((key, entry)) = q.entries.pop_first() else {
                 q = self.not_empty.wait(q).unwrap();
                 continue;
             };
+            forget_chunk_key(&mut q.chunk_index, entry.chunk, key);
             if entry.added_at.elapsed() > self.max_age {
                 dropped.push(entry);
                 continue;
             }
             return PopResult::Ready { entry, dropped };
+        }
+    }
+}
+
+fn forget_chunk_key(index: &mut HashMap<ChunkKey, Vec<(u64, u64)>>, chunk: ChunkKey, key: (u64, u64)) {
+    if let Some(keys) = index.get_mut(&chunk) {
+        keys.retain(|k| *k != key);
+        if keys.is_empty() {
+            index.remove(&chunk);
         }
     }
 }
