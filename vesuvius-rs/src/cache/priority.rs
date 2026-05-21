@@ -15,7 +15,7 @@ use super::state::ChunkKey;
 use std::time::Duration;
 
 /// Queued work older than this is treated as stale and dropped at pop time.
-pub const MAX_AGE: Duration = Duration::from_secs(120);
+pub const MAX_AGE: Duration = Duration::from_secs(10);
 
 /// Packed priority value. Smaller is more urgent.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

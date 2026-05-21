@@ -57,7 +57,7 @@ const PERMANENT_COOLDOWN: Duration = Duration::from_secs(60 * 60 * 24 * 365);
 /// Small worker pool — extract + decode is CPU-bound but lock-light. Keeping
 /// the count low reduces the chance that a worker stalls behind a
 /// DashMap shard another worker is holding.
-const DEFAULT_WORKERS: usize = 8;
+const DEFAULT_WORKERS: usize = 4;
 
 pub struct ChunkCache {
     inner: Arc<Inner>,
@@ -142,17 +142,18 @@ enum Task {
     Extract,
 }
 
-/// Priority queue for cache-side `Task`s. BTreeMap keyed by `(priority,
-/// reverse_seq)` so workers always pop the most-urgent submitted entry,
-/// breaking ties in **LIFO** order — most recently (re-)submitted within a
-/// priority class wins. That matches the paint loop semantics: each frame
-/// re-asserts the current viewport via `state_or_fetch_with_priority`,
-/// which calls `update_priority` to bump in-flight entries' priorities and
-/// give them a fresh seq. Older un-refreshed entries naturally fall to the
-/// tail and age out via `MAX_AGE`.
+/// Pure-LIFO queue for cache-side `Task`s. BTreeMap keyed by `!seq` so the
+/// most recently submitted (or re-touched) entry pops first. **Priority is
+/// intentionally not part of the sort key** — earlier iterations split
+/// work across LOD-rank and viewport-distance tiers, but in practice that
+/// let coarse-LOD work outrank current-viewport work and stall painting.
+/// The simpler model: paint always asks for what it wants right now, and
+/// "right now" wins. Older requests slide toward the tail and either
+/// processed in LIFO order when workers catch up, or culled by `MAX_AGE`.
 ///
 /// `chunk_index` mirrors `entries` keyed by `ChunkKey` for the O(1) lookup
-/// `update_priority` needs.
+/// `update_priority` (a touch — refreshes seq + `added_at`, the priority
+/// argument is currently ignored) needs.
 ///
 /// Unbounded; dedup happens at the cache layer (source-key + chunk-key
 /// uniqueness). The only staleness check is age — see the module docs.
@@ -163,19 +164,19 @@ struct TaskQueue {
 }
 
 struct TaskQueueInner {
-    entries: BTreeMap<(u64, u64), TaskEntry>,
+    entries: BTreeMap<u64, TaskEntry>,
     /// Reverse lookup: every queue key currently registered for a given
     /// chunk. A chunk can have several (its sources' FetchSource tasks,
     /// plus an Extract task once sources resolve). Maintained in lockstep
     /// with `entries`.
-    chunk_index: HashMap<ChunkKey, Vec<(u64, u64)>>,
+    chunk_index: HashMap<ChunkKey, Vec<u64>>,
     next_seq: u64,
     closed: bool,
 }
 
-/// Encode `seq` so that **larger** seq sorts BEFORE smaller within a
-/// priority class (BTreeMap pops smallest key first → LIFO). `seq` is
-/// monotonically increasing so `!seq` is monotonically decreasing.
+/// Encode `seq` so that **larger** seq sorts BEFORE smaller (BTreeMap pops
+/// smallest key first → LIFO). `seq` is monotonically increasing so `!seq`
+/// is monotonically decreasing.
 fn rev_seq(seq: u64) -> u64 {
     !seq
 }
@@ -1081,14 +1082,15 @@ impl TaskQueue {
 
     /// Submit a task. Only fails if the queue is closed (shutdown). The
     /// queue is otherwise unbounded; cache-layer dedup ensures we don't
-    /// queue duplicate Fetch/Extract tasks for the same key.
-    fn try_submit(&self, chunk: ChunkKey, priority: Priority, task: Task) -> Result<(), Task> {
+    /// queue duplicate Fetch/Extract tasks for the same key. `_priority`
+    /// is currently ignored — see the struct doc.
+    fn try_submit(&self, chunk: ChunkKey, _priority: Priority, task: Task) -> Result<(), Task> {
         let mut q = self.inner.lock().unwrap();
         if q.closed {
             return Err(task);
         }
         q.next_seq += 1;
-        let key = (priority.value(), rev_seq(q.next_seq));
+        let key = rev_seq(q.next_seq);
         q.entries.insert(
             key,
             TaskEntry {
@@ -1102,11 +1104,13 @@ impl TaskQueue {
         Ok(())
     }
 
-    /// Bump every queued entry for `chunk` to `new_priority` with a fresh
-    /// seq (i.e. moves them to the head of the new priority class) and
-    /// resets their `added_at` so MAX_AGE re-counts from now. No-op when
-    /// the chunk has no queued entries.
-    fn update_priority(&self, chunk: ChunkKey, new_priority: Priority) {
+    /// "Touch" every queued entry for `chunk`: refresh its seq (moving it
+    /// to the head of the LIFO order) and reset `added_at` so MAX_AGE
+    /// re-counts from now. The `_new_priority` argument is currently
+    /// ignored; kept on the signature so paint code can be wired in
+    /// before / after we revive priority-based ordering. No-op when the
+    /// chunk has no queued entries.
+    fn update_priority(&self, chunk: ChunkKey, _new_priority: Priority) {
         let mut q = self.inner.lock().unwrap();
         let old_keys = match q.chunk_index.remove(&chunk) {
             Some(v) if !v.is_empty() => v,
@@ -1120,7 +1124,7 @@ impl TaskQueue {
             };
             entry.added_at = now;
             q.next_seq += 1;
-            let new_key = (new_priority.value(), rev_seq(q.next_seq));
+            let new_key = rev_seq(q.next_seq);
             q.entries.insert(new_key, entry);
             new_keys.push(new_key);
         }
@@ -1155,7 +1159,7 @@ impl TaskQueue {
     }
 }
 
-fn forget_chunk_key(index: &mut HashMap<ChunkKey, Vec<(u64, u64)>>, chunk: ChunkKey, key: (u64, u64)) {
+fn forget_chunk_key(index: &mut HashMap<ChunkKey, Vec<u64>>, chunk: ChunkKey, key: u64) {
     if let Some(keys) = index.get_mut(&chunk) {
         keys.retain(|k| *k != key);
         if keys.is_empty() {

@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-const DEFAULT_HTTP_WORKERS: usize = 32;
+const DEFAULT_HTTP_WORKERS: usize = 16;
 const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Debug, Clone)]
@@ -62,17 +62,16 @@ struct DownloaderInner {
 }
 
 struct Queue {
-    /// Key: `(priority value, !seq)`. Lower keys = popped first. The
-    /// `!seq` tiebreaker is **LIFO** — newer submissions within the same
-    /// priority class win, matching the paint loop's "the chunk I just
-    /// asked for is the one I most want" semantics. Combined with
-    /// `update_priority` on every state_or_fetch, this keeps the head of
-    /// the queue aligned with the current viewport even when MAX_AGE is
-    /// long enough that old entries don't auto-expire quickly.
-    entries: BTreeMap<(u64, u64), Entry>,
+    /// Pure-LIFO ordering: key is `!seq` so the most recent submit (or
+    /// `update_priority` touch) pops first. Priority is intentionally not
+    /// part of the sort key — see the cache's TaskQueue doc for the
+    /// rationale. Older queued downloads slide to the tail and are
+    /// processed in LIFO order when workers catch up, or culled by
+    /// MAX_AGE.
+    entries: BTreeMap<u64, Entry>,
     /// Reverse index by chunk for O(1) `update_priority`. Maintained in
-    /// lockstep with `entries` on submit, pop, and reprioritise.
-    chunk_index: HashMap<ChunkKey, Vec<(u64, u64)>>,
+    /// lockstep with `entries` on submit, pop, and touch.
+    chunk_index: HashMap<ChunkKey, Vec<u64>>,
     next_seq: u64,
     closed: bool,
 }
@@ -154,7 +153,7 @@ impl Downloader {
         url: &str,
         range: Option<(u64, u64)>,
         chunk: ChunkKey,
-        priority: Priority,
+        _priority: Priority,
         on_done: OnDone,
     ) -> SubmitResult {
         let rejected_on_done = {
@@ -163,7 +162,7 @@ impl Downloader {
                 Some(on_done)
             } else {
                 q.next_seq += 1;
-                let key = (priority.value(), rev_seq(q.next_seq));
+                let key = rev_seq(q.next_seq);
                 q.entries.insert(
                     key,
                     Entry {
@@ -200,13 +199,15 @@ impl Downloader {
         self.inner.active.contains_key(&chunk)
     }
 
-    /// Bump every queued download for `chunk` to `new_priority` with a
-    /// fresh seq, resetting `added_at` so MAX_AGE re-counts from now.
-    /// No-op when the chunk has no queued downloads (it may be entirely
-    /// in flight, already done, or never submitted). Called from the
-    /// cache's `state_or_fetch_with_priority` on every paint poll so the
-    /// queue head tracks the current viewport.
-    pub fn update_priority(&self, chunk: ChunkKey, new_priority: Priority) {
+    /// "Touch" every queued download for `chunk`: refresh seq (moving it
+    /// to the head of the LIFO queue) and reset `added_at` so MAX_AGE
+    /// re-counts from now. `_new_priority` is currently ignored — the
+    /// signature is kept stable so paint code can be wired in before /
+    /// after we revive priority-based ordering. No-op when the chunk has
+    /// no queued downloads. Called from the cache's
+    /// `state_or_fetch_with_priority` on every paint poll so the queue
+    /// head tracks the current viewport.
+    pub fn update_priority(&self, chunk: ChunkKey, _new_priority: Priority) {
         let mut q = self.inner.queue.lock().unwrap();
         let old_keys = match q.chunk_index.remove(&chunk) {
             Some(v) if !v.is_empty() => v,
@@ -220,7 +221,7 @@ impl Downloader {
             };
             entry.added_at = now;
             q.next_seq += 1;
-            let new_key = (new_priority.value(), rev_seq(q.next_seq));
+            let new_key = rev_seq(q.next_seq);
             q.entries.insert(new_key, entry);
             new_keys.push(new_key);
         }
