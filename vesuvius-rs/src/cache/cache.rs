@@ -48,6 +48,7 @@ use super::MAX_AGE;
 use dashmap::DashMap;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -95,6 +96,14 @@ struct Inner {
     pending_chunk_sources: DashMap<ChunkKey, Vec<String>>,
     task_queue: TaskQueue,
     downloader: Arc<Downloader>,
+    /// Frame counter that gates per-Pending touch debouncing. Bumped by
+    /// `ChunkCache::advance_frame` (called from `reset_for_painting` at
+    /// the start of each pane paint). Initialized to 1 so a fresh
+    /// `Pending` — whose `last_touched_frame` starts at 0 — always fires
+    /// its first touch. Each `state_or_fetch` on a Pending chunk
+    /// compares this against the chunk's stamp; equal means "already
+    /// touched this frame, skip the queue mutexes."
+    frame: AtomicU64,
 }
 
 enum SourceState {
@@ -240,6 +249,7 @@ impl ChunkCache {
             pending_chunk_sources: DashMap::new(),
             task_queue,
             downloader,
+            frame: AtomicU64::new(1),
         });
 
         for i in 0..workers.max(1) {
@@ -300,7 +310,7 @@ impl ChunkCache {
         let start = std::time::Instant::now();
         loop {
             let state = self.state_or_fetch(key);
-            if !matches!(state.as_ref(), ChunkState::Pending) {
+            if !matches!(state.as_ref(), ChunkState::Pending { .. }) {
                 return state;
             }
             if start.elapsed() >= timeout {
@@ -308,6 +318,16 @@ impl ChunkCache {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Bump the per-cache frame counter that gates touch debouncing.
+    /// Call once per render frame, before any per-voxel / per-tile
+    /// sampling begins (host wires this into `reset_for_painting`).
+    /// Pending chunks observed *after* this returns are eligible for a
+    /// fresh queue-priority touch; subsequent observations of the same
+    /// chunk within the frame are no-ops on the hot path.
+    pub fn advance_frame(&self) {
+        self.inner.frame.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Synchronously persist the on-disk chunk-state sidecar. Call this
@@ -347,6 +367,9 @@ fn cooldown() -> Arc<ChunkState> {
 fn short_cooldown() -> Arc<ChunkState> {
     Arc::new(ChunkState::CooldownMiss { until: SystemTime::now() + SHORT_COOLDOWN })
 }
+fn pending_state() -> Arc<ChunkState> {
+    Arc::new(ChunkState::pending())
+}
 
 impl Inner {
     /// Same semantics as `ChunkCache::state_or_fetch` but callable from
@@ -360,10 +383,15 @@ impl Inner {
             // Pending chunks: touch their entries in both queues so the
             // current frame's chunks bubble back to the LIFO head and
             // re-arm against MAX_AGE. Out-of-frame chunks stop getting
-            // touched and age out.
-            if matches!(state.as_ref(), ChunkState::Pending) {
-                self.task_queue.touch(key);
-                self.downloader.touch(key);
+            // touched and age out. The check is debounced per chunk —
+            // surface rendering re-enters here per voxel, and the queue
+            // mutexes inside the touch calls would otherwise serialize
+            // every CPU thread on the same futex.
+            if let ChunkState::Pending { last_touched_frame } = state.as_ref() {
+                if self.claim_touch(last_touched_frame) {
+                    self.task_queue.touch(key);
+                    self.downloader.touch(key);
+                }
             }
             if let ChunkState::CooldownMiss { until } = state.as_ref() {
                 if SystemTime::now() < *until {
@@ -380,7 +408,7 @@ impl Inner {
                 .map
                 .get(&key)
                 .map(|e| e.clone())
-                .unwrap_or_else(|| Arc::new(ChunkState::Pending));
+                .unwrap_or_else(pending_state);
         }
 
         let _guard = DispatchGuard { inner: self.clone(), key };
@@ -388,6 +416,22 @@ impl Inner {
         self.map.insert(key, state.clone());
         self.publish_terminal(key, &state);
         state
+    }
+
+    /// Per-Pending touch debouncer. Returns true at most once per
+    /// `advance_frame` tick per chunk across all calling threads: the
+    /// CAS wins exclusive permission to bump the queues, everybody else
+    /// short-circuits and avoids the global mutex inside the touch.
+    /// Two relaxed atomic loads on the hot path — no clock read.
+    fn claim_touch(&self, last_touched_frame: &AtomicU64) -> bool {
+        let now = self.frame.load(Ordering::Relaxed);
+        let prev = last_touched_frame.load(Ordering::Relaxed);
+        if prev == now {
+            return false;
+        }
+        last_touched_frame
+            .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 
     /// Called right after a chunk is written into `self.map`. If the new
@@ -472,10 +516,10 @@ impl Inner {
             if *sib == key {
                 continue;
             }
-            let mut entry = self.map.entry(*sib).or_insert_with(|| Arc::new(ChunkState::Pending));
+            let mut entry = self.map.entry(*sib).or_insert_with(pending_state);
             if let ChunkState::CooldownMiss { until } = entry.as_ref() {
                 if SystemTime::now() >= *until {
-                    *entry = Arc::new(ChunkState::Pending);
+                    *entry = pending_state();
                 }
             }
         }
@@ -491,7 +535,7 @@ impl Inner {
         if order.is_empty() {
             // 0-source plan: queue Extract immediately.
             return match self.task_queue.try_submit(key, Task::Extract) {
-                Ok(()) => Arc::new(ChunkState::Pending),
+                Ok(()) => pending_state(),
                 Err(dropped) => {
                     log::debug!("[{}] dropped: extract queue full (dispatch)", key);
                     self.chunks.remove(&key);
@@ -529,7 +573,7 @@ impl Inner {
                 }
             }
         }
-        Arc::new(ChunkState::Pending)
+        pending_state()
     }
 
     fn register_source(self: &Arc<Self>, chunk_key: ChunkKey, spec: SourceSpec) -> RegisterResult {

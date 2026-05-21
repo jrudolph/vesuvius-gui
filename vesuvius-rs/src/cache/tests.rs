@@ -33,7 +33,7 @@ fn miss_then_fetch_then_resident() {
     // First touch returns Pending (or already Resident if the worker is
     // fast — both are acceptable).
     let state = cache.state_or_fetch(key);
-    assert!(matches!(state.as_ref(), ChunkState::Pending | ChunkState::Resident { .. }));
+    assert!(matches!(state.as_ref(), ChunkState::Pending { .. } | ChunkState::Resident { .. }));
 
     let state = cache.wait_for(key, Duration::from_secs(2));
     assert!(state.as_resident().is_some(), "chunk should be resident: {:?}", state);

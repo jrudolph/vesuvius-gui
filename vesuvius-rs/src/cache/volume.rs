@@ -87,6 +87,10 @@ fn lod_for(sfactor: u8) -> u8 {
 impl VoxelVolume for UnifiedVolume {
     fn reset_for_painting(&self) {
         self.drop_hot_slot();
+        // Tick the cache's frame counter so the per-Pending touch
+        // debounce in `state_or_fetch` lets each chunk through once
+        // during this paint instead of once per ~16 ms wall-clock.
+        self.cache.advance_frame();
     }
 
     fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
@@ -215,7 +219,7 @@ fn overlay_color_for(
             }
         }
         // Nothing resident yet — inspect target state for finer signal.
-        (None, Some(ChunkState::Pending)) => {
+        (None, Some(ChunkState::Pending { .. })) => {
             if is_downloading {
                 Some(Color32::from_rgb(230, 140, 40)) // orange
             } else {
