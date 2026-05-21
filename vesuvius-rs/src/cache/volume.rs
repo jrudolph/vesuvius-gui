@@ -36,6 +36,7 @@ use super::cache::ChunkCache;
 use super::state::{ChunkKey, ChunkState};
 use crate::volume::{DrawingConfig, Image, PaintVolume, VolumeCons, VoxelPaintVolume, VoxelVolume};
 use ecolor::Color32;
+use libm::modf;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -167,6 +168,162 @@ impl VoxelVolume for UnifiedVolume {
         b.chosen = Some((lod_use, state));
         value
     }
+
+    fn get_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        self.interpolate_u8(xyz, downsampling)
+    }
+
+    fn get_color_interpolated(&self, xyz: [f64; 3], downsampling: i32) -> Color32 {
+        Color32::from_gray(self.interpolate_u8(xyz, downsampling))
+    }
+}
+
+impl UnifiedVolume {
+    /// Trilinear interpolation specialized over the cache's 64³ chunks.
+    ///
+    /// Mirrors the fast/slow split in
+    /// `volume64x4::VolumeGrid64x4Mapped::get_interpolated` and
+    /// `vesuvius_zarr::ZarrContext::get_interpolated`, with one extra
+    /// wrinkle for the cache's LOD pyramid: when the target chunk isn't
+    /// resident and a coarser parent is used instead, the **interpolation
+    /// lattice shifts to the chosen LOD's coordinate space**. Otherwise
+    /// `target_sx` and `target_sx + 1` both map onto the same coarse voxel
+    /// (since `floor((target_sx + 1) / 2^shift) == floor(target_sx /
+    /// 2^shift)` for most `target_sx`), the 8 corners collapse to one
+    /// value, and the output bands instead of smoothly interpolating.
+    fn interpolate_u8(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
+        let target_lod = lod_for(downsampling.max(1) as u8);
+        let max_lod = self.cache.max_lod();
+
+        let target_sx = (xyz[0] as i64).max(0) as u64;
+        let target_sy = (xyz[1] as i64).max(0) as u64;
+        let target_sz = (xyz[2] as i64).max(0) as u64;
+        let key_t = ChunkKey::new(
+            target_lod,
+            (target_sx / 64) as u32,
+            (target_sy / 64) as u32,
+            (target_sz / 64) as u32,
+        );
+
+        // Resolve the LOD to interpolate at: reuse the hot slot if it still
+        // points at our target chunk, otherwise walk the pyramid.
+        let chosen: Option<(u8, Arc<ChunkState>)> = {
+            let b = self.local.borrow();
+            if b.target_key == Some(key_t) {
+                b.chosen.clone()
+            } else {
+                None
+            }
+        };
+        let chosen = match chosen {
+            Some(c) => c,
+            None => {
+                let walk_lo = target_lod.min(max_lod);
+                let walk_hi = max_lod;
+                let mut found: Option<(u8, Arc<ChunkState>)> = None;
+                for lod_try in walk_lo..=walk_hi {
+                    let (lx, ly, lz) = coord_at_lod(target_sx, target_sy, target_sz, target_lod, lod_try);
+                    let key = ChunkKey::new(lod_try, (lx / 64) as u32, (ly / 64) as u32, (lz / 64) as u32);
+                    let s = self.cache.state_or_fetch(key);
+                    if s.is_terminal() {
+                        found = Some((lod_try, s));
+                        break;
+                    }
+                }
+                match found {
+                    Some(c) => c,
+                    None => return 0,
+                }
+            }
+        };
+        let (lod_use, state) = chosen;
+
+        // Compute the interpolation lattice in `lod_use` coordinates: dividing
+        // the raw f64 inputs by `2^shift` gives fractional coarse-voxel
+        // positions whose 8 surrounding corners are genuine neighbors in the
+        // coarse mip, not duplicates of the same coarse voxel.
+        let shift = lod_use - target_lod;
+        let scale = (1u64 << shift) as f64;
+        let (cdx, cx0_f) = modf(xyz[0] / scale);
+        let (cdy, cy0_f) = modf(xyz[1] / scale);
+        let (cdz, cz0_f) = modf(xyz[2] / scale);
+        let cx0 = (cx0_f as i64).max(0) as u64;
+        let cy0 = (cy0_f as i64).max(0) as u64;
+        let cz0 = (cz0_f as i64).max(0) as u64;
+
+        let result = match state.as_resident() {
+            Some(mmap) => {
+                // Fast path: the 2×2×2 block at the chosen LOD lives inside
+                // the chunk we just resolved. `target_sx / (64 << shift) ==
+                // cx0 / 64` always (and likewise for y/z), so the boundary
+                // check is purely about `cx0 + 1` crossing into the next
+                // coarse chunk.
+                let fast = (cx0 & 63) != 63 && (cy0 & 63) != 63 && (cz0 & 63) != 63;
+                let ps = if fast {
+                    let tx = (cx0 & 63) as usize;
+                    let ty = (cy0 & 63) as usize;
+                    let tz = (cz0 & 63) as usize;
+                    let idx = tz * 64 * 64 + ty * 64 + tx;
+                    [
+                        mmap[idx] as f64,
+                        mmap[idx + 1] as f64,
+                        mmap[idx + 64] as f64,
+                        mmap[idx + 65] as f64,
+                        mmap[idx + 64 * 64] as f64,
+                        mmap[idx + 64 * 64 + 1] as f64,
+                        mmap[idx + 64 * 64 + 64] as f64,
+                        mmap[idx + 64 * 64 + 65] as f64,
+                    ]
+                } else {
+                    // +1 corner crosses into a neighboring coarse chunk.
+                    // Sample each corner via `get` *at the chosen LOD*
+                    // (downsampling = 1 << lod_use), so the per-corner
+                    // pyramid walks start at `lod_use` instead of redoing
+                    // target-LOD lookups that would just collapse onto
+                    // duplicate coarse voxels again.
+                    let ds = 1i32 << lod_use;
+                    let cx0f = cx0 as f64;
+                    let cy0f = cy0 as f64;
+                    let cz0f = cz0 as f64;
+                    [
+                        self.get([cx0f, cy0f, cz0f], ds) as f64,
+                        self.get([cx0f + 1.0, cy0f, cz0f], ds) as f64,
+                        self.get([cx0f, cy0f + 1.0, cz0f], ds) as f64,
+                        self.get([cx0f + 1.0, cy0f + 1.0, cz0f], ds) as f64,
+                        self.get([cx0f, cy0f, cz0f + 1.0], ds) as f64,
+                        self.get([cx0f + 1.0, cy0f, cz0f + 1.0], ds) as f64,
+                        self.get([cx0f, cy0f + 1.0, cz0f + 1.0], ds) as f64,
+                        self.get([cx0f + 1.0, cy0f + 1.0, cz0f + 1.0], ds) as f64,
+                    ]
+                };
+                trilerp(cdx, cdy, cdz, ps)
+            }
+            None => 0, // Empty
+        };
+
+        // Re-anchor the hot slot to our (target chunk → chosen LOD) binding.
+        // Slow-path `get` calls may have rewritten it for their own corner
+        // chunks at `lod_use`, but the next sample in this target chunk
+        // wants our mapping back.
+        let mut b = self.local.borrow_mut();
+        b.target_key = Some(key_t);
+        b.chosen = Some((lod_use, state));
+        result
+    }
+}
+
+/// Trilinear blend of 8 corner samples ordered (p000, p100, p010, p110,
+/// p001, p101, p011, p111) where bits encode (z, y, x) offsets of 0/1.
+#[inline]
+fn trilerp(dx: f64, dy: f64, dz: f64, p: [f64; 8]) -> u8 {
+    let c00 = p[0] * (1.0 - dx) + p[1] * dx;
+    let c10 = p[2] * (1.0 - dx) + p[3] * dx;
+    let c01 = p[4] * (1.0 - dx) + p[5] * dx;
+    let c11 = p[6] * (1.0 - dx) + p[7] * dx;
+    let c0 = c00 * (1.0 - dy) + c10 * dy;
+    let c1 = c01 * (1.0 - dy) + c11 * dy;
+    let c = c0 * (1.0 - dz) + c1 * dz;
+    c as u8
 }
 
 /// Map a target-LOD voxel coord to its corresponding voxel coord at `lod_use`.

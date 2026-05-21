@@ -789,6 +789,197 @@ fn synth_gate_enables_when_source_is_pyramidal_enough() {
 }
 
 #[test]
+fn get_interpolated_blends_corners_within_a_chunk() {
+    // x-linear gradient: gray = x. Trilinear-interp at a fractional x should
+    // produce the same gradient (the y / z corners are equal so the blend
+    // collapses to plain linear interpolation in x).
+    let root = tmp_root("interp-fast");
+    let backfiller = Arc::new(SyntheticBackfiller::new(
+        "interp-fast",
+        [128, 128, 128],
+        0,
+        |x, _, _, _| (x & 0xff) as u8,
+    ));
+    let cache = ChunkCache::new(&root, backfiller);
+    let volume = UnifiedVolume::new(cache.clone());
+    cache.wait_for(ChunkKey::new(0, 0, 0, 0), Duration::from_secs(2));
+
+    // Fast path: all 8 corners in chunk (0,0,0) — (10, 10, 10) → (11, 11, 11).
+    // Expected = 10 * (1 - 0.25) + 11 * 0.25 = 10.25 → cast u8 = 10.
+    let v = volume.get_interpolated([10.25, 10.0, 10.0], 1);
+    assert_eq!(v, 10);
+
+    // Half-blend on x — 10 * 0.5 + 11 * 0.5 = 10.5 → cast u8 = 10.
+    let v = volume.get_interpolated([10.5, 10.0, 10.0], 1);
+    assert_eq!(v, 10);
+
+    // No fractional component — must equal the raw voxel.
+    let v = volume.get_interpolated([20.0, 30.0, 40.0], 1);
+    assert_eq!(v, 20);
+
+    // get_color_interpolated wraps the same value as a gray Color32.
+    let c = volume.get_color_interpolated([10.5, 10.0, 10.0], 1);
+    assert_eq!((c.r(), c.g(), c.b()), (10, 10, 10));
+}
+
+#[test]
+fn get_interpolated_crosses_chunk_boundary() {
+    // Same gradient, but interpolate across the +x face of chunk (0,0,0) →
+    // (1,0,0). With pattern gray = x, expected interp(63.5) = 63.5 → 63.
+    let root = tmp_root("interp-slow");
+    let backfiller = Arc::new(SyntheticBackfiller::new(
+        "interp-slow",
+        [256, 256, 256],
+        0,
+        |x, _, _, _| (x & 0xff) as u8,
+    ));
+    let cache = ChunkCache::new(&root, backfiller);
+    let volume = UnifiedVolume::new(cache.clone());
+    cache.wait_for(ChunkKey::new(0, 0, 0, 0), Duration::from_secs(2));
+    cache.wait_for(ChunkKey::new(0, 1, 0, 0), Duration::from_secs(2));
+
+    // x0 = 63, x1 = 64 — x0 & 63 == 63, so this hits the slow path.
+    let v = volume.get_interpolated([63.5, 10.0, 10.0], 1);
+    assert_eq!(v, 63);
+
+    // x0 = 63, dx = 0.0 — degenerate "boundary but no blend" case still slow.
+    let v = volume.get_interpolated([63.0, 10.0, 10.0], 1);
+    assert_eq!(v, 63);
+}
+
+#[test]
+fn get_interpolated_at_coarser_lod_blends_distinct_coarse_voxels() {
+    // Regression: when the chosen LOD is coarser than the target LOD,
+    // sampling 8 corners at *target-LOD* positions `(target_sx, target_sx+1, …)`
+    // collapses adjacent corners onto the same coarse voxel (since
+    // `(target_sx + 1) >> shift == target_sx >> shift` for most positions).
+    // The interpolation then averages duplicates and outputs flat bands —
+    // values jumping in steps of `2^shift` target voxels.
+    //
+    // The fix shifts the interpolation lattice into the chosen LOD's
+    // coordinate space: corners are sampled at coarse voxel positions
+    // `(cx0, cx0+1)` with the fractional weight `frac(xyz[0] / 2^shift)`.
+    //
+    // LOD-0 is refused, LOD-1 carries the gradient `gray = (x * 16) & 0xff`.
+    // At downsampling=1 (target_lod=0), interpolating over the +x gradient
+    // must produce smooth output, not bands of width 2.
+    struct LodGated;
+    impl ChunkBackfiller for LodGated {
+        fn max_lod(&self) -> u8 {
+            1
+        }
+        fn voxel_extent(&self) -> [u32; 3] {
+            [128, 128, 128]
+        }
+        fn volume_id(&self) -> String {
+            "interp-coarse-blend".into()
+        }
+        fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            if key.lod == 0 {
+                return Err(BackfillError::Permanent("no L0".into()));
+            }
+            let extract = Box::new(move |_inputs: &[_]| {
+                let mut out = vec![0u8; CHUNK_VOXELS];
+                for z in 0..CHUNK_SIDE {
+                    for y in 0..CHUNK_SIDE {
+                        for x in 0..CHUNK_SIDE {
+                            let sx = key.x * CHUNK_SIDE as u32 + x as u32;
+                            out[z * CHUNK_SIDE * CHUNK_SIDE + y * CHUNK_SIDE + x] = ((sx * 16) & 0xff) as u8;
+                        }
+                    }
+                }
+                Ok(vec![(key, ExtractedChunk::Bytes(out))])
+            });
+            Ok(BackfillPlan {
+                covered: vec![key],
+                sources: Vec::new(),
+                extract,
+            })
+        }
+    }
+
+    let root = tmp_root("interp-coarse-blend");
+    let cache = ChunkCache::new(&root, Arc::new(LodGated));
+    let volume = UnifiedVolume::new(cache.clone());
+    cache.wait_for(ChunkKey::new(1, 0, 0, 0), Duration::from_secs(2));
+
+    // xyz=(10.5, 10, 10) at target_lod=0 falls back to lod_use=1 (shift=1).
+    // Coarse lattice: cx0_f = 5.25 → cx0=5, cdx=0.25.
+    //   p000 = 5 * 16 = 80, p100 = 6 * 16 = 96.
+    //   interp = 80 * 0.75 + 96 * 0.25 = 84.
+    // Pre-fix behavior would sample target-LOD corners (10, 11), both
+    // mapping to coarse x=5 → both 80, output 80.
+    let v = volume.get_interpolated([10.5, 10.0, 10.0], 1);
+    assert_eq!(v, 84, "expected smooth interp 84, got {} (coarse-LOD banding?)", v);
+
+    // xyz=(11.5, 10, 10): cx0_f = 5.75 → cx0=5, cdx=0.75.
+    //   interp = 80 * 0.25 + 96 * 0.75 = 92.
+    // Pre-fix behavior at this position happens to sample corners (11, 12)
+    // that DO straddle a coarse boundary (5 vs 6), so it would output 88
+    // (= mean of 80 and 96) — still wrong, just less so.
+    let v = volume.get_interpolated([11.5, 10.0, 10.0], 1);
+    assert_eq!(v, 92, "expected smooth interp 92, got {} (coarse-LOD banding?)", v);
+
+    // Integer coarse-voxel boundary: cx0_f = 6.0, cdx=0 → output is the
+    // bare coarse voxel value 96.
+    let v = volume.get_interpolated([12.0, 10.0, 10.0], 1);
+    assert_eq!(v, 96);
+
+    // get_color_interpolated wraps the same value as gray.
+    let c = volume.get_color_interpolated([10.5, 10.0, 10.0], 1);
+    assert_eq!((c.r(), c.g(), c.b()), (84, 84, 84));
+}
+
+#[test]
+fn get_interpolated_walks_lod_pyramid_when_target_missing() {
+    // LOD-0 forbidden, LOD-1 returns 0x80 everywhere. Interpolation across
+    // a uniform parent must just return 0x80 (and exercise the coarser-LOD
+    // fast path inside `interpolate_u8`).
+    struct LodGated;
+    impl ChunkBackfiller for LodGated {
+        fn max_lod(&self) -> u8 {
+            1
+        }
+        fn voxel_extent(&self) -> [u32; 3] {
+            [128, 128, 128]
+        }
+        fn volume_id(&self) -> String {
+            "interp-lod".into()
+        }
+        fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            if key.lod == 0 {
+                return Err(BackfillError::Permanent("no L0".into()));
+            }
+            let extract =
+                Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(vec![0x80u8; CHUNK_VOXELS]))]));
+            Ok(BackfillPlan {
+                covered: vec![key],
+                sources: Vec::new(),
+                extract,
+            })
+        }
+    }
+
+    let root = tmp_root("interp-lod-fallback");
+    let cache = ChunkCache::new(&root, Arc::new(LodGated));
+    let volume = UnifiedVolume::new(cache.clone());
+
+    // Spin until LOD-1 fallback resolves (no explicit pre-warm — the get
+    // path itself kicks the coarser-LOD fetch).
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if volume.get_interpolated([10.5, 10.5, 10.5], 1) == 0x80 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "L1 interp fallback never resolved"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
 fn second_open_picks_up_disk_cache() {
     let root = tmp_root("persist");
     let key = ChunkKey::new(0, 0, 0, 0);
