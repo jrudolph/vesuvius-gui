@@ -8,8 +8,9 @@
 //! coarser-LOD parent chunk that is. The target tile's screen region is
 //! painted **once** at whichever LOD has data — we never overdraw multiple
 //! LODs into the same region. Pre-dispatch in `paint()` happens coarse-first
-//! so the bounded task queue gives priority to the wider, viewport-covering
-//! parent chunks: a low-res preview shows up promptly while detail streams in.
+//! so the wider, viewport-covering parent chunks land in the LIFO queue
+//! before their finer-LOD children pile on top: a low-res preview shows
+//! up promptly while detail streams in.
 //!
 //! `get()` is the per-voxel sampler used by surface (ObjVolume) and PPM
 //! renderers that don't go through `UnifiedVolume::paint`. It can't rely on
@@ -32,7 +33,6 @@
 //!   so do NOT redivide here.
 
 use super::cache::ChunkCache;
-use super::priority::{LodView, Viewport};
 use super::state::{ChunkKey, ChunkState};
 use crate::volume::{DrawingConfig, Image, PaintVolume, VolumeCons, VoxelPaintVolume, VoxelVolume};
 use ecolor::Color32;
@@ -236,51 +236,6 @@ fn sample_at(sx: u64, sy: u64, sz: u64, from_lod: u8, to_lod: u8, mmap: &[u8]) -
     mmap[off]
 }
 
-/// Build the paint-loop's view of the chunk grid across all LODs it intends
-/// to dispatch this frame. Used to prioritize + prune work in the cache and
-/// downloader: chunks inside the rect win; chunks more than a few chunks
-/// outside get pruned; LODs not present here get pruned too.
-#[allow(clippy::too_many_arguments)]
-fn build_viewport(
-    xyz: [i32; 3],
-    u_coord: usize,
-    v_coord: usize,
-    plane_coord: usize,
-    min_uc: i32,
-    max_uc: i32,
-    min_vc: i32,
-    max_vc: i32,
-    pc: i32,
-    target_lod: u8,
-    max_lod: u8,
-) -> Viewport {
-    let mut per_lod: Vec<Option<LodView>> = vec![None; (max_lod as usize) + 1];
-    for lod in target_lod..=max_lod {
-        let Some(t) = viewport_tiles(min_uc, max_uc, min_vc, max_vc, pc, lod) else {
-            continue;
-        };
-        let scale = 1i32 << lod;
-        let chunk_world = 64 * scale;
-        let center_u = xyz[u_coord].div_euclid(chunk_world);
-        let center_v = xyz[v_coord].div_euclid(chunk_world);
-        let center_p = t.tile_pc;
-        let mut center = [0i32; 3];
-        center[u_coord] = center_u;
-        center[v_coord] = center_v;
-        center[plane_coord] = center_p;
-        let mut rect_lo = [0i32; 3];
-        let mut rect_hi = [0i32; 3];
-        rect_lo[u_coord] = t.tile_u_lo;
-        rect_hi[u_coord] = t.tile_u_hi;
-        rect_lo[v_coord] = t.tile_v_lo;
-        rect_hi[v_coord] = t.tile_v_hi;
-        rect_lo[plane_coord] = t.tile_pc;
-        rect_hi[plane_coord] = t.tile_pc;
-        per_lod[lod as usize] = Some(LodView { center, rect_lo, rect_hi });
-    }
-    Viewport { max_lod, per_lod }
-}
-
 /// Geometry describing the chunk grid at one LOD inside one viewport.
 struct ViewportTiles {
     chunk_world: i32,
@@ -342,30 +297,14 @@ impl PaintVolume for UnifiedVolume {
             return;
         }
 
-        // Local viewport — used purely to derive a per-chunk priority for
-        // this paint pass. The cache + downloader queues sort by the
-        // priority value passed at submit time; submission order across
-        // panes and LODs gives the right global ordering without any
-        // viewport-state tracking inside the queues.
-        let viewport = build_viewport(
-            xyz,
-            u_coord,
-            v_coord,
-            plane_coord,
-            min_uc,
-            max_uc,
-            min_vc,
-            max_vc,
-            pc,
-            target_lod,
-            max_lod,
-        );
-
         // -------- Pass 1: dispatch coarse → fine --------
         // Walking coarse → fine means the first submissions of a cold
-        // viewport are the low-LOD preview chunks. Combined with the
-        // BTreeMap-by-priority queue, the workers prefer those even if
-        // another pane has already enqueued finer-LOD work.
+        // viewport are the low-LOD preview chunks. The cache + downloader
+        // queues are pure LIFO, so the most recently submitted (finest)
+        // work pops first — but coarse-first submission still gets the
+        // low-LOD chunks into flight before the worker pool can drain
+        // them, so a quick preview shows up promptly while detail
+        // streams in behind it.
         for lod in (target_lod..=max_lod).rev() {
             let Some(tiles) = viewport_tiles(min_uc, max_uc, min_vc, max_vc, pc, lod) else {
                 continue;
@@ -377,8 +316,7 @@ impl PaintVolume for UnifiedVolume {
                     chunk[v_coord] = tv;
                     chunk[plane_coord] = tiles.tile_pc;
                     let key = ChunkKey::new(lod, chunk[0] as u32, chunk[1] as u32, chunk[2] as u32);
-                    let priority = viewport.priority_for(key);
-                    let _ = self.cache.state_or_fetch_with_priority(key, priority);
+                    let _ = self.cache.state_or_fetch(key);
                 }
             }
         }
@@ -418,8 +356,7 @@ impl PaintVolume for UnifiedVolume {
                     chunk[plane_coord] = (t.tile_pc as u32) >> shift;
                     let key = ChunkKey::new(lod_try, chunk[0], chunk[1], chunk[2]);
                     let s = if lod_try == target_lod {
-                        let priority = viewport.priority_for(key);
-                        self.cache.state_or_fetch_with_priority(key, priority)
+                        self.cache.state_or_fetch(key)
                     } else {
                         match self.cache.peek(key) {
                             Some(s) => s,

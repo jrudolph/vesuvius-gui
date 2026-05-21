@@ -8,8 +8,8 @@
 //!     exactly once per source key.
 //!
 //! Flow for one chunk miss:
-//!   1. `state_or_fetch_with_priority` → `dispatch_chunk` → backfiller emits
-//!      a `BackfillPlan`.
+//!   1. `state_or_fetch` → `dispatch_chunk` → backfiller emits a
+//!      `BackfillPlan`.
 //!   2. The chunk is parked in `chunks` with a counter of unresolved sources.
 //!   3. For each source: if first seen, queue a `FetchSource` task (Compute)
 //!      or hand the URL to the downloader (Download); otherwise attach the
@@ -19,14 +19,14 @@
 //!   5. Extract runs the backfiller's closure → writes to disk → mmaps →
 //!      transitions chunk state to `Resident`.
 //!
-//! ### Priority + age pruning
+//! ### LIFO ordering + age pruning
 //!
-//! Tasks live in a `BTreeMap` keyed by `(priority, seq)`. The paint loop
-//! computes a per-chunk priority from its local viewport (coarse LOD first,
-//! then closest-to-center) and passes it via
-//! `state_or_fetch_with_priority`. Submission order within a frame is
-//! priority order, so the BTreeMap naturally pops the most urgent work
-//! across all panes first.
+//! Tasks live in a `BTreeMap` keyed by `!seq`, i.e. plain LIFO — the most
+//! recently submitted (or touched) entry pops first. Each paint frame
+//! re-enters `state_or_fetch` for every chunk it wants and that re-touches
+//! in-flight entries so they re-arm to the head of the queue. Older
+//! un-touched entries slide toward the tail and either get processed in
+//! LIFO order when workers catch up, or culled by `MAX_AGE`.
 //!
 //! The queue is **unbounded**: dedup happens upstream (cache's source map
 //! ensures one source-key → one FetchSource enqueue; `satisfy` enqueues at
@@ -42,9 +42,9 @@ use super::backfiller::{
 };
 use super::disk::{DiskStore, LoadOutcome};
 use super::downloader::{DownloadError, DownloadResult, Downloader, OnDone, SubmitResult};
-use super::priority::{Priority, MAX_AGE};
 use super::spill::SpillStore;
 use super::state::{ChunkKey, ChunkState};
+use super::MAX_AGE;
 use dashmap::DashMap;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -128,10 +128,6 @@ struct ChunkProgress {
     /// Pending claim on transient/permanent failure so retries can happen
     /// via a fresh dispatch.
     covered: Vec<ChunkKey>,
-    /// Priority captured at dispatch time. Used to enqueue the `Extract`
-    /// task once all sources resolve, so late-arriving completions inherit
-    /// the original chunk priority instead of falling back to `worst`.
-    priority: Priority,
 }
 
 enum Task {
@@ -143,17 +139,16 @@ enum Task {
 }
 
 /// Pure-LIFO queue for cache-side `Task`s. BTreeMap keyed by `!seq` so the
-/// most recently submitted (or re-touched) entry pops first. **Priority is
-/// intentionally not part of the sort key** — earlier iterations split
-/// work across LOD-rank and viewport-distance tiers, but in practice that
-/// let coarse-LOD work outrank current-viewport work and stall painting.
-/// The simpler model: paint always asks for what it wants right now, and
-/// "right now" wins. Older requests slide toward the tail and either
-/// processed in LIFO order when workers catch up, or culled by `MAX_AGE`.
+/// most recently submitted (or re-touched) entry pops first. Earlier
+/// iterations split work across LOD-rank and viewport-distance tiers, but
+/// in practice that let coarse-LOD work outrank current-viewport work and
+/// stall painting. The simpler model: paint always asks for what it wants
+/// right now, and "right now" wins. Older requests slide toward the tail
+/// and either get processed in LIFO order when workers catch up, or culled
+/// by `MAX_AGE`.
 ///
 /// `chunk_index` mirrors `entries` keyed by `ChunkKey` for the O(1) lookup
-/// `update_priority` (a touch — refreshes seq + `added_at`, the priority
-/// argument is currently ignored) needs.
+/// `touch` needs to refresh seq + `added_at` on in-flight entries.
 ///
 /// Unbounded; dedup happens at the cache layer (source-key + chunk-key
 /// uniqueness). The only staleness check is age — see the module docs.
@@ -265,15 +260,11 @@ impl ChunkCache {
         }
     }
 
-    /// Best-effort dispatch with worst-case priority. Used by tests, by
-    /// `get()`, and anywhere a caller doesn't have viewport context. Prefer
-    /// `state_or_fetch_with_priority` from the paint loop.
+    /// Return the cached state for `key`, dispatching a fetch if the slot
+    /// is Missing/expired. Pending entries get touched on every call so
+    /// the next worker pop sees the freshest in-flight chunks first.
     pub fn state_or_fetch(&self, key: ChunkKey) -> Arc<ChunkState> {
-        self.state_or_fetch_with_priority(key, Priority::worst())
-    }
-
-    pub fn state_or_fetch_with_priority(&self, key: ChunkKey, priority: Priority) -> Arc<ChunkState> {
-        self.inner.state_or_fetch_with_priority(key, priority)
+        self.inner.state_or_fetch(key)
     }
 
     /// Cheap state lookup without dispatching a fetch. Returns `None` if no
@@ -323,7 +314,7 @@ impl Clone for ChunkCache {
 }
 
 /// RAII guard that releases a `dispatching` claim no matter how
-/// `state_or_fetch_with_priority` returns — including panics.
+/// `state_or_fetch` returns — including panics.
 struct DispatchGuard {
     inner: Arc<Inner>,
     key: ChunkKey,
@@ -346,25 +337,21 @@ fn short_cooldown() -> Arc<ChunkState> {
 }
 
 impl Inner {
-    /// Same semantics as `ChunkCache::state_or_fetch_with_priority` but
-    /// callable from inside cache internals (notably `register_source`'s
-    /// Chunk-variant handler, which dispatches a child chunk synchronously
-    /// without ever blocking a worker on its completion).
-    fn state_or_fetch_with_priority(self: &Arc<Self>, key: ChunkKey, priority: Priority) -> Arc<ChunkState> {
+    /// Same semantics as `ChunkCache::state_or_fetch` but callable from
+    /// inside cache internals (notably `register_source`'s Chunk-variant
+    /// handler, which dispatches a child chunk synchronously without ever
+    /// blocking a worker on its completion).
+    fn state_or_fetch(self: &Arc<Self>, key: ChunkKey) -> Arc<ChunkState> {
         if let Some(entry) = self.map.get(&key) {
             let state = entry.clone();
             drop(entry);
-            // Pending chunks: refresh their priority in both the cache
-            // task queue and the downloader queue so viewport movements
-            // propagate to in-flight work. Always overwrite — last
-            // caller's intent wins. Out-of-frame chunks no longer get
-            // refreshed and age out via MAX_AGE.
+            // Pending chunks: touch their entries in both queues so the
+            // current frame's chunks bubble back to the LIFO head and
+            // re-arm against MAX_AGE. Out-of-frame chunks stop getting
+            // touched and age out.
             if matches!(state.as_ref(), ChunkState::Pending) {
-                if let Some(p) = self.chunks.get(&key) {
-                    p.lock().unwrap().priority = priority;
-                }
-                self.task_queue.update_priority(key, priority);
-                self.downloader.update_priority(key, priority);
+                self.task_queue.touch(key);
+                self.downloader.touch(key);
             }
             if let ChunkState::CooldownMiss { until } = state.as_ref() {
                 if SystemTime::now() < *until {
@@ -385,7 +372,7 @@ impl Inner {
         }
 
         let _guard = DispatchGuard { inner: self.clone(), key };
-        let state = self.dispatch_chunk(key, priority);
+        let state = self.dispatch_chunk(key);
         self.map.insert(key, state.clone());
         self.publish_terminal(key, &state);
         state
@@ -420,7 +407,7 @@ impl Inner {
     /// Returns the state to insert in `self.map`. Caller is the
     /// `or_insert_with` closure on the entry guard — we must NEVER call
     /// `self.map.insert(key, …)` for this same key from here.
-    fn dispatch_chunk(self: &Arc<Self>, key: ChunkKey, priority: Priority) -> Arc<ChunkState> {
+    fn dispatch_chunk(self: &Arc<Self>, key: ChunkKey) -> Arc<ChunkState> {
         match self.disk.load(key) {
             LoadOutcome::Resident(mmap) => {
                 log::trace!("[{}] disk hit", key);
@@ -486,13 +473,12 @@ impl Inner {
             results: HashMap::new(),
             extract: Some(extract),
             covered,
-            priority,
         }));
         self.chunks.insert(key, progress_arc.clone());
 
         if order.is_empty() {
             // 0-source plan: queue Extract immediately.
-            return match self.task_queue.try_submit(key, priority, Task::Extract) {
+            return match self.task_queue.try_submit(key, Task::Extract) {
                 Ok(()) => Arc::new(ChunkState::Pending),
                 Err(dropped) => {
                     log::debug!("[{}] dropped: extract queue full (dispatch)", key);
@@ -509,7 +495,7 @@ impl Inner {
         let mut immediates: Vec<(String, SourceOutcome)> = Vec::new();
         for spec in sources {
             let source_key = spec.key().to_string();
-            match self.register_source(key, spec, priority) {
+            match self.register_source(key, spec) {
                 RegisterResult::Queued | RegisterResult::AttachedPending => {}
                 RegisterResult::AlreadyDone(outcome) => immediates.push((source_key, outcome)),
                 RegisterResult::QueueFull => {
@@ -523,7 +509,7 @@ impl Inner {
         // Apply immediates. If they push the chunk to Extract-ready, queue
         // Extract here.
         for (sk, outcome) in immediates {
-            match self.satisfy(key, &sk, outcome, priority) {
+            match self.satisfy(key, &sk, outcome) {
                 SatisfyResult::Ok => {}
                 SatisfyResult::QueueFullOnExtract => {
                     log::debug!("[{}] dropped: extract queue full (immediate)", key);
@@ -534,12 +520,7 @@ impl Inner {
         Arc::new(ChunkState::Pending)
     }
 
-    fn register_source(
-        self: &Arc<Self>,
-        chunk_key: ChunkKey,
-        spec: SourceSpec,
-        priority: Priority,
-    ) -> RegisterResult {
+    fn register_source(self: &Arc<Self>, chunk_key: ChunkKey, spec: SourceSpec) -> RegisterResult {
         let source_key = spec.key().to_string();
 
         // Phase 1: under self.sources lock, either attach as a waiter on
@@ -602,7 +583,6 @@ impl Inner {
             SourceSpec::Compute { key: _, fetch } => {
                 match self.task_queue.try_submit(
                     chunk_key,
-                    priority,
                     Task::FetchSource {
                         key: source_key.clone(),
                         fetch,
@@ -629,17 +609,16 @@ impl Inner {
                 // Register our interest BEFORE dispatching the child. If
                 // dispatch happens to disk-hit and synchronously transition
                 // the child to Resident, the publish_resident call inside
-                // state_or_fetch_with_priority drains our entry and
-                // completes the source right then. complete_source is
-                // idempotent, so the post-dispatch check below double-firing
-                // is harmless — the second call no-ops on the already-Done
-                // source.
+                // state_or_fetch drains our entry and completes the source
+                // right then. complete_source is idempotent, so the
+                // post-dispatch check below double-firing is harmless —
+                // the second call no-ops on the already-Done source.
                 self.pending_chunk_sources
                     .entry(child_key)
                     .or_insert_with(Vec::new)
                     .push(source_key.clone());
 
-                let child_state = self.state_or_fetch_with_priority(child_key, priority);
+                let child_state = self.state_or_fetch(child_key);
                 match child_state.as_ref() {
                     ChunkState::Resident(_) => {
                         // publish_terminal either fired during the dispatch
@@ -709,7 +688,7 @@ impl Inner {
                 // synchronously fire `on_done` (queue full / eviction), which
                 // calls complete_source — that path now safely re-locks
                 // self.sources.
-                match self.downloader.try_submit(&url, range, chunk_key, priority, on_done) {
+                match self.downloader.try_submit(&url, range, chunk_key, on_done) {
                     SubmitResult::Submitted => {
                         log::trace!("[{}] submitted (chunk {})", source_key, chunk_key);
                         RegisterResult::Queued
@@ -792,15 +771,8 @@ impl Inner {
         }
 
         for w in waiters {
-            // Each waiter chunk's priority is the one captured when its
-            // own dispatch_chunk ran. Look it up via the progress entry.
-            let priority = self
-                .chunks
-                .get(&w)
-                .map(|p| p.lock().unwrap().priority)
-                .unwrap_or_else(Priority::worst);
             if matches!(
-                self.satisfy(w, &source_key, outcome.clone(), priority),
+                self.satisfy(w, &source_key, outcome.clone()),
                 SatisfyResult::QueueFullOnExtract
             ) {
                 self.map.insert(w, short_cooldown());
@@ -812,13 +784,7 @@ impl Inner {
     /// `QueueFullOnExtract` only when all sources are now resolved but
     /// the resulting Extract task couldn't be enqueued; caller must then
     /// move the chunk to a short cooldown.
-    fn satisfy(
-        self: &Arc<Self>,
-        chunk_key: ChunkKey,
-        source_key: &str,
-        outcome: SourceOutcome,
-        priority: Priority,
-    ) -> SatisfyResult {
+    fn satisfy(self: &Arc<Self>, chunk_key: ChunkKey, source_key: &str, outcome: SourceOutcome) -> SatisfyResult {
         let arc = match self.chunks.get(&chunk_key).map(|e| e.clone()) {
             Some(a) => a,
             None => return SatisfyResult::Ok,
@@ -834,7 +800,7 @@ impl Inner {
             }
         };
         if queue_extract {
-            match self.task_queue.try_submit(chunk_key, priority, Task::Extract) {
+            match self.task_queue.try_submit(chunk_key, Task::Extract) {
                 Ok(()) => SatisfyResult::Ok,
                 Err(_dropped) => {
                     log::debug!("[{}] dropped: extract queue full", chunk_key);
@@ -1016,8 +982,8 @@ impl Inner {
         }
     }
 
-    /// Handle a `TaskEntry` that the priority queue dropped (age / distance
-    /// / eviction). Acts as if the task ran and failed transiently:
+    /// Handle a `TaskEntry` that the queue dropped (age / shutdown). Acts
+    /// as if the task ran and failed transiently:
     /// `FetchSource` resolves with a Transient error so waiters back off;
     /// `Extract` just cleans up progress and reverts the chunk to cooldown.
     fn cancel_dropped_task(self: &Arc<Self>, entry: TaskEntry, reason: &str) {
@@ -1082,9 +1048,8 @@ impl TaskQueue {
 
     /// Submit a task. Only fails if the queue is closed (shutdown). The
     /// queue is otherwise unbounded; cache-layer dedup ensures we don't
-    /// queue duplicate Fetch/Extract tasks for the same key. `_priority`
-    /// is currently ignored — see the struct doc.
-    fn try_submit(&self, chunk: ChunkKey, _priority: Priority, task: Task) -> Result<(), Task> {
+    /// queue duplicate Fetch/Extract tasks for the same key.
+    fn try_submit(&self, chunk: ChunkKey, task: Task) -> Result<(), Task> {
         let mut q = self.inner.lock().unwrap();
         if q.closed {
             return Err(task);
@@ -1104,13 +1069,10 @@ impl TaskQueue {
         Ok(())
     }
 
-    /// "Touch" every queued entry for `chunk`: refresh its seq (moving it
+    /// Refresh every queued entry for `chunk`: bump its seq (moving it
     /// to the head of the LIFO order) and reset `added_at` so MAX_AGE
-    /// re-counts from now. The `_new_priority` argument is currently
-    /// ignored; kept on the signature so paint code can be wired in
-    /// before / after we revive priority-based ordering. No-op when the
-    /// chunk has no queued entries.
-    fn update_priority(&self, chunk: ChunkKey, _new_priority: Priority) {
+    /// re-counts from now. No-op when the chunk has no queued entries.
+    fn touch(&self, chunk: ChunkKey) {
         let mut q = self.inner.lock().unwrap();
         let old_keys = match q.chunk_index.remove(&chunk) {
             Some(v) if !v.is_empty() => v,

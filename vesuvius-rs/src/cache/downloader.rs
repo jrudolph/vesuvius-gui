@@ -4,18 +4,19 @@
 //! plus a thread pool that's sized for HTTP concurrency rather than CPU
 //! concurrency.
 //!
-//! ## Priority queue + age pruning
+//! ## LIFO queue + age pruning
 //!
-//! Jobs feed a `BTreeMap` keyed by `(priority, seq)`. The paint loop submits
-//! coarse-LOD-first / center-first, so the BTreeMap naturally pops the
-//! most urgent work across panes. The queue is unbounded — cache-layer
-//! dedup (one entry per source key in `self.sources`) means we never
-//! submit the same URL twice, and the only staleness check is age: jobs
-//! older than `MAX_AGE` are cancelled at pop with a Transient error so
-//! the cache rolls the chunk back to a short cooldown.
+//! Jobs feed a `BTreeMap` keyed by `!seq` (pure LIFO). The paint loop
+//! re-submits / re-touches what it wants every frame, so the queue head
+//! stays aligned with the current viewport without any priority sorting.
+//! The queue is unbounded — cache-layer dedup (one entry per source key
+//! in `self.sources`) means we never submit the same URL twice, and the
+//! only staleness check is age: jobs older than `MAX_AGE` are cancelled
+//! at pop with a Transient error so the cache rolls the chunk back to a
+//! short cooldown.
 
-use super::priority::{Priority, MAX_AGE};
 use super::state::ChunkKey;
+use super::MAX_AGE;
 use dashmap::DashMap;
 use reqwest::blocking::Client;
 use std::collections::{BTreeMap, HashMap};
@@ -63,14 +64,13 @@ struct DownloaderInner {
 
 struct Queue {
     /// Pure-LIFO ordering: key is `!seq` so the most recent submit (or
-    /// `update_priority` touch) pops first. Priority is intentionally not
-    /// part of the sort key — see the cache's TaskQueue doc for the
+    /// `touch`) pops first. See the cache's TaskQueue doc for the
     /// rationale. Older queued downloads slide to the tail and are
     /// processed in LIFO order when workers catch up, or culled by
     /// MAX_AGE.
     entries: BTreeMap<u64, Entry>,
-    /// Reverse index by chunk for O(1) `update_priority`. Maintained in
-    /// lockstep with `entries` on submit, pop, and touch.
+    /// Reverse index by chunk for O(1) `touch`. Maintained in lockstep
+    /// with `entries` on submit, pop, and touch.
     chunk_index: HashMap<ChunkKey, Vec<u64>>,
     next_seq: u64,
     closed: bool,
@@ -137,12 +137,13 @@ impl Downloader {
         Self { inner }
     }
 
-    /// Non-blocking submission with explicit priority + chunk identity.
+    /// Non-blocking submission.
     ///
     /// `chunk` is the cache chunk this download is on behalf of (used for
-    /// logging only — the downloader doesn't otherwise care). `range`, when
-    /// `Some((offset, len))`, becomes a `Range: bytes=offset-(offset+len-1)`
-    /// header on the request; 206 Partial Content is accepted as success.
+    /// logging + the in-flight counter — the downloader doesn't otherwise
+    /// schedule based on it). `range`, when `Some((offset, len))`, becomes
+    /// a `Range: bytes=offset-(offset+len-1)` header on the request; 206
+    /// Partial Content is accepted as success.
     ///
     /// On `QueueFull`, `on_done` is invoked synchronously with
     /// `Err(Transient(...))` so the caller's cancellation path runs
@@ -153,7 +154,6 @@ impl Downloader {
         url: &str,
         range: Option<(u64, u64)>,
         chunk: ChunkKey,
-        _priority: Priority,
         on_done: OnDone,
     ) -> SubmitResult {
         let rejected_on_done = {
@@ -199,15 +199,12 @@ impl Downloader {
         self.inner.active.contains_key(&chunk)
     }
 
-    /// "Touch" every queued download for `chunk`: refresh seq (moving it
+    /// Refresh every queued download for `chunk`: bump seq (moving it
     /// to the head of the LIFO queue) and reset `added_at` so MAX_AGE
-    /// re-counts from now. `_new_priority` is currently ignored — the
-    /// signature is kept stable so paint code can be wired in before /
-    /// after we revive priority-based ordering. No-op when the chunk has
-    /// no queued downloads. Called from the cache's
-    /// `state_or_fetch_with_priority` on every paint poll so the queue
-    /// head tracks the current viewport.
-    pub fn update_priority(&self, chunk: ChunkKey, _new_priority: Priority) {
+    /// re-counts from now. No-op when the chunk has no queued downloads.
+    /// Called from the cache's `state_or_fetch` on every paint poll so
+    /// the queue head tracks the current viewport.
+    pub fn touch(&self, chunk: ChunkKey) {
         let mut q = self.inner.queue.lock().unwrap();
         let old_keys = match q.chunk_index.remove(&chunk) {
             Some(v) if !v.is_empty() => v,

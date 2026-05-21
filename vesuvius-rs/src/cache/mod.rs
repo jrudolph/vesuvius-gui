@@ -16,7 +16,6 @@ mod backfiller;
 mod cache;
 mod disk;
 mod downloader;
-mod priority;
 mod spill;
 mod state;
 mod volume;
@@ -29,9 +28,6 @@ mod tests;
 pub use backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourcePayload, SourceSpec};
 pub use cache::ChunkCache;
 pub use downloader::{DownloadError, Downloader};
-pub use priority::{LodView, Priority, Viewport};
-#[allow(unused_imports)] // re-export kept for callers that build viewports
-pub use priority::MAX_AGE;
 pub use state::{ChunkKey, ChunkState};
 pub use volume::UnifiedVolume;
 
@@ -39,3 +35,7 @@ pub use volume::UnifiedVolume;
 /// natural granularity of the existing paint loop in `volume64x4.rs`.
 pub const CHUNK_SIDE: usize = 64;
 pub const CHUNK_VOXELS: usize = CHUNK_SIDE * CHUNK_SIDE * CHUNK_SIDE;
+
+/// Queued work older than this is treated as stale and dropped at pop time.
+/// Shared between the cache's TaskQueue and the Downloader queue.
+pub(crate) const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(10);
