@@ -1,29 +1,35 @@
 //! On-disk persistence for cache chunks.
 //!
-//! Layout: one sparse data file per LOD,
-//! `{root}/chunks-L{lod:02}.dat`, dense per-LOD index:
-//! `offset = ((z * nyL + y) * nxL + x) * CHUNK_VOXELS`. Each file is
-//! `set_len(nx*ny*nz*CHUNK_VOXELS)` at first open so the kernel reports a
-//! sparse file (ext4/xfs/btrfs/APFS only); only chunks actually written
-//! occupy physical blocks.
+//! Layout: a 3D grid of sparse "shard" data files per LOD,
+//! `{root}/chunks-L{lod:02}-X{sx:03}-Y{sy:03}-Z{sz:03}.dat`. A shard owns
+//! every cache chunk falling inside a `SHARD_CHUNKS_PER_AXIS³` cube
+//! (defaults to 128³ chunks = 8192³ voxels). At 256 KiB per chunk that
+//! gives a constant logical file size of `128³ · 256 KiB = 2³⁹ bytes`
+//! (512 GiB) — well below the per-file sparse-allocation ceilings imposed
+//! by common file systems on very large single files. Each shard is
+//! `set_len(SHARD_BYTES)` on first open; only chunks actually written
+//! occupy physical blocks (ext4/xfs/btrfs/APFS).
 //!
-//! Chunk state (Missing / Resident / Empty) lives in a `chunks.idx` sidecar
-//! (`super::sidecar::Sidecar`) — one byte per slot per LOD. Writers update
-//! the bitmap with `Release` after pwriting bytes; readers observing
-//! `Resident` with `Acquire` are guaranteed to see the full 256 KiB through
-//! the shared mmap (same inode → same page cache).
+//! Chunk state (Missing / Resident / Empty) still lives in a single
+//! `chunks.idx` sidecar (`super::sidecar::Sidecar`) — one byte per slot per
+//! LOD, addressed by the global linear index `((z·ny + y)·nx + x)`
+//! regardless of which shard the chunk lives in. Writers update the bitmap
+//! with `Release` after pwriting bytes; readers observing `Resident` with
+//! `Acquire` are guaranteed to see the full 256 KiB through the mmap of
+//! the matching shard (same inode → same page cache).
 //!
-//! A background sync thread snapshots the bitmap, fsyncs LOD data files
-//! that had transitions, and atomically renames the sidecar into place
-//! every `SYNC_INTERVAL` or after `SYNC_COUNT_THRESHOLD` transitions —
-//! whichever comes first. Sidecar is always a strict subset of durable
-//! bytes, so a crash loses at most the last sync interval of work
-//! (chunks are re-downloaded).
+//! A background sync thread snapshots the bitmap, fsyncs every shard file
+//! currently open for any LOD that saw transitions, and atomically renames
+//! the sidecar into place every `SYNC_INTERVAL` or after
+//! `SYNC_COUNT_THRESHOLD` transitions — whichever comes first. The sidecar
+//! is always a strict subset of durable bytes, so a crash loses at most
+//! the last sync interval of work (chunks are re-downloaded).
 
 use super::sidecar::{self, LodDims, Sidecar, STATE_EMPTY, STATE_MISSING, STATE_RESIDENT};
 use super::state::ChunkKey;
 use super::CHUNK_VOXELS;
 use memmap::{Mmap, MmapOptions};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -42,10 +48,15 @@ struct LodFile {
     mmap: Arc<Mmap>,
 }
 
+type ShardCoord = (u32, u32, u32);
+
 struct LodSlot {
     dims: LodDims,
-    /// Lazily opened on first touch.
-    opened: Mutex<Option<LodFile>>,
+    /// Lazily populated per shard. The HashMap lookup runs once per chunk
+    /// state transition (inside `load` / `write_atomic`), not per voxel
+    /// read — voxel access goes through the cached `Arc<Mmap>` returned
+    /// from `load` and never re-enters this map.
+    opened: Mutex<HashMap<ShardCoord, LodFile>>,
 }
 
 struct SyncInner {
@@ -61,6 +72,7 @@ struct SyncState {
 
 struct DiskStoreInner {
     root: PathBuf,
+    shard_chunks_per_axis: u32,
     sidecar: Arc<Sidecar>,
     lods: Vec<LodSlot>,
     sync_state: SyncState,
@@ -71,18 +83,43 @@ pub struct DiskStore {
     sync_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// Default shard side length in chunks. `128³ · 256 KiB = 2³⁹` bytes per
+/// shard — comfortably under per-file sparse ceilings while keeping shard
+/// counts tiny for typical volumes (worst case 80 TiB across ~160 shards
+/// for our largest current volume).
+const SHARD_CHUNKS_PER_AXIS: u32 = 128;
+
 const SYNC_INTERVAL: Duration = Duration::from_secs(10);
 const SYNC_COUNT_THRESHOLD: u64 = 256;
+
+struct ResolvedKey {
+    sidecar_idx: u64,
+    shard: ShardCoord,
+    in_shard_idx: u64,
+}
 
 impl DiskStore {
     /// Open (or create) the cache directory for a volume.
     ///
     /// `extent` and `max_lod` come from the backfiller and define the sparse
-    /// file layout. If an existing sidecar describes a different layout, all
-    /// data files plus the sidecar are renamed aside (`*.stale.<unix_ts>`)
-    /// and a fresh cache is created — silent corruption is worse than the
-    /// re-download cost.
+    /// shard layout. If an existing sidecar describes a different layout,
+    /// all data files plus the sidecar are renamed aside
+    /// (`*.stale.<unix_ts>`) and a fresh cache is created — silent
+    /// corruption is worse than the re-download cost.
     pub fn new(root: impl Into<PathBuf>, volume_id: String, extent: [u32; 3], max_lod: u8) -> Self {
+        Self::new_with_shard_chunks_per_axis(root, volume_id, extent, max_lod, SHARD_CHUNKS_PER_AXIS)
+    }
+
+    /// Test-only constructor letting callers pick a smaller shard side so
+    /// multi-shard layouts can be exercised without inflating extents.
+    fn new_with_shard_chunks_per_axis(
+        root: impl Into<PathBuf>,
+        volume_id: String,
+        extent: [u32; 3],
+        max_lod: u8,
+        shard_chunks_per_axis: u32,
+    ) -> Self {
+        assert!(shard_chunks_per_axis > 0, "shard side must be > 0");
         let root = root.into();
         std::fs::create_dir_all(&root).expect("create cache root");
 
@@ -120,12 +157,13 @@ impl DiskStore {
             .iter()
             .map(|d| LodSlot {
                 dims: *d,
-                opened: Mutex::new(None),
+                opened: Mutex::new(HashMap::new()),
             })
             .collect();
 
         let inner = Arc::new(DiskStoreInner {
             root,
+            shard_chunks_per_axis,
             sidecar,
             lods,
             sync_state: SyncState {
@@ -151,16 +189,16 @@ impl DiskStore {
     }
 
     pub fn load(&self, key: ChunkKey) -> LoadOutcome {
-        let (_, idx) = match self.inner.resolve(key) {
-            Some(p) => p,
+        let r = match self.inner.resolve(key) {
+            Some(r) => r,
             None => return LoadOutcome::Missing,
         };
-        match self.inner.sidecar.get_state(key.lod, idx) {
+        match self.inner.sidecar.get_state(key.lod, r.sidecar_idx) {
             STATE_MISSING => LoadOutcome::Missing,
             STATE_EMPTY => LoadOutcome::Empty,
-            STATE_RESIDENT => match self.inner.ensure_open(key.lod) {
+            STATE_RESIDENT => match self.inner.ensure_open(key.lod, r.shard) {
                 Ok(lf) => {
-                    let off = (idx as usize) * CHUNK_VOXELS;
+                    let off = (r.in_shard_idx as usize) * CHUNK_VOXELS;
                     debug_assert!(off + CHUNK_VOXELS <= lf.mmap.len());
                     LoadOutcome::Resident {
                         mmap: lf.mmap,
@@ -189,10 +227,10 @@ impl DiskStore {
         }
     }
 
-    /// Write a 64³ chunk into its slot in the LOD data file, then publish
-    /// `Resident` in the sidecar bitmap with `Release`. Concurrent readers
-    /// using `Acquire` are guaranteed to see all 256 KiB of bytes before
-    /// observing the Resident transition.
+    /// Write a 64³ chunk into its slot in the matching shard file, then
+    /// publish `Resident` in the sidecar bitmap with `Release`. Concurrent
+    /// readers using `Acquire` are guaranteed to see all 256 KiB of bytes
+    /// before observing the Resident transition.
     pub fn write_atomic(&self, key: ChunkKey, bytes: &[u8]) -> std::io::Result<()> {
         assert_eq!(
             bytes.len(),
@@ -201,21 +239,21 @@ impl DiskStore {
             bytes.len(),
             CHUNK_VOXELS
         );
-        let (_, idx) = self.inner.resolve(key).ok_or_else(|| {
+        let r = self.inner.resolve(key).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("chunk {} out of bounds for this LOD", key),
             )
         })?;
-        let lf = self.inner.ensure_open(key.lod)?;
-        let off = (idx as u64) * CHUNK_VOXELS as u64;
+        let lf = self.inner.ensure_open(key.lod, r.shard)?;
+        let off = r.in_shard_idx * CHUNK_VOXELS as u64;
         pwrite_all(&lf.file, off, bytes)?;
-        self.inner.sidecar.set_state(key.lod, idx, STATE_RESIDENT);
+        self.inner.sidecar.set_state(key.lod, r.sidecar_idx, STATE_RESIDENT);
         self.inner.maybe_wake_sync();
         Ok(())
     }
 
-    /// Synchronously snapshot the sidecar, fsync any LOD data files that
+    /// Synchronously snapshot the sidecar, fsync any shard files that
     /// had transitions since the last sync, and atomically write the
     /// sidecar to disk. Used on graceful shutdown and by tests that need
     /// durability before the periodic sync would fire.
@@ -224,37 +262,49 @@ impl DiskStore {
     }
 
     /// Mark `key` as definitively absent in the sidecar. No bytes are written
-    /// to the data file.
+    /// to a data file.
     pub fn mark_empty(&self, key: ChunkKey) -> std::io::Result<()> {
-        let (_, idx) = self.inner.resolve(key).ok_or_else(|| {
+        let r = self.inner.resolve(key).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("chunk {} out of bounds for this LOD", key),
             )
         })?;
-        self.inner.sidecar.set_state(key.lod, idx, STATE_EMPTY);
+        self.inner.sidecar.set_state(key.lod, r.sidecar_idx, STATE_EMPTY);
         self.inner.maybe_wake_sync();
         Ok(())
     }
 }
 
 impl DiskStoreInner {
-    fn resolve(&self, key: ChunkKey) -> Option<(LodDims, u64)> {
+    fn resolve(&self, key: ChunkKey) -> Option<ResolvedKey> {
         let slot = self.lods.get(key.lod as usize)?;
-        slot.dims.linear_index(key.x, key.y, key.z).map(|i| (slot.dims, i))
+        let sidecar_idx = slot.dims.linear_index(key.x, key.y, key.z)?;
+        let sca = self.shard_chunks_per_axis;
+        let shard = (key.x / sca, key.y / sca, key.z / sca);
+        let wx = (key.x % sca) as u64;
+        let wy = (key.y % sca) as u64;
+        let wz = (key.z % sca) as u64;
+        let s = sca as u64;
+        let in_shard_idx = (wz * s + wy) * s + wx;
+        Some(ResolvedKey {
+            sidecar_idx,
+            shard,
+            in_shard_idx,
+        })
     }
 
-    fn ensure_open(&self, lod: u8) -> std::io::Result<LodFile> {
+    fn ensure_open(&self, lod: u8, shard: ShardCoord) -> std::io::Result<LodFile> {
         let slot = &self.lods[lod as usize];
-        if let Some(lf) = slot.opened.lock().unwrap().as_ref() {
+        if let Some(lf) = slot.opened.lock().unwrap().get(&shard) {
             return Ok(lf.clone());
         }
         let mut guard = slot.opened.lock().unwrap();
-        if let Some(lf) = guard.as_ref() {
+        if let Some(lf) = guard.get(&shard) {
             return Ok(lf.clone());
         }
-        let total = slot.dims.total_bytes();
-        let path = self.root.join(lod_filename(lod));
+        let total = self.shard_bytes();
+        let path = self.root.join(shard_filename(lod, shard));
         let file = OpenOptions::new().read(true).write(true).create(true).open(&path)?;
         let cur_len = file.metadata()?.len();
         if cur_len == 0 {
@@ -263,8 +313,9 @@ impl DiskStoreInner {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "lod {} data file at {} has length {} (expected {}); refusing to use",
+                    "lod {} shard {:?} at {} has length {} (expected {}); refusing to use",
                     lod,
+                    shard,
                     path.display(),
                     cur_len,
                     total,
@@ -276,8 +327,13 @@ impl DiskStoreInner {
             file: Arc::new(file),
             mmap: Arc::new(mmap),
         };
-        *guard = Some(lf.clone());
+        guard.insert(shard, lf.clone());
         Ok(lf)
+    }
+
+    fn shard_bytes(&self) -> u64 {
+        let n = self.shard_chunks_per_axis as u64;
+        n * n * n * CHUNK_VOXELS as u64
     }
 
     fn maybe_wake_sync(&self) {
@@ -332,18 +388,39 @@ fn do_sync(inner: &DiskStoreInner) {
         // Nothing changed since the last sync; nothing to flush.
         return;
     }
-    // fsync only LODs that had transitions captured in this snapshot.
+    // Pending counts LOD-wide transitions; we don't track which shard each
+    // transition landed in, so conservatively fsync every shard we have
+    // open for that LOD. A write-path shard is always open here (its
+    // pwrite happened-before the Release that bumped pending). fsync on
+    // read-only / clean shards is harmless — essentially a no-op.
     for (lod_idx, &count) in snap.pending.iter().enumerate() {
         if count == 0 {
             continue;
         }
-        let lf_opt = inner.lods[lod_idx].opened.lock().unwrap().as_ref().cloned();
-        let Some(lf) = lf_opt else {
-            log::warn!("[cache] sync: LOD {} has {} pending but no open file", lod_idx, count);
+        let opened: Vec<(ShardCoord, LodFile)> = inner.lods[lod_idx]
+            .opened
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        if opened.is_empty() {
+            log::warn!(
+                "[cache] sync: LOD {} has {} pending but no open shards",
+                lod_idx,
+                count
+            );
             continue;
-        };
-        if let Err(e) = lf.file.sync_data() {
-            log::warn!("[cache] sync: fsync LOD {} failed: {}", lod_idx, e);
+        }
+        for (shard, lf) in opened {
+            if let Err(e) = lf.file.sync_data() {
+                log::warn!(
+                    "[cache] sync: fsync LOD {} shard {:?} failed: {}",
+                    lod_idx,
+                    shard,
+                    e
+                );
+            }
         }
     }
     if let Err(e) = snap.write_to(&inner.sidecar.header, &sidecar::sidecar_path(&inner.root)) {
@@ -351,8 +428,11 @@ fn do_sync(inner: &DiskStoreInner) {
     }
 }
 
-fn lod_filename(lod: u8) -> String {
-    format!("chunks-L{:02}.dat", lod)
+fn shard_filename(lod: u8, shard: ShardCoord) -> String {
+    format!(
+        "chunks-L{:02}-X{:03}-Y{:03}-Z{:03}.dat",
+        lod, shard.0, shard.1, shard.2
+    )
 }
 
 fn stale_rename_everything(root: &Path) {
@@ -493,9 +573,9 @@ mod tests {
             let (mmap, off) = store.try_load(ChunkKey::new(lod, 0, 0, 0)).unwrap();
             assert_eq!(&mmap[off..off + 32], &written[lod as usize][..32]);
         }
-        assert!(tmp.join("chunks-L00.dat").exists());
-        assert!(tmp.join("chunks-L01.dat").exists());
-        assert!(tmp.join("chunks-L02.dat").exists());
+        assert!(tmp.join("chunks-L00-X000-Y000-Z000.dat").exists());
+        assert!(tmp.join("chunks-L01-X000-Y000-Z000.dat").exists());
+        assert!(tmp.join("chunks-L02-X000-Y000-Z000.dat").exists());
     }
 
     #[test]
@@ -503,9 +583,9 @@ mod tests {
         let tmp = tempdir();
         let store = DiskStore::new(&tmp, "v".into(), [256, 256, 256], 2);
         store.write_atomic(ChunkKey::new(0, 0, 0, 0), &make_chunk(1)).unwrap();
-        assert!(tmp.join("chunks-L00.dat").exists());
-        assert!(!tmp.join("chunks-L01.dat").exists());
-        assert!(!tmp.join("chunks-L02.dat").exists());
+        assert!(tmp.join("chunks-L00-X000-Y000-Z000.dat").exists());
+        assert!(!tmp.join("chunks-L01-X000-Y000-Z000.dat").exists());
+        assert!(!tmp.join("chunks-L02-X000-Y000-Z000.dat").exists());
     }
 
     #[test]
@@ -531,7 +611,7 @@ mod tests {
             let store = DiskStore::new(&tmp, "v".into(), [128, 128, 128], 0);
             store.write_atomic(ChunkKey::new(0, 0, 0, 0), &make_chunk(1)).unwrap();
         }
-        let data = tmp.join("chunks-L00.dat");
+        let data = tmp.join("chunks-L00-X000-Y000-Z000.dat");
         std::fs::OpenOptions::new()
             .write(true)
             .open(&data)
@@ -572,4 +652,30 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn writes_across_shard_boundary() {
+        // Shard side of 4 chunks → 4³ × 256 KiB = 16 MiB per shard file.
+        // Extent [1024, 64, 64] gives 16 × 1 × 1 chunks at LOD 0, which
+        // spans 4 shards along X.
+        let tmp = tempdir();
+        let store = DiskStore::new_with_shard_chunks_per_axis(&tmp, "v".into(), [1024, 64, 64], 0, 4);
+        for cx in 0..16u32 {
+            let mut bytes = make_chunk(cx as u8);
+            bytes[0] = cx as u8;
+            bytes[1] = (cx as u8).wrapping_add(0x80);
+            store.write_atomic(ChunkKey::new(0, cx, 0, 0), &bytes).unwrap();
+        }
+        for cx in 0..16u32 {
+            let (mmap, off) = store.try_load(ChunkKey::new(0, cx, 0, 0)).unwrap();
+            assert_eq!(mmap[off], cx as u8, "chunk {}", cx);
+            assert_eq!(mmap[off + 1], (cx as u8).wrapping_add(0x80), "chunk {}", cx);
+        }
+        for sx in 0..4u32 {
+            let p = tmp.join(format!("chunks-L00-X{:03}-Y000-Z000.dat", sx));
+            assert!(p.exists(), "missing shard {}: {}", sx, p.display());
+        }
+        assert!(!tmp.join("chunks-L00-X004-Y000-Z000.dat").exists());
+    }
+
 }

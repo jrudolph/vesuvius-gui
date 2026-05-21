@@ -10,7 +10,6 @@
 //! are single-producer (the dispatch claim in `cache.rs` guarantees one
 //! writer per chunk), so a plain `store(Release)` is sufficient — no CAS.
 
-use super::CHUNK_VOXELS;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -39,10 +38,6 @@ impl LodDims {
 
     pub fn count(&self) -> u64 {
         self.nx as u64 * self.ny as u64 * self.nz as u64
-    }
-
-    pub fn total_bytes(&self) -> u64 {
-        self.count() * CHUNK_VOXELS as u64
     }
 
     pub fn linear_index(&self, x: u32, y: u32, z: u32) -> Option<u64> {
