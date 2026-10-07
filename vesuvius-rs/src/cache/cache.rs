@@ -666,6 +666,17 @@ impl ChunkCache {
             .count()
     }
 
+    /// Chunks whose last fetch failed or was cancelled (incl. aged out) and
+    /// that haven't been re-requested since — `CooldownMiss`, whether or not
+    /// the cooldown has expired. Walks the whole state map — telemetry only.
+    pub fn cooldown_chunks(&self) -> usize {
+        self.inner
+            .map
+            .iter()
+            .filter(|e| matches!(e.value().as_ref(), ChunkState::CooldownMiss { .. }))
+            .count()
+    }
+
     pub fn voxel_extent(&self) -> [u32; 3] {
         self.inner.backfiller.voxel_extent()
     }
@@ -2113,6 +2124,10 @@ fn worker_loop(inner: Arc<Inner>) {
         for d in dropped {
             inner.cancel_dropped_task(d, "stale on pop");
         }
+        // Culling drained the queue; go back to waiting for new work.
+        let Some(entry) = entry else {
+            continue;
+        };
         // Skip-met: cooldown-retry races or duplicate enqueues can
         // leave stale work in the queue. Drop it instead of doing
         // redundant disk + decode work.

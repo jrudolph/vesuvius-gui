@@ -161,15 +161,23 @@ impl<T> LifoQueue<T> {
         self.inner.lock().unwrap().entries.len()
     }
 
-    /// Block until a non-stale entry is available. Entries culled along
-    /// the way (older than `max_age`) are returned as the second tuple
-    /// element so the caller can run their cancellation paths outside
-    /// the queue lock.
-    pub fn pop(&self) -> (QueueEntry<T>, Vec<QueueEntry<T>>) {
+    /// Block until a non-stale entry is available, or until culling has
+    /// produced entries to cancel. Entries culled along the way (older than
+    /// `max_age`) are returned as the second tuple element so the caller can
+    /// run their cancellation paths outside the queue lock.
+    ///
+    /// The entry is `None` when culling drained the queue: the dropped batch
+    /// is handed back immediately instead of being held across the wait for
+    /// new work, which would leave their chunks Pending with nothing in
+    /// flight until the next submit/touch.
+    pub fn pop(&self) -> (Option<QueueEntry<T>>, Vec<QueueEntry<T>>) {
         let mut q = self.inner.lock().unwrap();
         let mut dropped: Vec<QueueEntry<T>> = Vec::new();
         loop {
             let Some((key, entry)) = q.entries.pop_first() else {
+                if !dropped.is_empty() {
+                    return (None, dropped);
+                }
                 q = self.not_empty.wait(q).unwrap();
                 continue;
             };
@@ -186,7 +194,69 @@ impl<T> LifoQueue<T> {
                 dropped.push(entry);
                 continue;
             }
-            return (entry, dropped);
+            return (Some(entry), dropped);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn queue(max_age: Duration) -> Arc<LifoQueue<u32>> {
+        Arc::new(LifoQueue::new(max_age, Arc::new(AtomicBool::new(true))))
+    }
+
+    fn key(i: u32) -> ChunkKey {
+        ChunkKey::new(0, i, 0, 0)
+    }
+
+    #[test]
+    fn pops_newest_first() {
+        let q = queue(Duration::from_secs(60));
+        q.submit(key(1), 1);
+        q.submit(key(2), 2);
+        q.touch(key(1));
+        assert_eq!(q.pop().0.map(|e| e.item), Some(1));
+        assert_eq!(q.pop().0.map(|e| e.item), Some(2));
+    }
+
+    #[test]
+    fn culled_entries_are_returned_when_queue_drains() {
+        let q = queue(Duration::from_millis(1));
+        q.submit(key(1), 1);
+        q.submit(key(2), 2);
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Must not block: nothing fresh is left, but the stale batch has to
+        // reach the caller so it can cancel it.
+        let (tx, rx) = mpsc::channel();
+        let q2 = q.clone();
+        std::thread::spawn(move || {
+            let (entry, dropped) = q2.pop();
+            tx.send((entry.map(|e| e.item), dropped.len())).unwrap();
+        });
+        let (entry, dropped) = rx.recv_timeout(Duration::from_secs(5)).expect("pop blocked holding dropped entries");
+        assert_eq!(entry, None);
+        assert_eq!(dropped, 2);
+        assert_eq!(q.len(), 0);
+    }
+
+    #[test]
+    fn culled_entries_ride_along_with_a_fresh_one() {
+        let q = queue(Duration::from_millis(1));
+        q.submit(key(1), 1);
+        std::thread::sleep(Duration::from_millis(10));
+        q.submit_durable(key(2), 2);
+        q.submit(key(3), 3);
+        std::thread::sleep(Duration::from_millis(10));
+        // 3 is stale, 2 is durable (exempt), 1 is stale and never reached.
+        let (entry, dropped) = q.pop();
+        assert_eq!(entry.map(|e| e.item), Some(2));
+        assert_eq!(dropped.iter().map(|e| e.item).collect::<Vec<_>>(), vec![3]);
+        let (entry, dropped) = q.pop();
+        assert_eq!(entry.map(|e| e.item), None);
+        assert_eq!(dropped.iter().map(|e| e.item).collect::<Vec<_>>(), vec![1]);
     }
 }

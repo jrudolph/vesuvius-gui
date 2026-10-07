@@ -320,6 +320,10 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
             }
             (d.item.on_done)(Err(DownloadError::Transient("aged out".into())));
         }
+        // Culling drained the queue; go back to waiting for new work.
+        let Some(entry) = entry else {
+            continue;
+        };
         let chunk = entry.chunk;
         let job = entry.item;
         // Queue wait split two ways: since the last touch (how long the

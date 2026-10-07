@@ -161,6 +161,9 @@ pub struct FrameRecord {
     /// Chunks dispatched but not resident yet. Can stay > 0 with an idle
     /// downloader when fetches are stranded.
     pub pending_chunks: Option<usize>,
+    /// Chunks whose fetch failed or was cancelled and not re-requested yet.
+    /// They only come back when a tile re-render samples them again.
+    pub cooldown_chunks: Option<usize>,
     /// Fraction of pane pixels covered by any tile texture this frame.
     pub coverage: f32,
     pub hash: u64,
@@ -178,6 +181,7 @@ impl FrameRecord {
         self.downloads.map_or(true, |d| d.in_flight == 0 && d.queued == 0)
             && self.queued_tasks.map_or(true, |q| q == 0)
             && self.pending_chunks.map_or(true, |p| p == 0)
+            && self.cooldown_chunks.map_or(true, |c| c == 0)
     }
 }
 
@@ -202,6 +206,8 @@ pub struct PhaseReport {
     pub max_queued: usize,
     /// Chunks still Pending at the end of the phase.
     pub pending_at_end: Option<usize>,
+    /// Chunks in cooldown (failed / aged out, not re-requested) at the end.
+    pub cooldown_at_end: Option<usize>,
     pub render_p50: Duration,
     pub render_p95: Duration,
     pub render_max: Duration,
@@ -247,10 +253,11 @@ impl fmt::Display for PhaseReport {
             )?;
             writeln!(
                 f,
-                "  max in flight: {}   max queued: {}   chunks still pending: {}",
+                "  max in flight: {}   max queued: {}   chunks still pending: {}   in cooldown: {}",
                 self.max_in_flight,
                 self.max_queued,
-                self.pending_at_end.map_or("-".to_string(), |p| p.to_string())
+                self.pending_at_end.map_or("-".to_string(), |p| p.to_string()),
+                self.cooldown_at_end.map_or("-".to_string(), |c| c.to_string())
             )?;
         }
         write!(
@@ -412,6 +419,7 @@ impl PaneHarness {
             downloads: self.base.as_ref().map(|b| b.cache().download_stats()),
             queued_tasks: self.base.as_ref().map(|b| b.cache().queued_tasks()),
             pending_chunks: self.base.as_ref().map(|b| b.cache().pending_chunks()),
+            cooldown_chunks: self.base.as_ref().map(|b| b.cache().cooldown_chunks()),
             coverage,
             hash,
             changed,
@@ -525,7 +533,11 @@ impl PaneHarness {
     }
 
     /// Run until no tile slot is loading, downloads and cache tasks are idle,
-    /// and the pixels haven't changed for `quiet`. Returns the time from the
+    /// no chunk is pending or in cooldown, and the pixels haven't changed for
+    /// `quiet`. Cooldown chunks count as unfinished even after their cooldown
+    /// expires (they wait for a tile re-render to be requested again) — so
+    /// chunks that failed and then scrolled off-screen keep a later phase
+    /// from settling; `cooldown_at_end` in the report shows that. Returns the time from the
     /// start of the current phase to settling, or `None` on timeout.
     pub fn run_until_settled(&mut self, timeout: Duration, quiet: Duration) -> Option<Duration> {
         let deadline = Instant::now() + timeout;
@@ -623,6 +635,7 @@ impl PaneHarness {
             max_in_flight: recs.iter().filter_map(|r| r.downloads).map(|d| d.in_flight).max().unwrap_or(0),
             max_queued: recs.iter().filter_map(|r| r.downloads).map(|d| d.queued).max().unwrap_or(0),
             pending_at_end: recs.last().and_then(|r| r.pending_chunks),
+            cooldown_at_end: recs.last().and_then(|r| r.cooldown_chunks),
             render_p50: pct(0.5),
             render_p95: pct(0.95),
             render_max: renders.last().copied().unwrap_or_default(),
@@ -652,13 +665,13 @@ impl PaneHarness {
             f,
             "frame,t_ms,render_ms,u,v,w,zoom,visible,ready,recalculating,loading_fallback,loading_blank,\
              budget_skipped,coverage,changed,repaint,dl_in_flight,dl_queued,dl_submitted,dl_completed,\
-             dl_not_found,dl_failed,dl_aged_out,dl_bytes,queued_tasks,pending_chunks"
+             dl_not_found,dl_failed,dl_aged_out,dl_bytes,queued_tasks,pending_chunks,cooldown_chunks"
         )?;
         for r in &self.records {
             let d = r.downloads.unwrap_or_default();
             writeln!(
                 f,
-                "{},{:.1},{:.2},{},{},{},{},{},{},{},{},{},{},{:.4},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{:.1},{:.2},{},{},{},{},{},{},{},{},{},{},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 r.frame,
                 r.t.as_secs_f64() * 1e3,
                 r.render.as_secs_f64() * 1e3,
@@ -684,7 +697,8 @@ impl PaneHarness {
                 d.aged_out,
                 d.bytes,
                 r.queued_tasks.unwrap_or(0),
-                r.pending_chunks.unwrap_or(0)
+                r.pending_chunks.unwrap_or(0),
+                r.cooldown_chunks.unwrap_or(0)
             )?;
         }
         Ok(())
