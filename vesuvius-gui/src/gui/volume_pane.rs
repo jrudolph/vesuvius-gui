@@ -318,13 +318,25 @@ enum Refresh {
     Later(Option<Duration>),
 }
 
-/// Fetch priority of a tile: its ring around the pane centre, in tiles
-/// (Chebyshev distance; 0 = the centre tile). Works the same for volume and
-/// surface panes since tiles are laid out in screen space.
+/// Fetch priority of a tile: its ring around the pane centre (0 = the
+/// centre tile). Rings follow the pane's shape: distance is Chebyshev in
+/// units of the pane's half-extents, so in a wide pane the left/right edges
+/// are as near as the top/bottom ones, and the outermost visible ring
+/// counts as many tiles as the pane's longer half. Tiles entirely off
+/// screen (the prefetch margin) come after every visible one. Works the
+/// same for volume and surface panes since tiles are laid out in screen
+/// space.
 fn ring_priority(tile_rect: &egui::Rect, frame_width: usize, frame_height: usize) -> Priority {
-    let centre = egui::pos2(frame_width as f32 / 2.0, frame_height as f32 / 2.0);
-    let d = (tile_rect.center() - centre).abs();
-    (d.x / tile_rect.width()).max(d.y / tile_rect.height()).round() as Priority
+    let frame = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(frame_width as f32, frame_height as f32));
+    let half = frame.size() / 2.0;
+    let d = (tile_rect.center() - frame.center()).abs();
+    let edge_rings = (half.x / tile_rect.width()).max(half.y / tile_rect.height()).ceil();
+    let ring = ((d.x / half.x).max(d.y / half.y) * edge_rings).round() as Priority;
+    if frame.intersects(*tile_rect) {
+        ring
+    } else {
+        edge_rings as Priority + 2 + ring
+    }
 }
 
 /// Wake `ctx` when chunks land, so tiles waiting for them refresh without
@@ -1316,5 +1328,31 @@ impl VolumePane {
         }
 
         to_color_image(image)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_priority_follows_the_pane_shape_and_puts_visible_tiles_first() {
+        // 16:9 pane, 200 px tiles: 4 tiles to the side edges, 2.25 to the
+        // top/bottom.
+        let (w, h) = (1600, 900);
+        let tile = |cx: f32, cy: f32| egui::Rect::from_center_size(egui::pos2(cx, cy), egui::vec2(200.0, 200.0));
+        let ring = |cx, cy| ring_priority(&tile(cx, cy), w, h);
+
+        assert_eq!(ring(800.0, 450.0), 0);
+        // The side edge and the top edge are equally far out.
+        let side = ring(1500.0, 450.0);
+        let top = ring(800.0, 50.0);
+        assert!(side.abs_diff(top) <= 1, "side {side} vs top {top}");
+        // Off-screen margin tiles, above or beside, come after every visible
+        // tile, including the partially visible corners.
+        let corner = ring(1650.0, 950.0 - 150.0);
+        let above = ring(800.0, -150.0);
+        let beside = ring(1750.0, 450.0);
+        assert!(corner < above && corner < beside, "corner {corner}, above {above}, beside {beside}");
     }
 }
