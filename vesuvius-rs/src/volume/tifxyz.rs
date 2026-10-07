@@ -823,6 +823,13 @@ impl PaintVolume for TifXyzVolume {
 }
 
 impl VoxelVolume for TifXyzVolume {
+    // Per-paint reset of the base (hot slots, and the unified cache's frame
+    // tick that gates touch debouncing). `touch_aabb` is deliberately not
+    // forwarded: its box is in base-volume voxel space, not segment space.
+    fn reset_for_painting(&self) {
+        self.volume.reset_for_painting();
+    }
+
     fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
         // Treat input as (u, v, w) in segment space (this is how PPMVolume and
         // the UV pane traverse a surface volume).
