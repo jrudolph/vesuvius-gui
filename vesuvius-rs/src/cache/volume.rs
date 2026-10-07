@@ -7,10 +7,10 @@
 //! ("target") LOD chunk isn't resident yet, we sample from the first
 //! coarser-LOD parent chunk that is. The target tile's screen region is
 //! painted **once** at whichever LOD has data — we never overdraw multiple
-//! LODs into the same region. Pre-dispatch in `paint()` happens coarse-first
-//! so the wider, viewport-covering parent chunks land in the LIFO queue
-//! before their finer-LOD children pile on top: a low-res preview shows
-//! up promptly while detail streams in.
+//! LODs into the same region. Every missing level of the climb is
+//! requested; the work queues fetch the coarser ones first (see
+//! `lease::chunk_priority`), so a low-res preview shows up promptly while
+//! detail streams in.
 //!
 //! `get()` is the per-voxel sampler used by surface (ObjVolume) and PPM
 //! renderers that don't go through `UnifiedVolume::paint`. It climbs the

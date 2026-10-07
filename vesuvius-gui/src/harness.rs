@@ -207,6 +207,10 @@ pub struct PhaseReport {
     /// First frame where every visible tile's render used final data
     /// everywhere (no target chunk missing).
     pub all_complete: Option<Duration>,
+    /// `(L, t)`: first frame where every visible tile drew LOD `L` or finer
+    /// everywhere, for `L` from the coarsest LOD shown in the phase down
+    /// to 1 (LOD 0 / the target level is `all_complete`).
+    pub lod_reached: Vec<(u8, Option<Duration>)>,
     /// At the end of the phase: visible tiles not complete, and the summed
     /// count of target chunks their renders were missing.
     pub incomplete_at_end: u32,
@@ -242,6 +246,7 @@ impl PhaseReport {
             "full_coverage_s": secs(self.full_coverage),
             "all_tiles_ready_s": secs(self.all_tiles_ready),
             "all_complete_s": secs(self.all_complete),
+            "lod_reached_s": self.lod_reached.iter().map(|(l, t)| (l.to_string(), secs(*t).into())).collect::<serde_json::Map<_, _>>(),
             "incomplete_at_end": self.incomplete_at_end,
             "missing_at_end": self.missing_at_end,
             "settled_s": secs(self.settled),
@@ -286,6 +291,10 @@ impl fmt::Display for PhaseReport {
             opt(self.all_complete),
             opt(self.settled)
         )?;
+        if !self.lod_reached.is_empty() {
+            let levels: Vec<String> = self.lod_reached.iter().map(|(l, t)| format!("L{l} {}", opt(*t))).collect();
+            writeln!(f, "  view drawn at or finer than: {}", levels.join("   "))?;
+        }
         writeln!(
             f,
             "  at end: {} incomplete tiles, {} missing chunk refs",
@@ -748,6 +757,18 @@ impl PaneHarness {
             full_coverage: first(&|r| r.coverage >= 0.9999),
             all_tiles_ready: first(&|r| r.loading() == 0),
             all_complete: first(&|r| r.all_complete()),
+            lod_reached: {
+                let coarsest = recs
+                    .iter()
+                    .map(|r| r.tiles.coarsest_lod)
+                    .filter(|&l| l != u8::MAX)
+                    .max()
+                    .unwrap_or(0);
+                (1..=coarsest)
+                    .rev()
+                    .map(|l| (l, first(&|r| r.tiles.visible > 0 && r.tiles.coarsest_lod <= l)))
+                    .collect()
+            },
             incomplete_at_end: recs.last().map_or(0, |r| r.tiles.visible - r.tiles.complete),
             missing_at_end: recs.last().map_or(0, |r| r.tiles.missing_chunks),
             settled,
@@ -788,13 +809,13 @@ impl PaneHarness {
             f,
             "frame,t_ms,render_ms,u,v,w,zoom,visible,ready,recalculating,loading_fallback,loading_blank,\
              budget_skipped,complete,missing_chunks,coverage,black,changed,repaint,dl_in_flight,dl_queued,dl_submitted,dl_completed,\
-             dl_not_found,dl_failed,dl_cancelled,dl_bytes,queued_tasks,pending_chunks,cooldown_chunks"
+             dl_not_found,dl_failed,dl_cancelled,dl_bytes,queued_tasks,pending_chunks,cooldown_chunks,coarsest_lod"
         )?;
         for r in &self.records {
             let d = r.downloads.unwrap_or_default();
             writeln!(
                 f,
-                "{},{:.1},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{:.1},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 r.frame,
                 r.t.as_secs_f64() * 1e3,
                 r.render.as_secs_f64() * 1e3,
@@ -824,7 +845,8 @@ impl PaneHarness {
                 d.bytes,
                 r.queued_tasks.unwrap_or(0),
                 r.pending_chunks.unwrap_or(0),
-                r.cooldown_chunks.unwrap_or(0)
+                r.cooldown_chunks.unwrap_or(0),
+                r.tiles.coarsest_lod
             )?;
         }
         Ok(())

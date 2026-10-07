@@ -65,12 +65,31 @@ pub struct TileFrameStats {
     /// Sum over shown renders of target chunks they had to fall back on
     /// (chunks shared by several tiles count once per tile).
     pub missing_chunks: u32,
+    /// Coarsest LOD any visible tile still draws somewhere: 0 once all are
+    /// complete, `u8::MAX` while some tile (or part of one) shows nothing.
+    pub coarsest_lod: u8,
+}
+
+/// What a shown render drew, for `TileFrameStats`.
+#[derive(Clone, Copy)]
+struct Shown {
+    missing: u32,
+    coarsest: u8,
+}
+
+impl Shown {
+    fn of(report: &PaintReport) -> Self {
+        Self {
+            missing: report.missing_count() as u32,
+            coarsest: report.coarsest_drawn(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
 enum TileOutcome {
-    Ready { missing: u32 },
-    Recalculating { missing: u32 },
+    Ready(Shown),
+    Recalculating(Shown),
     Loading { has_fallback: bool, budget_skipped: bool },
 }
 
@@ -94,21 +113,23 @@ impl FrameBudget {
         let mut t = self.tiles.get();
         t.visible += 1;
         match outcome {
-            TileOutcome::Ready { missing } | TileOutcome::Recalculating { missing } => {
-                if matches!(outcome, TileOutcome::Ready { .. }) {
+            TileOutcome::Ready(shown) | TileOutcome::Recalculating(shown) => {
+                if matches!(outcome, TileOutcome::Ready(_)) {
                     t.ready += 1;
                 } else {
                     t.recalculating += 1;
                 }
-                if missing == 0 {
+                if shown.missing == 0 {
                     t.complete += 1;
                 }
-                t.missing_chunks += missing;
+                t.missing_chunks += shown.missing;
+                t.coarsest_lod = t.coarsest_lod.max(shown.coarsest);
             }
             TileOutcome::Loading {
                 has_fallback,
                 budget_skipped,
             } => {
+                t.coarsest_lod = u8::MAX;
                 if has_fallback {
                     t.loading_fallback += 1;
                 } else {
@@ -235,10 +256,6 @@ struct RenderedTile {
 }
 
 impl RenderedTile {
-    fn missing(&self) -> u32 {
-        self.report.missing_count() as u32
-    }
-
     /// Placeholder for a cancelled render (its tile is gone or the runtime
     /// shuts down); never shown. Counts as incomplete.
     fn failed() -> Self {
@@ -815,7 +832,7 @@ impl VolumePane {
                 report,
                 lease,
             }) => {
-                let missing = report.missing_count() as u32;
+                let shown = Shown::of(&report);
                 let refresh = if revived && !report.is_complete() {
                     Refresh::Now
                 } else {
@@ -855,7 +872,7 @@ impl VolumePane {
                         );
                     }
                 }
-                budget.record_tile(TileOutcome::Ready { missing });
+                budget.record_tile(TileOutcome::Ready(shown));
                 vec![(texture, full_uv(), full_uv())]
             }
 
@@ -866,7 +883,7 @@ impl VolumePane {
                 report,
                 lease,
             }) => {
-                let missing = report.missing_count() as u32;
+                let shown = Shown::of(&report);
                 // Skip the recalc peek entirely if the frame deadline is gone.
                 if !budget.polling_allowed() {
                     set(
@@ -881,7 +898,7 @@ impl VolumePane {
                         },
                     );
                     ui.ctx().request_repaint();
-                    budget.record_tile(TileOutcome::Recalculating { missing });
+                    budget.record_tile(TileOutcome::Recalculating(shown));
                     return vec![(texture, full_uv(), full_uv())];
                 }
                 // Poll the recalculation future briefly (non-blocking check)
@@ -911,9 +928,7 @@ impl VolumePane {
                                 lease: lease.clone(),
                             },
                         );
-                        budget.record_tile(TileOutcome::Ready {
-                            missing: rendered.missing(),
-                        });
+                        budget.record_tile(TileOutcome::Ready(Shown::of(&rendered.report)));
                         vec![(new_texture, full_uv(), full_uv())]
                     }
                     Poll::Pending => {
@@ -930,7 +945,7 @@ impl VolumePane {
                             },
                         );
                         ui.ctx().request_repaint(); // Check again next frame
-                        budget.record_tile(TileOutcome::Recalculating { missing });
+                        budget.record_tile(TileOutcome::Recalculating(shown));
                         vec![(texture, full_uv(), full_uv())]
                     }
                 }
@@ -990,9 +1005,7 @@ impl VolumePane {
                                 lease: lease.clone(),
                             },
                         );
-                        budget.record_tile(TileOutcome::Ready {
-                            missing: rendered.missing(),
-                        });
+                        budget.record_tile(TileOutcome::Ready(Shown::of(&rendered.report)));
                         return vec![(texture, full_uv(), full_uv())];
                     }
                     Poll::Pending => {

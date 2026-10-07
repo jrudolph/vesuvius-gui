@@ -85,6 +85,15 @@ impl PaintReport {
         self.missing.len() + self.failed as usize
     }
 
+    /// Coarsest LOD the paint drew somewhere in place of its target: 0 if
+    /// complete, `u8::MAX` if it drew nothing somewhere (or failed).
+    pub fn coarsest_drawn(&self) -> u8 {
+        if self.failed {
+            return u8::MAX;
+        }
+        self.missing.values().map(|f| f.unwrap_or(u8::MAX)).max().unwrap_or(0)
+    }
+
     fn cache(&self, id: usize) -> Option<&ChunkCache> {
         self.caches.iter().find(|c| c.id() == id)
     }

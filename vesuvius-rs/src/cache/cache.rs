@@ -1155,7 +1155,7 @@ impl Inner {
     }
 
     fn attach(&self, key: ChunkKey, lease: &Arc<Lease>) {
-        self.interest.entry(key).or_default().attach(lease);
+        self.interest.entry(key).or_default().attach(lease, key.lod);
     }
 
     /// Liveness of a source's queued fetch (see `source_liveness`).
@@ -1188,7 +1188,7 @@ impl Inner {
             let covered = progress.map(|p| p.lock().unwrap().covered.clone()).unwrap_or_default();
             for c in std::iter::once(w).chain(covered) {
                 if let Some(interest) = self.interest.get(&c) {
-                    liveness = liveness.or(interest.liveness());
+                    liveness = liveness.or(interest.liveness(c.lod));
                 }
             }
         }
