@@ -40,6 +40,33 @@ pub struct FrameBudget {
     frame_deadline: quanta::Instant,
     pane_deadline: Cell<quanta::Instant>,
     poll_disabled: Cell<bool>,
+    tiles: Cell<TileFrameStats>,
+}
+
+/// What each visible tile slot showed this frame, summed over every pane
+/// drawn with the same `FrameBudget`. Telemetry only (read by the pane
+/// harness); the GUI ignores it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TileFrameStats {
+    /// Tile slots in the visible set (including the 1-tile margin).
+    pub visible: u32,
+    /// Showing a finished render (incl. one whose TTL refresh just started).
+    pub ready: u32,
+    /// Showing the previous render while a TTL refresh is in flight.
+    pub recalculating: u32,
+    /// Still loading, covered by a cross-mip placeholder.
+    pub loading_fallback: u32,
+    /// Still loading, nothing to draw.
+    pub loading_blank: u32,
+    /// Loading tiles not polled because the frame budget ran out.
+    pub budget_skipped: u32,
+}
+
+#[derive(Clone, Copy)]
+enum TileOutcome {
+    Ready,
+    Recalculating,
+    Loading { has_fallback: bool, budget_skipped: bool },
 }
 
 impl FrameBudget {
@@ -49,7 +76,36 @@ impl FrameBudget {
             frame_deadline,
             pane_deadline: Cell::new(frame_deadline),
             poll_disabled: Cell::new(false),
+            tiles: Cell::new(TileFrameStats::default()),
         }
+    }
+
+    /// Tile-state counters accumulated so far this frame.
+    pub fn tile_stats(&self) -> TileFrameStats {
+        self.tiles.get()
+    }
+
+    fn record_tile(&self, outcome: TileOutcome) {
+        let mut t = self.tiles.get();
+        t.visible += 1;
+        match outcome {
+            TileOutcome::Ready => t.ready += 1,
+            TileOutcome::Recalculating => t.recalculating += 1,
+            TileOutcome::Loading {
+                has_fallback,
+                budget_skipped,
+            } => {
+                if has_fallback {
+                    t.loading_fallback += 1;
+                } else {
+                    t.loading_blank += 1;
+                }
+                if budget_skipped {
+                    t.budget_skipped += 1;
+                }
+            }
+        }
+        self.tiles.set(t);
     }
 
     /// Allocate this pane's share of the remaining frame budget. Capped by the
@@ -711,6 +767,7 @@ impl VolumePane {
                     // Refresh cache entry to keep it alive
                     set(ui, key, async_tex);
                 }
+                budget.record_tile(TileOutcome::Ready);
                 vec![(texture, full_uv(), full_uv())]
             }
 
@@ -735,6 +792,7 @@ impl VolumePane {
                         },
                     );
                     ui.ctx().request_repaint();
+                    budget.record_tile(TileOutcome::Recalculating);
                     return vec![(texture, full_uv(), full_uv())];
                 }
                 // Poll the recalculation future briefly (non-blocking check)
@@ -774,6 +832,7 @@ impl VolumePane {
                                 backoff_factor: new_backoff,
                             },
                         );
+                        budget.record_tile(TileOutcome::Ready);
                         vec![(new_texture, full_uv(), full_uv())]
                     }
                     Poll::Pending => {
@@ -790,6 +849,7 @@ impl VolumePane {
                             },
                         );
                         ui.ctx().request_repaint(); // Check again next frame
+                        budget.record_tile(TileOutcome::Recalculating);
                         vec![(texture, full_uv(), full_uv())]
                     }
                 }
@@ -806,7 +866,12 @@ impl VolumePane {
                         "cross-mip: trigger=loading_no_budget pane={:?} tile=({},{}) paint_zoom={}",
                         self.pane_type, key.tile_u, key.tile_v, key.paint_zoom
                     );
-                    return self.try_cross_mip_fallback(ui, &key);
+                    let draws = self.try_cross_mip_fallback(ui, &key);
+                    budget.record_tile(TileOutcome::Loading {
+                        has_fallback: !draws.is_empty(),
+                        budget_skipped: true,
+                    });
+                    return draws;
                 };
                 match poll_tile_future(future.clone(), timeout) {
                     Poll::Ready(image) => {
@@ -833,6 +898,7 @@ impl VolumePane {
                                 backoff_factor: 1, // Initial backoff
                             },
                         );
+                        budget.record_tile(TileOutcome::Ready);
                         return vec![(texture, full_uv(), full_uv())];
                     }
                     Poll::Pending => {
@@ -850,7 +916,12 @@ impl VolumePane {
                             "cross-mip: trigger=loading_pending pane={:?} tile=({},{}) paint_zoom={}",
                             self.pane_type, key.tile_u, key.tile_v, key.paint_zoom
                         );
-                        self.try_cross_mip_fallback(ui, &key)
+                        let draws = self.try_cross_mip_fallback(ui, &key);
+                        budget.record_tile(TileOutcome::Loading {
+                            has_fallback: !draws.is_empty(),
+                            budget_skipped: false,
+                        });
+                        draws
                     }
                 }
             }
@@ -872,7 +943,12 @@ impl VolumePane {
                     "cross-mip: trigger=fresh pane={:?} tile=({},{}) paint_zoom={}",
                     self.pane_type, key.tile_u, key.tile_v, key.paint_zoom
                 );
-                self.try_cross_mip_fallback(ui, &key)
+                let draws = self.try_cross_mip_fallback(ui, &key);
+                budget.record_tile(TileOutcome::Loading {
+                    has_fallback: !draws.is_empty(),
+                    budget_skipped: false,
+                });
+                draws
             }
         }
     }

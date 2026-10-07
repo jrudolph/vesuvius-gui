@@ -42,7 +42,7 @@ use super::backfiller::{
     SourceSpec,
 };
 use super::disk::{DiskStore, LoadOutcome, ShardCoord, ShardSnapshot};
-use super::downloader::{DownloadError, DownloadResult, Downloader, OnDone};
+use super::downloader::{DownloadError, DownloadResult, Downloader, DownloaderStats, OnDone};
 use super::epoch::{self, EpochState};
 use super::lifo::{LifoQueue, QueueEntry};
 use super::purge::{PurgePlan, PurgeTarget};
@@ -642,6 +642,28 @@ impl ChunkCache {
     /// queue, or fed by a Compute / Chunk source rather than a Download.
     pub fn is_downloading(&self, key: ChunkKey) -> bool {
         self.inner.downloader.is_active_chunk(key)
+    }
+
+    /// Downloader gauges and counters (see `DownloaderStats`). Note the
+    /// downloader may be shared with other volumes opened from the same
+    /// `UnifiedCache`.
+    pub fn download_stats(&self) -> DownloaderStats {
+        self.inner.downloader.stats()
+    }
+
+    /// Cache tasks (fetch-source / extract) waiting in the task queue.
+    pub fn queued_tasks(&self) -> usize {
+        self.inner.task_queue.len()
+    }
+
+    /// Chunks currently `Pending` (fetch dispatched, bytes not landed yet).
+    /// Walks the whole state map — telemetry, not for hot paths.
+    pub fn pending_chunks(&self) -> usize {
+        self.inner
+            .map
+            .iter()
+            .filter(|e| matches!(e.value().as_ref(), ChunkState::Pending { .. }))
+            .count()
     }
 
     pub fn voxel_extent(&self) -> [u32; 3] {

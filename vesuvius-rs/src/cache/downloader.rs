@@ -22,7 +22,7 @@ use super::state::ChunkKey;
 use super::MAX_AGE;
 use dashmap::DashMap;
 use reqwest::blocking::Client;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -85,9 +85,43 @@ struct DownloaderInner {
     /// Total HTTP GETs currently on the wire across all workers. Telemetry
     /// only (the netlog records the concurrency each request contended with).
     in_flight: AtomicUsize,
+    /// Cumulative counters since construction. Telemetry only — snapshotted
+    /// via `Downloader::stats` (e.g. per frame by the pane harness).
+    counters: Counters,
     /// Optional SigV4 signer for S3-hosted URLs. `None` when signing is disabled
     /// or no credentials resolved; non-S3 URLs are never signed regardless.
     signer: Option<Arc<S3Signer>>,
+}
+
+#[derive(Default)]
+struct Counters {
+    submitted: AtomicU64,
+    completed: AtomicU64,
+    not_found: AtomicU64,
+    failed: AtomicU64,
+    aged_out: AtomicU64,
+    bytes: AtomicU64,
+}
+
+/// Point-in-time snapshot of the downloader: live gauges (`in_flight`,
+/// `queued`) plus cumulative counters since construction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DownloaderStats {
+    /// HTTP GETs currently on the wire.
+    pub in_flight: usize,
+    /// Jobs waiting in the LIFO queue (not yet popped by a worker).
+    pub queued: usize,
+    pub submitted: u64,
+    /// 200/206 responses with a body.
+    pub completed: u64,
+    /// 403/404 — definitive absences.
+    pub not_found: u64,
+    /// Transport errors and other statuses.
+    pub failed: u64,
+    /// Culled at pop for exceeding `MAX_AGE` without being fetched.
+    pub aged_out: u64,
+    /// Body bytes received across all completed GETs.
+    pub bytes: u64,
 }
 
 struct Job {
@@ -123,6 +157,7 @@ impl Downloader {
             queue: LifoQueue::new(max_age, cull_enabled),
             active: DashMap::new(),
             in_flight: AtomicUsize::new(0),
+            counters: Counters::default(),
             signer,
         });
 
@@ -177,6 +212,7 @@ impl Downloader {
     /// a `Range: bytes=offset-(offset+len-1)` header on the request; 206
     /// Partial Content is accepted as success.
     pub fn submit(&self, url: &str, range: Option<(u64, u64)>, chunk: ChunkKey, on_done: OnDone) {
+        self.inner.counters.submitted.fetch_add(1, Ordering::Relaxed);
         self.inner.queue.submit(
             chunk,
             Job {
@@ -203,6 +239,22 @@ impl Downloader {
     /// the queue head tracks the current viewport.
     pub fn touch(&self, chunk: ChunkKey) {
         self.inner.queue.touch(chunk);
+    }
+
+    /// Snapshot of live gauges and cumulative counters. Takes the queue
+    /// lock once (for `queued`); cheap enough to call per frame.
+    pub fn stats(&self) -> DownloaderStats {
+        let c = &self.inner.counters;
+        DownloaderStats {
+            in_flight: self.inner.in_flight.load(Ordering::Relaxed),
+            queued: self.inner.queue.len(),
+            submitted: c.submitted.load(Ordering::Relaxed),
+            completed: c.completed.load(Ordering::Relaxed),
+            not_found: c.not_found.load(Ordering::Relaxed),
+            failed: c.failed.load(Ordering::Relaxed),
+            aged_out: c.aged_out.load(Ordering::Relaxed),
+            bytes: c.bytes.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -253,6 +305,7 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
             // Stale by age — cancel so the cache rolls the chunk back to
             // a cooldown.
             log::trace!("[{}] aged out", d.item.url);
+            inner.counters.aged_out.fetch_add(1, Ordering::Relaxed);
             if netlog::enabled() {
                 netlog::emit(serde_json::json!({
                     "t": netlog::now_ms(),
@@ -359,6 +412,13 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
             }
         };
         inner.in_flight.fetch_sub(1, Ordering::Relaxed);
+        let counter = match &outcome {
+            Ok(Some(_)) => &inner.counters.completed,
+            Ok(None) => &inner.counters.not_found,
+            Err(_) => &inner.counters.failed,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        inner.counters.bytes.fetch_add(got_bytes, Ordering::Relaxed);
 
         if netlog::enabled() {
             netlog::emit(serde_json::json!({

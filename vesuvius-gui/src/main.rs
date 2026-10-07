@@ -1,6 +1,4 @@
-mod gui;
-
-use crate::gui::{ObjFileConfig, TemplateApp, VesuviusConfig};
+use vesuvius_gui::gui::{ObjFileConfig, TemplateApp, VesuviusConfig};
 use vesuvius_atlas_rs::load_atlas_from_directory;
 use vesuvius_rs::cache::UnifiedCache;
 use vesuvius_rs::catalog::load_catalog;

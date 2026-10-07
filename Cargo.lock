@@ -4743,6 +4743,7 @@ dependencies = [
  "quanta",
  "rand 0.8.6",
  "serde",
+ "tempfile",
  "tokio",
  "vesuvius-atlas-rs",
  "vesuvius-rs",
