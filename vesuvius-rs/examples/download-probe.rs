@@ -36,7 +36,7 @@ fn main() {
         let tx = tx.clone();
         // Fake chunk key — the downloader only uses it for bookkeeping.
         let key = ChunkKey::new(0, i as u32, 0, 0);
-        downloader.submit(url, None, key, Box::new(move |res| {
+        downloader.submit(url, None, key, vesuvius_rs::cache::lease::unleased(), Box::new(move |res| {
             let bytes = match &res {
                 Ok(Some(b)) => b.len() as u64,
                 _ => 0,

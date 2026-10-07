@@ -19,20 +19,22 @@
 //!   5. Extract runs the backfiller's closure → writes to disk → mmaps →
 //!      transitions chunk state to `Resident`.
 //!
-//! ### LIFO ordering + age pruning
+//! ### Priority ordering + lease liveness
 //!
-//! Tasks live in a `BTreeMap` keyed by `!seq`, i.e. plain LIFO — the most
-//! recently submitted (or touched) entry pops first. Each paint frame
-//! re-enters `state_or_fetch` for every chunk it wants and that re-touches
-//! in-flight entries so they re-arm to the head of the queue. Older
-//! un-touched entries slide toward the tail and either get processed in
-//! LIFO order when workers catch up, or culled by `MAX_AGE`.
+//! A chunk requested while painting under a lease (`paint_scope`) records
+//! that lease in `Inner::interest`. Queued fetches ask, at pop, for the
+//! combined interest of every chunk waiting on their source (plus the
+//! siblings those chunks' dispatch pre-claimed): the best live priority
+//! runs first; if every lease died, the fetch is cancelled and its chunks
+//! become requestable again (no cooldown). Chunks no lease asked for are
+//! never cancelled. See `lease.rs` and `work_queue.rs`.
 //!
 //! The queue is **unbounded**: dedup happens upstream (cache's source map
 //! ensures one source-key → one FetchSource enqueue; `satisfy` enqueues at
-//! most one Extract per chunk). Workers prune at two points:
+//! most one Extract per chunk). Extracts are durable (their sources are
+//! paid for) and run first. Workers prune at two points:
 //!
-//!   * **Age:** entries older than `MAX_AGE` are dropped + cancelled at pop.
+//!   * **Dead:** entries whose leases all died are cancelled at pop.
 //!   * **Already-met:** at pop, skip Extract for chunks that became
 //!     Resident through another path, and FetchSource for sources that
 //!     are already Done. Defensive against cooldown-retry races.
@@ -44,20 +46,23 @@ use super::backfiller::{
 use super::disk::{DiskStore, LoadOutcome, ShardCoord, ShardSnapshot};
 use super::downloader::{DownloadError, DownloadResult, Downloader, DownloaderStats, OnDone};
 use super::epoch::{self, EpochState};
-use super::lifo::{LifoQueue, QueueEntry};
+use super::lease::{Interest, Lease, Liveness, LivenessFn, Priority};
 use super::purge::{PurgePlan, PurgeTarget};
 use super::spill::RawStore;
 use super::state::{ChunkKey, ChunkState};
-use super::{CHUNK_VOXELS, MAX_AGE};
+use super::work_queue::{QueueEntry, WorkQueue};
+use super::CHUNK_VOXELS;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, SystemTime};
 
 const COOLDOWN: Duration = Duration::from_secs(10);
-const SHORT_COOLDOWN: Duration = Duration::from_millis(150);
+/// Extracts run ahead of fetches: their sources are already downloaded and
+/// they're what makes data paintable.
+const EXTRACT_PRIORITY: Priority = 0;
 const PERMANENT_COOLDOWN: Duration = Duration::from_secs(60 * 60 * 24 * 365);
 /// Small worker pool — extract + decode is CPU-bound but lock-light. Keeping
 /// the count low reduces the chance that a worker stalls behind a
@@ -127,20 +132,14 @@ struct Inner {
     /// child chunk lands here — multiple parents waiting on the same child
     /// all attach as waiters on the same source state.
     pending_chunk_sources: DashMap<ChunkKey, Vec<String>>,
-    /// Pure-LIFO queue for cache-side `Task`s (see `lifo.rs` for the
-    /// ordering + age-cull model). Dedup happens at this layer:
+    /// Priority queue for cache-side `Task`s (see `work_queue.rs`). Dedup happens at this layer:
     /// source-key uniqueness for FetchSource, at most one Extract per
     /// chunk via `satisfy`.
-    task_queue: LifoQueue<Task>,
+    task_queue: WorkQueue<Task>,
     downloader: Arc<Downloader>,
-    /// Frame counter that gates per-Pending touch debouncing. Bumped by
-    /// `ChunkCache::advance_frame` (called from `reset_for_painting` at
-    /// the start of each pane paint). Initialized to 1 so a fresh
-    /// `Pending` — whose `last_touched_frame` starts at 0 — always fires
-    /// its first touch. Each `state_or_fetch` on a Pending chunk
-    /// compares this against the chunk's stamp; equal means "already
-    /// touched this frame, skip the queue mutexes."
-    frame: AtomicU64,
+    /// Leases that asked for each Pending chunk (see `lease.rs`). Entries
+    /// go when the chunk leaves Pending.
+    interest: DashMap<ChunkKey, Interest>,
     /// Cache-wide LRU bookkeeping shared across volumes under the same
     /// unified root. Bumped on chunk fill (write path) and on access
     /// transitions (read path). See `epoch.rs`.
@@ -182,10 +181,6 @@ struct Inner {
     /// chunks stream in lazily and the per-voxel state probe is what drives
     /// the fetch.
     assume_resident: AtomicBool,
-    /// Shared with both work queues (downloader + task). When false, neither
-    /// queue culls stale entries by `MAX_AGE` at pop. See
-    /// `ChunkCache::set_culling` and `LifoQueue::cull_enabled`.
-    cull_enabled: Arc<AtomicBool>,
 }
 
 enum SourceState {
@@ -434,16 +429,12 @@ impl UnifiedCache {
         }
         let chunks_root = self.unified_root.join(&volume_id);
         let _ = std::fs::create_dir_all(&chunks_root);
-        // One cull flag shared by the downloader queue and the task queue so
-        // `set_culling` toggles both at once (default: culling on).
-        let cull_enabled = Arc::new(AtomicBool::new(true));
         let inner = ChunkCache::build_inner(
             chunks_root,
             backfiller,
             configured_workers(),
-            Arc::new(Downloader::with_shared_cull(cull_enabled.clone())),
+            Arc::new(Downloader::new()),
             self.epoch.clone(),
-            cull_enabled,
             super::disk::SHARD_CHUNKS_PER_AXIS,
         );
         volumes.insert(volume_id, Arc::downgrade(&inner));
@@ -463,14 +454,12 @@ impl UnifiedCache {
         let volume_id = backfiller.volume_id();
         let chunks_root = self.unified_root.join(&volume_id);
         let _ = std::fs::create_dir_all(&chunks_root);
-        let cull_enabled = Arc::new(AtomicBool::new(true));
         let inner = ChunkCache::build_inner(
             chunks_root,
             backfiller,
             configured_workers(),
-            Arc::new(Downloader::with_shared_cull(cull_enabled.clone())),
+            Arc::new(Downloader::new()),
             self.epoch.clone(),
-            cull_enabled,
             shard_chunks_per_axis,
         );
         ChunkCache { inner }
@@ -484,10 +473,9 @@ impl ChunkCache {
         workers: usize,
         downloader: Arc<Downloader>,
         epoch: Arc<EpochState>,
-        cull_enabled: Arc<AtomicBool>,
         shard_chunks_per_axis: u32,
     ) -> Arc<Inner> {
-        let task_queue = LifoQueue::new(MAX_AGE, cull_enabled.clone());
+        let task_queue = WorkQueue::new();
         // Raw-source retention lives at the unified root (volume-agnostic:
         // keys are (url, range) hashes), so every volume shares one budget.
         let raw_root = root.parent().map(|p| p.join("raw")).unwrap_or_else(|| root.join("raw"));
@@ -525,13 +513,12 @@ impl ChunkCache {
             pending_chunk_sources: DashMap::new(),
             task_queue,
             downloader,
-            frame: AtomicU64::new(1),
+            interest: DashMap::new(),
             epoch,
             preview_synthesis: AtomicBool::new(true),
             preview_prefetch: AtomicBool::new(true),
             lod_climb: AtomicBool::new(true),
             assume_resident: AtomicBool::new(false),
-            cull_enabled,
         });
 
         for i in 0..workers.max(1) {
@@ -567,8 +554,8 @@ impl ChunkCache {
     }
 
     /// Return the cached state for `key`, dispatching a fetch if the slot
-    /// is Missing/expired. Pending entries get touched on every call so
-    /// the next worker pop sees the freshest in-flight chunks first.
+    /// is Missing/expired. Inside a leased paint scope, a non-terminal
+    /// chunk also records the scope's lease (see `lease.rs`).
     pub fn state_or_fetch(&self, key: ChunkKey) -> Arc<ChunkState> {
         let state = self.inner.state_or_fetch(key);
         if state.as_resident().is_some() {
@@ -644,20 +631,11 @@ impl ChunkCache {
         self.inner.downloader.is_active_chunk(key)
     }
 
-    /// Keep a still-wanted chunk's fetch alive without painting it: a
-    /// Pending chunk is touched in both queues (back to the LIFO head,
-    /// `MAX_AGE` re-armed); a Missing one, or one whose cooldown is over, is
-    /// dispatched again. Unlike `state_or_fetch`'s touch this isn't
-    /// debounced per paint frame — callers renew each chunk rarely.
-    pub fn renew(&self, key: ChunkKey) -> Arc<ChunkState> {
-        if let Some(state) = self.peek(key) {
-            if matches!(state.as_ref(), ChunkState::Pending { .. }) {
-                self.inner.task_queue.touch(key);
-                self.inner.downloader.touch(key);
-                return state;
-            }
-        }
-        self.inner.state_or_fetch(key)
+    /// Request `key` on behalf of `lease` outside a paint: dispatched again
+    /// if Missing or past its cooldown, and `lease` recorded as wanting it
+    /// while it is Pending.
+    pub fn renew(&self, key: ChunkKey, lease: &Arc<Lease>) -> Arc<ChunkState> {
+        self.inner.request(key, || Some(lease.clone()))
     }
 
     /// Identity of this cache (stable while it's open), as used in
@@ -688,8 +666,8 @@ impl ChunkCache {
             .count()
     }
 
-    /// Chunks whose last fetch failed or was cancelled (incl. aged out) and
-    /// that haven't been re-requested since — `CooldownMiss`, whether or not
+    /// Chunks whose last fetch failed and that haven't been re-requested
+    /// since — `CooldownMiss`, whether or not
     /// the cooldown has expired. Walks the whole state map — telemetry only.
     pub fn cooldown_chunks(&self) -> usize {
         self.inner
@@ -767,16 +745,6 @@ impl ChunkCache {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-    }
-
-    /// Bump the per-cache frame counter that gates touch debouncing.
-    /// Call once per render frame, before any per-voxel / per-tile
-    /// sampling begins (host wires this into `reset_for_painting`).
-    /// Pending chunks observed *after* this returns are eligible for a
-    /// fresh queue-priority touch; subsequent observations of the same
-    /// chunk within the frame are no-ops on the hot path.
-    pub fn advance_frame(&self) {
-        self.inner.frame.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Dispatch every chunk in the AABB `[min, max]` (inclusive, in
@@ -924,22 +892,6 @@ impl ChunkCache {
     pub fn assume_resident(&self) -> bool {
         self.inner.assume_resident.load(Ordering::Relaxed)
     }
-
-    /// Enable/disable age-based culling of stale queue entries in both work
-    /// queues (default: enabled). The interactive GUI leaves it on so fetches
-    /// for a viewport the user scrolled past die at the tail instead of
-    /// competing with current work. The offline renderer turns it OFF: it
-    /// dispatches exactly the chunks each tile samples and then blocks until
-    /// they land, but on a slow link a wanted fetch can sit queued longer than
-    /// `MAX_AGE`; culling it there strands the chunk in a cooldown, so the
-    /// ensure stage either spins to its timeout (apparent hang) or gives up and
-    /// paints incomplete data — and the bytes are never persisted, so the next
-    /// run re-fetches them. Compositing makes this far more likely because each
-    /// tile then samples a whole slab of chunks along the normal rather than a
-    /// single plane.
-    pub fn set_culling(&self, enabled: bool) {
-        self.inner.cull_enabled.store(enabled, Ordering::Relaxed);
-    }
 }
 
 impl Clone for ChunkCache {
@@ -966,9 +918,6 @@ fn long_cooldown() -> Arc<ChunkState> {
 }
 fn cooldown() -> Arc<ChunkState> {
     Arc::new(ChunkState::CooldownMiss { until: SystemTime::now() + COOLDOWN })
-}
-fn short_cooldown() -> Arc<ChunkState> {
-    Arc::new(ChunkState::CooldownMiss { until: SystemTime::now() + SHORT_COOLDOWN })
 }
 fn pending_state() -> Arc<ChunkState> {
     Arc::new(ChunkState::pending())
@@ -1159,41 +1108,33 @@ impl Inner {
     /// handler, which dispatches a child chunk synchronously without ever
     /// blocking a worker on its completion).
     fn state_or_fetch(self: &Arc<Self>, key: ChunkKey) -> Arc<ChunkState> {
+        let id = Arc::as_ptr(self) as *const () as usize;
+        self.request(key, || super::paint_scope::lease_to_attach(id, key))
+    }
+
+    /// `state_or_fetch`, recording `lease()` as wanting the chunk while it
+    /// is Pending. `lease` is only called for non-terminal chunks.
+    fn request(self: &Arc<Self>, key: ChunkKey, lease: impl FnOnce() -> Option<Arc<Lease>>) -> Arc<ChunkState> {
         if let Some(entry) = self.map.get(&key) {
             let state = entry.clone();
             drop(entry);
-            // Pending chunks: touch their entries in both queues so the
-            // current frame's chunks bubble back to the LIFO head and
-            // re-arm against MAX_AGE. Out-of-frame chunks stop getting
-            // touched and age out. The check is debounced per chunk —
-            // surface rendering re-enters here per voxel, and the queue
-            // mutexes inside the touch calls would otherwise serialize
-            // every CPU thread on the same futex.
-            if let ChunkState::Pending { last_touched_frame, .. } = state.as_ref() {
-                if self.claim_touch(last_touched_frame) {
-                    self.task_queue.touch(key);
-                    self.downloader.touch(key);
-                    // NB: the upscale-from-parent preview is synthesized
-                    // exactly once, at dispatch (see `dispatch_chunk`). We
-                    // deliberately do NOT re-run it here per frame to
-                    // "improve" the preview from a finer ancestor: the
-                    // composite reads the target-LOD shard mmap directly,
-                    // so once the real bytes land `write_atomic` overwrites
-                    // the preview in place and the next paint picks them up
-                    // with no paint-path work. Re-synthesizing every frame
-                    // was a 262k-voxel trilinear pass + 256 KB alloc per
-                    // visible Pending chunk per touching tile — pure churn.
-                }
-            }
-            if let ChunkState::CooldownMiss { until } = state.as_ref() {
-                if SystemTime::now() < *until {
+            match state.as_ref() {
+                ChunkState::Pending { .. } => {
+                    if let Some(lease) = lease() {
+                        self.attach(key, &lease);
+                    }
                     return state;
                 }
-            } else {
-                return state;
+                ChunkState::CooldownMiss { until } if SystemTime::now() >= *until => {}
+                _ => return state,
             }
         }
 
+        let lease = lease();
+        if let Some(lease) = &lease {
+            // Before dispatching, so the fetches it queues see the lease.
+            self.attach(key, lease);
+        }
         let claimed = self.dispatching.insert(key, ()).is_none();
         if !claimed {
             return self
@@ -1206,24 +1147,52 @@ impl Inner {
         let _guard = DispatchGuard { inner: self.clone(), key };
         let state = self.dispatch_chunk(key);
         self.map.insert(key, state.clone());
+        if !matches!(state.as_ref(), ChunkState::Pending { .. }) {
+            self.interest.remove(&key);
+        }
         self.publish_terminal(key, &state);
         state
     }
 
-    /// Per-Pending touch debouncer. Returns true at most once per
-    /// `advance_frame` tick per chunk across all calling threads: the
-    /// CAS wins exclusive permission to bump the queues, everybody else
-    /// short-circuits and avoids the global mutex inside the touch.
-    /// Two relaxed atomic loads on the hot path — no clock read.
-    fn claim_touch(&self, last_touched_frame: &AtomicU64) -> bool {
-        let now = self.frame.load(Ordering::Relaxed);
-        let prev = last_touched_frame.load(Ordering::Relaxed);
-        if prev == now {
-            return false;
+    fn attach(&self, key: ChunkKey, lease: &Arc<Lease>) {
+        self.interest.entry(key).or_default().attach(lease);
+    }
+
+    /// Liveness of a source's queued fetch (see `source_liveness`).
+    fn source_liveness_fn(self: &Arc<Self>, source_key: &str) -> LivenessFn {
+        let inner = Arc::downgrade(self);
+        let source_key = source_key.to_string();
+        Arc::new(move || match inner.upgrade() {
+            Some(inner) => inner.source_liveness(&source_key),
+            None => Liveness::Dead,
+        })
+    }
+
+    /// Combined interest of every chunk waiting on `source_key` and of the
+    /// siblings their dispatch pre-claimed (they're filled from the same
+    /// bytes). `Unleased` if none of them was ever leased.
+    fn source_liveness(&self, source_key: &str) -> Liveness {
+        let Some(state) = self.sources.lock().unwrap().get(source_key).cloned() else {
+            // Completed and evicted while the queue was evaluating a
+            // snapshot; that entry has been popped already.
+            return Liveness::Dead;
+        };
+        let waiters = match &*state.lock().unwrap() {
+            SourceState::Pending { waiters } => waiters.clone(),
+            // Same race as above.
+            SourceState::Done { .. } => return Liveness::Dead,
+        };
+        let mut liveness = Liveness::Unleased;
+        for w in waiters {
+            let progress = self.chunks.get(&w).map(|e| e.clone());
+            let covered = progress.map(|p| p.lock().unwrap().covered.clone()).unwrap_or_default();
+            for c in std::iter::once(w).chain(covered) {
+                if let Some(interest) = self.interest.get(&c) {
+                    liveness = liveness.or(interest.liveness());
+                }
+            }
         }
-        last_touched_frame
-            .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
+        liveness
     }
 
     /// Called right after a chunk is written into `self.map`. If the new
@@ -1239,6 +1208,7 @@ impl Inner {
             ChunkState::Empty => Ok(None),
             _ => return,
         };
+        self.interest.remove(&key);
         super::paint_scope::landed();
         let waiters: Vec<String> = match self.pending_chunk_sources.remove(&key) {
             Some((_, v)) => v,
@@ -1324,6 +1294,7 @@ impl Inner {
                 log::debug!("[{}] transient (plan): {}", key, reason);
                 return cooldown();
             }
+            Err(BackfillError::Cancelled) => unreachable!("planning can't be cancelled"),
         };
 
         let BackfillPlan { covered, sources, extract } = plan;
@@ -1369,7 +1340,7 @@ impl Inner {
         if order.is_empty() {
             // 0-source plan: queue Extract immediately. Durable: extracts
             // are never age-culled (their inputs are already paid for).
-            self.task_queue.submit_durable(key, Task::Extract);
+            self.task_queue.submit_durable(key, EXTRACT_PRIORITY, Task::Extract);
             return pending_state();
         }
 
@@ -1463,6 +1434,7 @@ impl Inner {
             SourceSpec::Compute { key: _, fetch } => {
                 self.task_queue.submit(
                     chunk_key,
+                    self.source_liveness_fn(&source_key),
                     Task::FetchSource {
                         key: source_key.clone(),
                         fetch,
@@ -1578,14 +1550,16 @@ impl Inner {
                         Err(DownloadError::Transient(s)) => {
                             Err(BackfillError::Transient(format!("download: {}", s)))
                         }
+                        Err(DownloadError::Cancelled) => Err(BackfillError::Cancelled),
                     };
                     inner.complete_source(key_for_done, outcome);
                 });
 
-                // Submit without holding self.sources — the aged-out
-                // cancellation path invokes `on_done`, which calls
-                // complete_source and re-locks self.sources.
-                self.downloader.submit(&url, range, chunk_key, on_done);
+                // Submit without holding self.sources — the cancellation
+                // path invokes `on_done`, which calls complete_source and
+                // re-locks self.sources.
+                let liveness = self.source_liveness_fn(&source_key);
+                self.downloader.submit(&url, range, chunk_key, liveness, on_done);
                 log::trace!("[{}] submitted (chunk {})", source_key, chunk_key);
                 RegisterResult::Queued
             }
@@ -1643,6 +1617,7 @@ impl Inner {
                 BackfillError::Transient(_) => "transient",
                 BackfillError::Permanent(_) => "permanent",
                 BackfillError::OutOfBounds => "oob",
+                BackfillError::Cancelled => "cancelled",
             },
         };
         log::trace!(
@@ -1688,11 +1663,11 @@ impl Inner {
                         deferred.extend_from_slice(rest);
                     }
                 }
-                self.task_queue.submit_durable(*first, Task::Extract);
+                self.task_queue.submit_durable(*first, EXTRACT_PRIORITY, Task::Extract);
             }
             _ => {
                 for w in ready {
-                    self.task_queue.submit_durable(w, Task::Extract);
+                    self.task_queue.submit_durable(w, EXTRACT_PRIORITY, Task::Extract);
                 }
             }
         }
@@ -1723,7 +1698,7 @@ impl Inner {
             // so culling the Extract by age would discard paid-for bytes and
             // force a re-download on the next visit. Late extraction is
             // strictly cheaper — it still persists all covered chunks.
-            self.task_queue.submit_durable(chunk_key, Task::Extract);
+            self.task_queue.submit_durable(chunk_key, EXTRACT_PRIORITY, Task::Extract);
         }
     }
 
@@ -1757,6 +1732,7 @@ impl Inner {
         let mut outcome_label = "ok";
         let mut fail_reason: Option<String> = None;
         let mut n_fills = 0usize;
+        let mut cancelled = false;
         match extract(&inputs) {
             Ok(fills) => {
                 n_fills = fills.len();
@@ -1798,20 +1774,14 @@ impl Inner {
             }
             Err(BackfillError::Transient(reason)) => {
                 outcome_label = "transient";
-                fail_reason = Some(reason.clone());
-                // Aged-out / cancelled fetches aren't a chunk failure — they
-                // just mean the viewport moved on before the source landed.
-                // Surface them as cancellations so they don't look like errors.
-                // A cancellation says nothing about the server, so it only
-                // gets the short cooldown: still-visible chunks are
-                // re-requested on the next paint instead of 10 s later.
-                if reason.contains("aged out") {
-                    log::trace!("[{}] cancelled: {}", key, reason);
-                    failure_state = Some(short_cooldown());
-                } else {
-                    log::debug!("[{}] transient: {}", key, reason);
-                    failure_state = Some(cooldown());
-                }
+                log::debug!("[{}] transient: {}", key, reason);
+                fail_reason = Some(reason);
+                failure_state = Some(cooldown());
+            }
+            Err(BackfillError::Cancelled) => {
+                // Nobody wanted the sources any more: not a failure.
+                outcome_label = "cancelled";
+                cancelled = true;
             }
         }
         // Drop our inputs so the per-source payloads (mmaps in the
@@ -1835,8 +1805,20 @@ impl Inner {
             }));
         }
 
+        if cancelled {
+            // Back to requestable, no cooldown: the next paint that wants
+            // these chunks dispatches them again.
+            for k in std::iter::once(&key).chain(covered.iter()) {
+                self.map.remove_if(k, |_, s| matches!(s.as_ref(), ChunkState::Pending { .. }));
+                self.interest.remove(k);
+            }
+            self.queue_deferred(&order);
+            return;
+        }
+
         let new_state = primary_state.unwrap_or_else(|| failure_state.clone().unwrap_or_else(cooldown));
         self.map.insert(key, new_state.clone());
+        self.interest.remove(&key);
         self.publish_terminal(key, &new_state);
 
         // Promote siblings to their terminal states. The set of keys we
@@ -1855,14 +1837,14 @@ impl Inner {
             if touched.contains(c) {
                 continue;
             }
-            // A covered slot that the extract didn't fill — leave it as
-            // a short cooldown so the next dispatch (post-cooldown) will
-            // re-plan instead of being stuck on a stale Pending. On
-            // extract failure we use the same fallback state as the
-            // primary; on success this is an unexpected gap we surface
-            // with a short cooldown.
-            let s = failure_state.clone().unwrap_or_else(short_cooldown);
+            // A covered slot that the extract didn't fill — leave it in
+            // cooldown so the next dispatch (post-cooldown) will re-plan
+            // instead of being stuck on a stale Pending. On extract
+            // failure we use the same fallback state as the primary; on
+            // success this is an unexpected gap.
+            let s = failure_state.clone().unwrap_or_else(cooldown);
             self.map.insert(*c, s);
+            self.interest.remove(c);
         }
 
         // Queue the extracts deferred behind this batch. On success their
@@ -1890,7 +1872,7 @@ impl Inner {
                 }
             };
             for chunk in deferred {
-                self.task_queue.submit_durable(chunk, Task::Extract);
+                self.task_queue.submit_durable(chunk, EXTRACT_PRIORITY, Task::Extract);
             }
         }
     }
@@ -2006,38 +1988,24 @@ impl Inner {
         }
     }
 
-    /// Handle a task entry that the queue culled by age. Acts
-    /// as if the task ran and failed transiently:
-    /// `FetchSource` resolves with a Transient error so waiters back off;
-    /// `Extract` just cleans up progress and reverts the chunk to cooldown.
-    fn cancel_dropped_task(self: &Arc<Self>, entry: QueueEntry<Task>, reason: &str) {
+    /// Cancel a task whose leases all died: its source resolves as
+    /// `Cancelled`, so waiting chunks become requestable again.
+    fn cancel_dead_task(self: &Arc<Self>, entry: QueueEntry<Task>) {
         if super::netlog::enabled() {
-            // An aged-out Extract is the expensive case: its sources were
-            // already downloaded and their payloads get dropped without
-            // producing a single chunk — the next request re-downloads.
             super::netlog::emit(serde_json::json!({
                 "t": super::netlog::now_ms(),
-                "event": "task_aged_out",
-                "kind": match &entry.item {
-                    Task::FetchSource { .. } => "fetch_source",
-                    Task::Extract => "extract",
-                },
+                "event": "task_cancelled",
                 "chunk": format!("{:?}", entry.chunk),
                 "queued_ms": entry.submitted_at.elapsed().as_millis() as u64,
-                "touches": entry.touch_count,
+                "refiles": entry.refiles,
             }));
         }
         match entry.item {
             Task::FetchSource { key, fetch: _ } => {
-                log::trace!("[{}] cancel: {}", key, reason);
-                self.complete_source(key, Err(BackfillError::Transient(reason.into())));
+                log::trace!("[{}] cancelled", key);
+                self.complete_source(key, Err(BackfillError::Cancelled));
             }
-            Task::Extract => {
-                let chunk_key = entry.chunk;
-                log::debug!("[{}] dropped: {}", chunk_key, reason);
-                self.discard_progress(chunk_key);
-                self.map.insert(chunk_key, short_cooldown());
-            }
+            Task::Extract => unreachable!("extracts are durable"),
         }
     }
 
@@ -2154,11 +2122,11 @@ impl Inner {
 
 fn worker_loop(inner: Arc<Inner>) {
     loop {
-        let (entry, dropped) = inner.task_queue.pop();
-        for d in dropped {
-            inner.cancel_dropped_task(d, "stale on pop");
+        let (entry, dead) = inner.task_queue.pop();
+        for d in dead {
+            inner.cancel_dead_task(d);
         }
-        // Culling drained the queue; go back to waiting for new work.
+        // Only cancellations this time; go back to waiting for new work.
         let Some(entry) = entry else {
             continue;
         };

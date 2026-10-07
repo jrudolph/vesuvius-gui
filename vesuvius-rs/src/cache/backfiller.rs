@@ -21,6 +21,9 @@ pub enum BackfillError {
     Transient(String),
     /// Permanent failure — the backfiller is sure this chunk will never load.
     Permanent(String),
+    /// A source fetch was cancelled because nobody wanted it any more. Not
+    /// a failure: the chunk becomes requestable again, no cooldown.
+    Cancelled,
 }
 
 impl std::fmt::Display for BackfillError {
@@ -29,6 +32,7 @@ impl std::fmt::Display for BackfillError {
             BackfillError::OutOfBounds => write!(f, "out of bounds"),
             BackfillError::Transient(s) => write!(f, "transient: {}", s),
             BackfillError::Permanent(s) => write!(f, "permanent: {}", s),
+            BackfillError::Cancelled => write!(f, "cancelled"),
         }
     }
 }

@@ -5,13 +5,15 @@
 //! Wrap a paint in [`capture`]; every unified-cache lookup on this thread
 //! that misses its target chunk records it. An empty report means the paint
 //! drew final data everywhere — Empty chunks and out-of-volume samples count
-//! as complete.
+//! as complete. Under a [`Lease`], every chunk the paint requests (target or
+//! coarser) records the lease as wanting it, which keeps its fetch queued
+//! at the lease's priority (see `lease.rs`).
 //!
 //! A kept report then drives refreshes instead of a re-render timer:
 //! [`PaintReport::poll`] says whether one of its missing chunks (or a finer
 //! fallback than the one used) has landed since the paint started, and
-//! optionally renews the missing chunks' fetches so they don't age out of
-//! the queues while nothing re-paints. Landings bump a global epoch, so
+//! optionally re-requests missing chunks whose fetch failed and whose
+//! cooldown is over — nothing else re-paints them meanwhile. Landings bump a global epoch, so
 //! polling is a single atomic load until something actually arrives, and
 //! call the [`set_landing_hook`] (rate-limited) so an idle GUI wakes up.
 //!
@@ -22,6 +24,7 @@
 //! context argument — see plans/demand-driven-loading.md.
 
 use super::cache::ChunkCache;
+use super::lease::Lease;
 use super::state::ChunkKey;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,6 +50,11 @@ pub struct PaintReport {
     /// improve the paint too.
     pub missing: fxhash::FxHashMap<MissingChunk, Option<u8>>,
     caches: Vec<ChunkCache>,
+    /// The lease the paint ran under.
+    lease: Option<Arc<Lease>>,
+    /// (cache id, chunk) pairs that already recorded `lease` during the
+    /// paint. Emptied when the paint ends.
+    attached: fxhash::FxHashSet<(usize, ChunkKey)>,
     /// The paint was cancelled before it ran. Incomplete, but `poll` never
     /// asks to repeat it (nobody shows it).
     failed: bool,
@@ -84,16 +92,18 @@ impl PaintReport {
     /// report's paint: a missing chunk, or a finer fallback for one, has
     /// landed since. Cheap when nothing landed anywhere (one atomic load).
     ///
-    /// Every `renew_every`, also keeps the missing chunks' fetches alive
-    /// (`ChunkCache::renew`) — the paint that would otherwise do that isn't
-    /// happening. Call it only while the painted region is on screen.
+    /// Every `renew_every`, also re-requests the missing chunks under the
+    /// paint's lease (`ChunkCache::renew`): ones whose fetch failed are
+    /// dispatched again once their cooldown is over. Call it only while the
+    /// painted region is on screen.
     pub fn poll(&self, renew_every: Duration) -> bool {
         if self.failed || self.missing.is_empty() {
             return false;
         }
         let now_ms = clock_ms();
         let last = self.renewed_at_ms.load(Ordering::Relaxed);
-        let renew = now_ms.saturating_sub(last) >= renew_every.as_millis() as u64
+        let renew = self.lease.is_some()
+            && now_ms.saturating_sub(last) >= renew_every.as_millis() as u64
             && self
                 .renewed_at_ms
                 .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
@@ -107,8 +117,8 @@ impl PaintReport {
         for (m, fallback) in &self.missing {
             let cache = self.cache(m.cache).expect("missing chunk's cache was recorded with it");
             let k = m.key;
-            if renew {
-                if cache.renew(k).is_terminal() {
+            if let (true, Some(lease)) = (renew, &self.lease) {
+                if cache.renew(k, lease).is_terminal() {
                     return true;
                 }
             } else if terminal(cache, k) {
@@ -141,7 +151,8 @@ struct ScopeGuard {
 impl ScopeGuard {
     fn finish(&mut self) -> PaintReport {
         let prev = self.prev.take().expect("finished once");
-        let report = SCOPE.with(|s| std::mem::replace(&mut *s.borrow_mut(), prev)).unwrap_or_default();
+        let mut report = SCOPE.with(|s| std::mem::replace(&mut *s.borrow_mut(), prev)).unwrap_or_default();
+        report.attached = Default::default();
         // Nested scopes also count towards the outer one.
         SCOPE.with(|s| {
             if let Some(outer) = s.borrow_mut().as_mut() {
@@ -167,9 +178,11 @@ impl Drop for ScopeGuard {
     }
 }
 
-/// Run `f` (a paint) and report the target chunks it couldn't use.
-pub fn capture<R>(f: impl FnOnce() -> R) -> (R, PaintReport) {
+/// Run `f` (a paint) under `lease` and report the target chunks it
+/// couldn't use.
+pub fn capture<R>(lease: Option<Arc<Lease>>, f: impl FnOnce() -> R) -> (R, PaintReport) {
     let fresh = PaintReport {
+        lease,
         // Anything landing from here on may have been missed by the paint.
         seen_epoch: AtomicU64::new(LANDED_EPOCH.load(Ordering::Acquire)),
         renewed_at_ms: AtomicU64::new(clock_ms()),
@@ -189,6 +202,17 @@ fn merge(report: &mut PaintReport, m: MissingChunk, fallback: Option<u8>) {
         (Some(a), Some(b)) => Some(a.max(b)),
         _ => None,
     };
+}
+
+/// The current scope's lease, if `key` (in cache `cache`) hasn't recorded
+/// it yet during this paint.
+pub(super) fn lease_to_attach(cache: usize, key: ChunkKey) -> Option<Arc<Lease>> {
+    SCOPE.with(|s| {
+        let mut s = s.borrow_mut();
+        let report = s.as_mut()?;
+        let lease = report.lease.clone()?;
+        report.attached.insert((cache, key)).then_some(lease)
+    })
 }
 
 /// Record a missed target chunk in the current scope, if any. `fallback`

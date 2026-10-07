@@ -4,25 +4,23 @@
 //! plus a thread pool that's sized for HTTP concurrency rather than CPU
 //! concurrency.
 //!
-//! ## LIFO queue + age pruning
+//! ## Priority queue + lease liveness
 //!
-//! Jobs feed the shared `LifoQueue` (see `lifo.rs`). The paint loop
-//! re-submits / re-touches what it wants every frame, so the queue head
-//! stays aligned with the current viewport without any priority sorting.
-//! The queue is unbounded — cache-layer dedup (one entry per source key
-//! in `self.sources`) means we never submit the same URL twice, and the
-//! only staleness check is age: jobs older than `MAX_AGE` are cancelled
-//! at pop with a Transient error so the cache rolls the chunk back to a
-//! short cooldown.
+//! Jobs feed a `WorkQueue` (see `work_queue.rs`): highest-priority lease
+//! first, newest first among equals. The queue is unbounded — cache-layer
+//! dedup (one entry per source key in `self.sources`) means we never
+//! submit the same URL twice. A job whose leases have all died is cancelled
+//! at pop (`DownloadError::Cancelled`), and the cache makes its chunks
+//! requestable again.
 
-use super::lifo::LifoQueue;
+use super::lease::LivenessFn;
 use super::netlog;
 use super::s3_auth::{self, S3Signer};
 use super::state::ChunkKey;
-use super::MAX_AGE;
+use super::work_queue::WorkQueue;
 use dashmap::DashMap;
 use reqwest::blocking::Client;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -58,9 +56,10 @@ fn s3_signing_enabled() -> bool {
 
 #[derive(Debug, Clone)]
 pub enum DownloadError {
-    /// Transport failure, 5xx, queue rejection, or stale-on-pop. Caller may
-    /// retry.
+    /// Transport failure or 5xx. Caller may retry.
     Transient(String),
+    /// Nobody wants it any more (its leases died before it was fetched).
+    Cancelled,
 }
 
 /// Successful bodies are delivered as `bytes::Bytes` — the zero-copy
@@ -75,7 +74,7 @@ pub struct Downloader {
 }
 
 struct DownloaderInner {
-    queue: LifoQueue<Job>,
+    queue: WorkQueue<Job>,
     /// Chunks with at least one HTTP GET currently in flight on a worker.
     /// Value is the count of concurrent in-flight downloads for that chunk
     /// (a chunk's backfill plan may issue multiple source URLs). Entries are
@@ -99,7 +98,7 @@ struct Counters {
     completed: AtomicU64,
     not_found: AtomicU64,
     failed: AtomicU64,
-    aged_out: AtomicU64,
+    cancelled: AtomicU64,
     bytes: AtomicU64,
 }
 
@@ -109,7 +108,7 @@ struct Counters {
 pub struct DownloaderStats {
     /// HTTP GETs currently on the wire.
     pub in_flight: usize,
-    /// Jobs waiting in the LIFO queue (not yet popped by a worker).
+    /// Jobs waiting in the queue (not yet popped by a worker).
     pub queued: usize,
     pub submitted: u64,
     /// 200/206 responses with a body.
@@ -118,8 +117,8 @@ pub struct DownloaderStats {
     pub not_found: u64,
     /// Transport errors and other statuses.
     pub failed: u64,
-    /// Culled at pop for exceeding `MAX_AGE` without being fetched.
-    pub aged_out: u64,
+    /// Cancelled at pop: every lease behind the job had died.
+    pub cancelled: u64,
     /// Body bytes received across all completed GETs.
     pub bytes: u64,
 }
@@ -138,23 +137,12 @@ impl Downloader {
     }
 
     pub fn with_workers(workers: usize) -> Self {
-        Self::with_settings(workers, MAX_AGE, Arc::new(AtomicBool::new(true)))
-    }
-
-    /// Construct with a caller-owned cull flag so the cache can share one
-    /// `Arc<AtomicBool>` across the downloader queue and its task queue and
-    /// toggle both with a single `ChunkCache::set_culling`.
-    pub fn with_shared_cull(cull_enabled: Arc<AtomicBool>) -> Self {
-        Self::with_settings(configured_http_workers(), MAX_AGE, cull_enabled)
-    }
-
-    pub fn with_settings(workers: usize, max_age: Duration, cull_enabled: Arc<AtomicBool>) -> Self {
         // Resolve S3 credentials once up front (blocks briefly on the first
         // STS/IRSA exchange) so workers can sign without async credential I/O.
         let signer = if s3_signing_enabled() { S3Signer::try_new() } else { None };
 
         let inner = Arc::new(DownloaderInner {
-            queue: LifoQueue::new(max_age, cull_enabled),
+            queue: WorkQueue::new(),
             active: DashMap::new(),
             in_flight: AtomicUsize::new(0),
             counters: Counters::default(),
@@ -203,18 +191,25 @@ impl Downloader {
 
     /// Non-blocking submission. The queue is unbounded — dedup happens at
     /// the cache's source map — so submission always succeeds; the only
-    /// way a job dies unprocessed is the MAX_AGE cull at pop, which
-    /// invokes `on_done` with a Transient error.
+    /// way a job dies unprocessed is cancellation at pop once `liveness`
+    /// says nobody wants it, which invokes `on_done` with `Cancelled`.
     ///
-    /// `chunk` is the cache chunk this download is on behalf of (used for
-    /// logging + the in-flight counter — the downloader doesn't otherwise
-    /// schedule based on it). `range`, when `Some((offset, len))`, becomes
-    /// a `Range: bytes=offset-(offset+len-1)` header on the request; 206
-    /// Partial Content is accepted as success.
-    pub fn submit(&self, url: &str, range: Option<(u64, u64)>, chunk: ChunkKey, on_done: OnDone) {
+    /// `chunk` is the cache chunk this download was first requested for
+    /// (logging + the in-flight counter). `range`, when
+    /// `Some((offset, len))`, becomes a `Range: bytes=offset-(offset+len-1)`
+    /// header on the request; 206 Partial Content is accepted as success.
+    pub fn submit(
+        &self,
+        url: &str,
+        range: Option<(u64, u64)>,
+        chunk: ChunkKey,
+        liveness: LivenessFn,
+        on_done: OnDone,
+    ) {
         self.inner.counters.submitted.fetch_add(1, Ordering::Relaxed);
         self.inner.queue.submit(
             chunk,
+            liveness,
             Job {
                 url: url.to_string(),
                 range,
@@ -232,15 +227,6 @@ impl Downloader {
         self.inner.active.contains_key(&chunk)
     }
 
-    /// Refresh every queued download for `chunk`: bump seq (moving it
-    /// to the head of the LIFO queue) and reset `added_at` so MAX_AGE
-    /// re-counts from now. No-op when the chunk has no queued downloads.
-    /// Called from the cache's `state_or_fetch` on every paint poll so
-    /// the queue head tracks the current viewport.
-    pub fn touch(&self, chunk: ChunkKey) {
-        self.inner.queue.touch(chunk);
-    }
-
     /// Snapshot of live gauges and cumulative counters. Takes the queue
     /// lock once (for `queued`); cheap enough to call per frame.
     pub fn stats(&self) -> DownloaderStats {
@@ -252,7 +238,7 @@ impl Downloader {
             completed: c.completed.load(Ordering::Relaxed),
             not_found: c.not_found.load(Ordering::Relaxed),
             failed: c.failed.load(Ordering::Relaxed),
-            aged_out: c.aged_out.load(Ordering::Relaxed),
+            cancelled: c.cancelled.load(Ordering::Relaxed),
             bytes: c.bytes.load(Ordering::Relaxed),
         }
     }
@@ -302,34 +288,31 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
     loop {
         let (entry, dropped) = inner.queue.pop();
         for d in dropped {
-            // Stale by age — cancel so the cache rolls the chunk back to
-            // a cooldown.
-            log::trace!("[{}] aged out", d.item.url);
-            inner.counters.aged_out.fetch_add(1, Ordering::Relaxed);
+            // Nobody wants it any more.
+            log::trace!("[{}] cancelled", d.item.url);
+            inner.counters.cancelled.fetch_add(1, Ordering::Relaxed);
             if netlog::enabled() {
                 netlog::emit(serde_json::json!({
                     "t": netlog::now_ms(),
-                    "event": "aged_out",
+                    "event": "cancelled",
                     "host": url_host(&d.item.url),
                     "url": d.item.url,
                     "chunk": format!("{:?}", d.chunk),
                     "range_off": d.item.range.map(|(off, _)| off),
                     "queued_ms": d.submitted_at.elapsed().as_millis() as u64,
-                    "touches": d.touch_count,
+                    "refiles": d.refiles,
                 }));
             }
-            (d.item.on_done)(Err(DownloadError::Transient("aged out".into())));
+            (d.item.on_done)(Err(DownloadError::Cancelled));
         }
-        // Culling drained the queue; go back to waiting for new work.
+        // Only cancellations this time; go back to waiting for new work.
         let Some(entry) = entry else {
             continue;
         };
+        let wait_ms = entry.submitted_at.elapsed().as_millis() as u64;
+        let refiles = entry.refiles;
         let chunk = entry.chunk;
         let job = entry.item;
-        // Queue wait split two ways: since the last touch (how long the
-        // *current* viewport waited) and since first submission.
-        let wait_ms = entry.added_at.elapsed().as_millis() as u64;
-        let wait_total_ms = entry.submitted_at.elapsed().as_millis() as u64;
         let q_depth = if netlog::enabled() { inner.queue.len() } else { 0 };
 
         let t0 = Instant::now();
@@ -437,8 +420,7 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
                 "ok": outcome.is_ok(),
                 "x_cache": cdn_cache,
                 "wait_ms": wait_ms,
-                "wait_total_ms": wait_total_ms,
-                "touches": entry.touch_count,
+                "refiles": refiles,
                 "ttfb_ms": ttfb_ms,
                 "body_ms": body_ms,
                 "bytes": got_bytes,

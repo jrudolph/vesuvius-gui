@@ -328,11 +328,12 @@ impl NativeSample for Vec<u8> {
 }
 
 /// Short-circuit an extract on the worst error among `outcomes`:
-/// any permanent (or out-of-bounds) failure dominates, otherwise the
-/// first transient one is surfaced. `Ok(())` means every source either
+/// any permanent (or out-of-bounds) failure dominates, then the first
+/// transient one, then a cancellation. `Ok(())` means every source either
 /// loaded or was definitively absent.
 pub(super) fn triage_outcomes(outcomes: &[SourceOutcome]) -> Result<(), BackfillError> {
     let mut transient: Option<String> = None;
+    let mut cancelled = false;
     for o in outcomes {
         if let Err(e) = o {
             match e {
@@ -343,11 +344,13 @@ pub(super) fn triage_outcomes(outcomes: &[SourceOutcome]) -> Result<(), Backfill
                         transient = Some(s.clone());
                     }
                 }
+                BackfillError::Cancelled => cancelled = true,
             }
         }
     }
     match transient {
         Some(s) => Err(BackfillError::Transient(s)),
+        None if cancelled => Err(BackfillError::Cancelled),
         None => Ok(()),
     }
 }

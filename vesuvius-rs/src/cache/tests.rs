@@ -1344,15 +1344,15 @@ fn paint_report_records_merges_and_polls_landings() {
     let a = ChunkKey::new(0, 1, 0, 0);
 
     super::paint_scope::record(&cache, ChunkKey::new(0, 0, 0, 0), None); // no scope: dropped
-    let ((), report) = capture(|| {
+    let ((), report) = capture(None, || {
         super::paint_scope::record(&cache, a, Some(2));
-        let ((), inner) = capture(|| super::paint_scope::record(&cache, ChunkKey::new(0, 2, 0, 0), None));
+        let ((), inner) = capture(None, || super::paint_scope::record(&cache, ChunkKey::new(0, 2, 0, 0), None));
         assert_eq!(inner.missing.len(), 1);
         super::paint_scope::record(&cache, a, Some(3)); // duplicate, worse fallback
     });
     assert_eq!(report.missing.len(), 2);
     assert_eq!(report.missing[&MissingChunk { cache: cache.id(), key: a }], Some(3));
-    let ((), empty) = capture(|| ());
+    let ((), empty) = capture(None, || ());
     assert!(empty.is_complete());
     assert!(!PaintReport::failed().is_complete());
     assert!(!PaintReport::failed().poll(Duration::from_secs(60)));

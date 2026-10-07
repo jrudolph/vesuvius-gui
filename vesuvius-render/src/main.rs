@@ -1277,13 +1277,8 @@ fn build_cache(volume_arg: &str, cache_root: PathBuf) -> Result<ChunkCache> {
     // mmap with no chunk-state probe / DashMap lookup (the dominant per-voxel
     // cost in the render profile), like the composite-along-normal fast path.
     cache.set_assume_resident(true);
-    // Never cull queued fetches by age. The ensure stage dispatches exactly
-    // the chunks each tile samples and blocks until they land, but a slow link
-    // (or a composite tile's thick slab of chunks) can leave a wanted fetch
-    // queued past MAX_AGE. Culling it there would strand the chunk in a
-    // cooldown — the ensure stage would then spin to its timeout (hang) or
-    // paint incomplete data, and the bytes would never persist for the next run.
-    cache.set_culling(false);
+    // Queued fetches are never cancelled here: the renderer paints without
+    // leases, so everything it requests is unleased (durable).
     Ok(cache)
 }
 

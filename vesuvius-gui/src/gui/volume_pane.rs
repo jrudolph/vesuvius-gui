@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
+use vesuvius_rs::cache::lease::{self, Lease, Priority};
 use vesuvius_rs::cache::paint_scope::{self, PaintReport};
 use vesuvius_rs::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
 
@@ -263,18 +264,33 @@ enum AsyncTexture {
     Loading {
         future: Arc<Mutex<CancellableImageFuture>>,
         started_at: quanta::Instant,
+        lease: Arc<Lease>,
     },
     Ready {
         texture: egui::TextureHandle,
         cached_at: quanta::Instant,
         report: Arc<PaintReport>, // What the shown render fell back on
+        lease: Arc<Lease>,
     },
     ReadyRecalculating {
         texture: egui::TextureHandle,
         future: Arc<Mutex<CancellableImageFuture>>,
         cached_at: quanta::Instant,
         report: Arc<PaintReport>, // What the shown render fell back on
+        lease: Arc<Lease>,
     },
+}
+
+impl AsyncTexture {
+    /// The tile's interest in the chunks its renders request (see
+    /// `vesuvius_rs::cache::lease`); one per tile, across re-renders.
+    fn lease(&self) -> &Arc<Lease> {
+        match self {
+            AsyncTexture::Loading { lease, .. }
+            | AsyncTexture::Ready { lease, .. }
+            | AsyncTexture::ReadyRecalculating { lease, .. } => lease,
+        }
+    }
 }
 
 /// Whether a shown tile should be rendered again.
@@ -283,6 +299,15 @@ enum Refresh {
     /// Not yet; look again within this long (keep frames coming), or, with
     /// `None`, whenever the next frame happens.
     Later(Option<Duration>),
+}
+
+/// Fetch priority of a tile: its ring around the pane centre, in tiles
+/// (Chebyshev distance; 0 = the centre tile). Works the same for volume and
+/// surface panes since tiles are laid out in screen space.
+fn ring_priority(tile_rect: &egui::Rect, frame_width: usize, frame_height: usize) -> Priority {
+    let centre = egui::pos2(frame_width as f32 / 2.0, frame_height as f32 / 2.0);
+    let d = (tile_rect.center() - centre).abs();
+    (d.x / tile_rect.width()).max(d.y / tile_rect.height()).round() as Priority
 }
 
 /// Wake `ctx` when chunks land, so tiles waiting for them refresh without
@@ -528,6 +553,8 @@ impl VolumePane {
         let frame_height = cell_size.y as usize;
 
         budget.begin_pane(pane_share);
+        // Tiles not renewed for a few frames from here on lose their queued fetches.
+        lease::advance_frame(ui.ctx().cumulative_pass_nr());
 
         // Get or create tiles
         let tiles = self.get_or_create_tiles(
@@ -695,13 +722,15 @@ impl VolumePane {
             })
             .collect::<Vec<_>>();
 
-        for (key, _) in keys_and_rects.iter() {
-            self.ensure_tile_async(ui, key.clone(), world, overlay);
+        let priority = |rect: &egui::Rect| ring_priority(rect, frame_width, frame_height);
+        for (key, rect) in keys_and_rects.iter() {
+            self.ensure_tile_async(ui, key.clone(), world, overlay, priority(rect));
         }
 
         let mut ready_tiles = Vec::new();
         for (key, tile_rect) in keys_and_rects {
-            for (texture, sub_rect, uv) in self.get_or_create_tile_async(ui, key, world, overlay, budget) {
+            let priority = priority(&tile_rect);
+            for (texture, sub_rect, uv) in self.get_or_create_tile_async(ui, key, world, overlay, priority, budget) {
                 // sub_rect is in [0,1]^2 tile-local space; map it into the on-screen tile_rect.
                 let screen_rect = egui::Rect::from_min_size(
                     tile_rect.min
@@ -713,7 +742,14 @@ impl VolumePane {
         }
         ready_tiles
     }
-    fn ensure_tile_async(&self, ui: &Ui, key: TileCacheKey, world: &Volume, overlay: Option<&Volume>) {
+    fn ensure_tile_async(
+        &self,
+        ui: &Ui,
+        key: TileCacheKey,
+        world: &Volume,
+        overlay: Option<&Volume>,
+        priority: Priority,
+    ) {
         // Check if tile exists in cache
         let cached_value = ui.memory_mut(|mem| {
             let cache: &mut TileCache = mem.caches.cache::<TileCache>();
@@ -728,7 +764,8 @@ impl VolumePane {
 
         match cached_value {
             None => {
-                let handle = self.create_tile_async(&key, world, overlay);
+                let lease = Lease::new(priority);
+                let handle = self.create_tile_async(&key, world, overlay, &lease);
 
                 set(
                     ui,
@@ -736,6 +773,7 @@ impl VolumePane {
                     AsyncTexture::Loading {
                         future: handle,
                         started_at: quanta::Instant::now(),
+                        lease,
                     },
                 );
             }
@@ -749,10 +787,9 @@ impl VolumePane {
         key: TileCacheKey,
         world: &Volume,
         overlay: Option<&Volume>,
+        priority: Priority,
         budget: &FrameBudget,
     ) -> Vec<TileDraw> {
-        // Calculate paint_zoom for cache key (same logic as in create_tile)
-
         // Check if tile exists in cache
         let cached_value = ui.memory_mut(|mem| {
             let cache: &mut TileCache = mem.caches.cache::<TileCache>();
@@ -760,6 +797,10 @@ impl VolumePane {
             // Clone the cached value to avoid borrow conflicts
             cache.get(&key).cloned()
         });
+        // On screen this frame: keep the tile's requests queued, at its
+        // current priority. A lease that had died got its queued fetches
+        // cancelled, so a shown tile has to ask again.
+        let revived = cached_value.as_ref().is_some_and(|t| t.lease().renew(priority));
         fn set(ui: &Ui, key: TileCacheKey, value: AsyncTexture) {
             ui.memory_mut(|mem| {
                 let cache: &mut TileCache = mem.caches.cache::<TileCache>();
@@ -772,12 +813,18 @@ impl VolumePane {
                 texture,
                 cached_at,
                 report,
+                lease,
             }) => {
                 let missing = report.missing_count() as u32;
-                match refresh_due(cached_at, &report) {
+                let refresh = if revived && !report.is_complete() {
+                    Refresh::Now
+                } else {
+                    refresh_due(cached_at, &report)
+                };
+                match refresh {
                     Refresh::Now => {
                         // Start recalculation while showing the old tile
-                        let new_future = self.create_tile_async(&key, world, overlay);
+                        let new_future = self.create_tile_async(&key, world, overlay, &lease);
                         set(
                             ui,
                             key.clone(),
@@ -786,6 +833,7 @@ impl VolumePane {
                                 future: new_future,
                                 cached_at,
                                 report,
+                                lease: lease.clone(),
                             },
                         );
                         ui.ctx().request_repaint();
@@ -802,6 +850,7 @@ impl VolumePane {
                                 texture: texture.clone(),
                                 cached_at,
                                 report,
+                                lease: lease.clone(),
                             },
                         );
                     }
@@ -815,6 +864,7 @@ impl VolumePane {
                 future,
                 cached_at,
                 report,
+                lease,
             }) => {
                 let missing = report.missing_count() as u32;
                 // Skip the recalc peek entirely if the frame deadline is gone.
@@ -827,6 +877,7 @@ impl VolumePane {
                             future,
                             cached_at,
                             report,
+                            lease: lease.clone(),
                         },
                     );
                     ui.ctx().request_repaint();
@@ -857,6 +908,7 @@ impl VolumePane {
                                 texture: new_texture.clone(),
                                 cached_at: quanta::Instant::now(),
                                 report: rendered.report.clone(),
+                                lease: lease.clone(),
                             },
                         );
                         budget.record_tile(TileOutcome::Ready {
@@ -874,6 +926,7 @@ impl VolumePane {
                                 future: future.clone(),
                                 cached_at,
                                 report,
+                                lease: lease.clone(),
                             },
                         );
                         ui.ctx().request_repaint(); // Check again next frame
@@ -883,12 +936,24 @@ impl VolumePane {
                 }
             }
 
-            Some(AsyncTexture::Loading { future, started_at }) => {
+            Some(AsyncTexture::Loading {
+                future,
+                started_at,
+                lease,
+            }) => {
                 // Pull this tile's poll timeout from the frame budget. If the
                 // budget has run out for this frame, skip polling entirely and
                 // try again next frame.
                 let Some(timeout) = budget.next_poll_timeout() else {
-                    set(ui, key.clone(), AsyncTexture::Loading { future, started_at });
+                    set(
+                        ui,
+                        key.clone(),
+                        AsyncTexture::Loading {
+                            future,
+                            started_at,
+                            lease,
+                        },
+                    );
                     ui.ctx().request_repaint();
                     log::info!(
                         "cross-mip: trigger=loading_no_budget pane={:?} tile=({},{}) paint_zoom={}",
@@ -922,6 +987,7 @@ impl VolumePane {
                                 texture: texture.clone(),
                                 cached_at: quanta::Instant::now(),
                                 report: rendered.report.clone(),
+                                lease: lease.clone(),
                             },
                         );
                         budget.record_tile(TileOutcome::Ready {
@@ -937,6 +1003,7 @@ impl VolumePane {
                             AsyncTexture::Loading {
                                 future: future.clone(),
                                 started_at,
+                                lease: lease.clone(),
                             },
                         );
                         ui.ctx().request_repaint();
@@ -956,7 +1023,8 @@ impl VolumePane {
 
             None => {
                 // Start async rendering
-                let handle = self.create_tile_async(&key, world, overlay);
+                let lease = Lease::new(priority);
+                let handle = self.create_tile_async(&key, world, overlay, &lease);
 
                 set(
                     ui,
@@ -964,6 +1032,7 @@ impl VolumePane {
                     AsyncTexture::Loading {
                         future: handle,
                         started_at: quanta::Instant::now(),
+                        lease,
                     },
                 );
                 ui.ctx().request_repaint();
@@ -1121,7 +1190,9 @@ impl VolumePane {
         key: &TileCacheKey,
         world: &Volume,
         overlay: Option<&Volume>,
+        lease: &Arc<Lease>,
     ) -> Arc<Mutex<CancellableImageFuture>> {
+        let lease = lease.clone();
         let pane_type = self.pane_type;
         let is_segment_pane = self.is_segment_pane;
         let key_clone = key.clone();
@@ -1140,7 +1211,7 @@ impl VolumePane {
             // The whole tile render runs on this thread, so the paint scope
             // sees every cache lookup it makes (base, overlay, all levels).
             let (image, report) =
-                paint_scope::capture(|| volume_pane.create_tile_sync(&key_clone, shared(), overlay));
+                paint_scope::capture(Some(lease), || volume_pane.create_tile_sync(&key_clone, shared(), overlay));
             Arc::new(RenderedTile {
                 image,
                 report: Arc::new(report),

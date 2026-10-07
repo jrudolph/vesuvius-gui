@@ -11,7 +11,7 @@
 //! gauges/counters, render time, pane coverage and a content hash. Scripted
 //! view changes (pan, drag, zoom, goto) and `run_until_settled` turn that into
 //! per-phase reports ([`PhaseReport`]): time to full coverage, time to all
-//! tiles ready, time to settle, bytes moved, aged-out downloads, frame cost.
+//! tiles ready, time to settle, bytes moved, cancelled downloads, frame cost.
 //!
 //! Interaction is applied by mutating coord/zoom between frames — the same
 //! state `VolumePane::handle_drag`/`handle_scroll` would mutate — so no
@@ -223,7 +223,7 @@ pub struct PhaseReport {
     pub max_queued: usize,
     /// Chunks still Pending at the end of the phase.
     pub pending_at_end: Option<usize>,
-    /// Chunks in cooldown (failed / aged out, not re-requested) at the end.
+    /// Chunks in cooldown (failed, not re-requested) at the end.
     pub cooldown_at_end: Option<usize>,
     pub render_p50: Duration,
     pub render_p95: Duration,
@@ -253,7 +253,7 @@ impl PhaseReport {
                 "completed": d.completed,
                 "not_found": d.not_found,
                 "failed": d.failed,
-                "aged_out": d.aged_out,
+                "cancelled": d.cancelled,
                 "bytes": d.bytes,
             })),
             "max_in_flight": self.max_in_flight,
@@ -302,12 +302,12 @@ impl fmt::Display for PhaseReport {
             let mb = d.bytes as f64 / 1e6;
             writeln!(
                 f,
-                "  downloads: {} submitted, {} ok, {} not-found, {} failed, {} aged-out, {:.1} MB ({:.2} MB/s)",
+                "  downloads: {} submitted, {} ok, {} not-found, {} failed, {} cancelled, {:.1} MB ({:.2} MB/s)",
                 d.submitted,
                 d.completed,
                 d.not_found,
                 d.failed,
-                d.aged_out,
+                d.cancelled,
                 mb,
                 mb / self.duration.as_secs_f64().max(1e-9)
             )?;
@@ -351,6 +351,8 @@ pub struct PaneHarness {
     repaint_at: Arc<std::sync::Mutex<Option<Instant>>>,
     /// End of the current `run_*` call; bounds idle waits.
     run_until: Option<Instant>,
+    /// Set by `run_until_settled`: don't idle-wait once the view is complete.
+    return_when_settled: bool,
 }
 
 impl PaneHarness {
@@ -389,6 +391,7 @@ impl PaneHarness {
             phase_label: "start".to_string(),
             repaint_at,
             run_until: None,
+            return_when_settled: false,
         }
     }
 
@@ -516,10 +519,17 @@ impl PaneHarness {
             // Idle like eframe: wait for a repaint request, bounded by the
             // current run (or 1 s when called outside one).
             let limit = self.run_until.unwrap_or(next + Duration::from_secs(1));
+            let last = self.records.last().unwrap();
+            let settled = self.return_when_settled && last.all_complete() && !last.changed;
             loop {
                 let now = Instant::now();
                 let requested = *self.repaint_at.lock().unwrap();
                 if requested.is_some_and(|at| now >= at.max(next)) || now >= limit {
+                    break;
+                }
+                if settled && requested.is_none() {
+                    // Complete and nothing asked for another frame: this
+                    // would idle until input. Let the settle check see it.
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(2));
@@ -635,6 +645,7 @@ impl PaneHarness {
     pub fn run_until_settled(&mut self, timeout: Duration, quiet: Duration) -> Option<Duration> {
         let deadline = Instant::now() + timeout;
         self.run_until = Some(deadline);
+        self.return_when_settled = true;
         let mut last_change = self.start.elapsed();
         let result = loop {
             let r = self.frame().clone();
@@ -642,12 +653,17 @@ impl PaneHarness {
                 last_change = r.t;
             } else if r.t.saturating_sub(last_change) >= quiet {
                 break Some(last_change.saturating_sub(self.phase_t0()));
+            } else if self.opts.honor_repaint && self.repaint_at.lock().unwrap().is_none() {
+                // Complete, unchanged, and nothing asked for another frame:
+                // idle for good (without input), so no quiet period to wait out.
+                break Some(last_change.saturating_sub(self.phase_t0()));
             }
             if Instant::now() >= deadline {
                 break None;
             }
         };
         self.run_until = None;
+        self.return_when_settled = false;
         result
     }
 
@@ -722,7 +738,7 @@ impl PaneHarness {
             completed: d.completed - before.completed,
             not_found: d.not_found - before.not_found,
             failed: d.failed - before.failed,
-            aged_out: d.aged_out - before.aged_out,
+            cancelled: d.cancelled - before.cancelled,
             bytes: d.bytes - before.bytes,
         });
         PhaseReport {
@@ -772,7 +788,7 @@ impl PaneHarness {
             f,
             "frame,t_ms,render_ms,u,v,w,zoom,visible,ready,recalculating,loading_fallback,loading_blank,\
              budget_skipped,complete,missing_chunks,coverage,black,changed,repaint,dl_in_flight,dl_queued,dl_submitted,dl_completed,\
-             dl_not_found,dl_failed,dl_aged_out,dl_bytes,queued_tasks,pending_chunks,cooldown_chunks"
+             dl_not_found,dl_failed,dl_cancelled,dl_bytes,queued_tasks,pending_chunks,cooldown_chunks"
         )?;
         for r in &self.records {
             let d = r.downloads.unwrap_or_default();
@@ -804,7 +820,7 @@ impl PaneHarness {
                 d.completed,
                 d.not_found,
                 d.failed,
-                d.aged_out,
+                d.cancelled,
                 d.bytes,
                 r.queued_tasks.unwrap_or(0),
                 r.pending_chunks.unwrap_or(0),

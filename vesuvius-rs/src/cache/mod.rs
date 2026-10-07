@@ -16,7 +16,7 @@ mod backfiller;
 mod cache;
 mod disk;
 mod downloader;
-mod lifo;
+pub mod lease;
 mod netlog;
 pub mod paint_scope;
 mod s3_auth;
@@ -26,6 +26,7 @@ mod sidecar;
 mod spill;
 mod state;
 mod volume;
+mod work_queue;
 
 pub mod backfillers;
 
@@ -44,6 +45,3 @@ pub use volume::UnifiedVolume;
 pub const CHUNK_SIDE: usize = 64;
 pub const CHUNK_VOXELS: usize = CHUNK_SIDE * CHUNK_SIDE * CHUNK_SIDE;
 
-/// Queued work older than this is treated as stale and dropped at pop time.
-/// Shared between the cache's TaskQueue and the Downloader queue.
-pub(crate) const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(10);
