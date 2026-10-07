@@ -1772,12 +1772,16 @@ impl Inner {
                 // Aged-out / cancelled fetches aren't a chunk failure — they
                 // just mean the viewport moved on before the source landed.
                 // Surface them as cancellations so they don't look like errors.
+                // A cancellation says nothing about the server, so it only
+                // gets the short cooldown: still-visible chunks are
+                // re-requested on the next paint instead of 10 s later.
                 if reason.contains("aged out") {
                     log::trace!("[{}] cancelled: {}", key, reason);
+                    failure_state = Some(short_cooldown());
                 } else {
                     log::debug!("[{}] transient: {}", key, reason);
+                    failure_state = Some(cooldown());
                 }
-                failure_state = Some(cooldown());
             }
         }
         // Drop our inputs so the per-source payloads (mmaps in the

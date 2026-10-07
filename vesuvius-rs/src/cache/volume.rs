@@ -112,6 +112,10 @@ struct LocalSlot {
     /// while a resolved coarser parent is the best we have.
     target_key: Option<ChunkKey>,
     chosen: Option<(u8, Arc<ChunkState>)>,
+    /// Already-dispatched, still-missing chunks this paint has re-reported
+    /// to the cache (see `resolve_chunk`). Cleared per paint, so each such
+    /// chunk goes through `state_or_fetch` once per paint.
+    revisited: fxhash::FxHashSet<ChunkKey>,
 }
 
 impl Default for LocalSlot {
@@ -121,6 +125,7 @@ impl Default for LocalSlot {
             neighbor_shard: None,
             target_key: None,
             chosen: None,
+            revisited: Default::default(),
         }
     }
 }
@@ -170,6 +175,7 @@ impl UnifiedVolume {
         b.neighbor_shard = None;
         b.target_key = None;
         b.chosen = None;
+        b.revisited.clear();
     }
 
     /// Decompose a target-LOD chunk coord into `(shard_coord,
@@ -1122,12 +1128,26 @@ impl UnifiedVolume {
                     // DashMap. If the shard can't be opened, skip the
                     // dispatch too (`state_or_fetch` would fail the same
                     // way) and climb on.
-                    let dispatched = self
-                        .with_shard_slot(lod_try, shard, |slot| slot.dispatched.get(in_shard_idx))
-                        .unwrap_or(true);
-                    if !dispatched {
-                        let key = ChunkKey::new(lod_try, cx_try, cy_try, cz_try);
-                        let _ = self.cache.state_or_fetch(key);
+                    //
+                    // An already-dispatched chunk still goes through
+                    // `state_or_fetch` once per paint: that is what keeps a
+                    // still-wanted Pending fetch fresh in the queues (touch)
+                    // and re-dispatches one whose fetch was cancelled or
+                    // failed once its cooldown has passed. The bit alone
+                    // can't tell those apart from "in flight" — it also
+                    // outlives the fetch to mark the slot's preview as done.
+                    let dispatched = self.with_shard_slot(lod_try, shard, |slot| slot.dispatched.get(in_shard_idx));
+                    let key = ChunkKey::new(lod_try, cx_try, cy_try, cz_try);
+                    match dispatched {
+                        Some(false) => {
+                            let _ = self.cache.state_or_fetch(key);
+                        }
+                        Some(true) => {
+                            if self.local.borrow_mut().revisited.insert(key) {
+                                let _ = self.cache.state_or_fetch(key);
+                            }
+                        }
+                        None => {}
                     }
                     continue;
                 }
