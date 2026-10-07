@@ -328,17 +328,21 @@ impl TemplateApp {
                         volume_url_opt = volume.get_ome_zarr_url();
                     }
 
-                    let coord_scale_transform = if source_volume_id != volume_id {
+                    // Only re-showing the current segment on another base volume
+                    // rescales from the volume (and dims) shown so far; another
+                    // segment starts from its own dims, whatever base the
+                    // previous one was on.
+                    let same_segment = self.segment_mode.as_ref().is_some_and(|sm| {
+                        sm.sample_id.as_deref() == Some(sample_id) && sm.segment_id.as_deref() == Some(segment_id)
+                    });
+                    let coord_scale_transform = if same_segment && source_volume_id != volume_id {
                         atlas_sample.get_transform(source_volume_id, volume_id)
                     } else {
                         None
                     };
+                    xyz_transform = coord_scale_transform.clone();
 
-                    if target_volume_id.is_some() && source_volume_id != volume_id {
-                        xyz_transform = atlas_sample.get_transform(source_volume_id, volume_id);
-                    }
-
-                    let (width, height) = if target_volume_id.is_some() {
+                    let (width, height) = if same_segment {
                         self.segment_mode
                             .as_ref()
                             .map(|seg_mode| (seg_mode.width, seg_mode.height))
@@ -540,7 +544,10 @@ impl TemplateApp {
             let nominal_vol = match (is_reload, segment.segment_volume.as_ref()) {
                 (true, Some(SegmentVolume::TifXyz(prev))) => {
                     log::info!("TifXyzVolume::with_base reusing parsed grid for {}", segment_file);
-                    prev.with_base(base.clone(), prev.width(), prev.height(), &transform_owned)
+                    // `prev` is at the previous target's scaled dims; start
+                    // from the nominal ones so scales don't compound.
+                    let data = prev.with_base(base.clone(), 0, 0, &transform_owned).data();
+                    TifXyzVolume::from_data(data, base.clone(), None)
                 }
                 _ => match TifXyzVolume::load_from_directory(segment_file, base.clone(), &transform_owned) {
                     Ok(vol) => vol,
