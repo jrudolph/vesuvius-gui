@@ -348,14 +348,34 @@ fn lod_for(sfactor: u8) -> u8 {
     (sfactor as u32).max(1).trailing_zeros() as u8
 }
 
+impl UnifiedVolume {
+    /// LOD to sample `downsampling`-scaled coordinates at, and the factor
+    /// that maps them onto it. Zoomed out past the pyramid's coarsest level,
+    /// that level is the target: coordinates scale up by `2^(lod - max_lod)`
+    /// so the climb never has to go *finer* than its target.
+    fn target_lod(&self, downsampling: i32) -> (u8, f64) {
+        let lod = lod_for(downsampling.max(1) as u8);
+        let max_lod = self.cache.max_lod();
+        if lod <= max_lod {
+            (lod, 1.0)
+        } else {
+            (max_lod, (1u64 << (lod - max_lod)) as f64)
+        }
+    }
+}
+
+fn scaled(v: [f64; 3], s: f64) -> [f64; 3] {
+    [v[0] * s, v[1] * s, v[2] * s]
+}
+
 impl VoxelVolume for UnifiedVolume {
     fn reset_for_painting(&self) {
         self.drop_hot_slot();
     }
 
     fn touch_aabb(&self, min: [f64; 3], max: [f64; 3], downsampling: i32) {
-        let target_lod = lod_for(downsampling.max(1) as u8);
-        self.cache.touch_aabb(min, max, target_lod);
+        let (target_lod, s) = self.target_lod(downsampling);
+        self.cache.touch_aabb(scaled(min, s), scaled(max, s), target_lod);
     }
 
     fn get(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
@@ -364,7 +384,8 @@ impl VoxelVolume for UnifiedVolume {
         // passes `[x / sfactor, y / sfactor, z / sfactor]`): `xyz` is in
         // voxel-coords at the requested downsampling. We do NOT re-divide by
         // scale here.
-        let target_lod = lod_for(downsampling.max(1) as u8);
+        let (target_lod, s) = self.target_lod(downsampling);
+        let xyz = scaled(xyz, s);
         let max_lod = self.cache.max_lod();
 
         let target_sx = (xyz[0] as i64).max(0) as u64;
@@ -481,7 +502,8 @@ impl UnifiedVolume {
         downsampling: i32,
         mut sink: F,
     ) {
-        let target_lod = lod_for(downsampling.max(1) as u8);
+        let (target_lod, s) = self.target_lod(downsampling);
+        let (base, dir) = (scaled(base, s), scaled(dir, s));
         let n_total = (w_hi - w_lo) as i32;
         if n_total <= 0 {
             return;
@@ -570,7 +592,8 @@ impl UnifiedVolume {
                 // 2/3-axis +1 corner crossings need samples from up to 7
                 // neighbor chunks across possibly multiple shards. Rare
                 // (~0.07% / 0.0004%); defer to the legacy trilerp path.
-                let v = self.interpolate_u8([px, py, pz], downsampling);
+                // px.. are already at `target_lod`.
+                let v = self.interpolate_u8([px, py, pz], 1 << target_lod);
                 if !sink(v) {
                     return;
                 }
@@ -712,7 +735,8 @@ impl UnifiedVolume {
     /// 2^shift)` for most `target_sx`), the 8 corners collapse to one
     /// value, and the output bands instead of smoothly interpolating.
     fn interpolate_u8(&self, xyz: [f64; 3], downsampling: i32) -> u8 {
-        let target_lod = lod_for(downsampling.max(1) as u8);
+        let (target_lod, s) = self.target_lod(downsampling);
+        let xyz = scaled(xyz, s);
         let max_lod = self.cache.max_lod();
 
         let target_sx = (xyz[0] as i64).max(0) as u64;
@@ -1422,8 +1446,10 @@ impl PaintVolume for UnifiedVolume {
         // pan.
         self.drop_hot_slot();
 
-        let target_lod = lod_for(sfactor);
         let max_lod = self.cache.max_lod();
+        // World coordinates: zoomed out past the pyramid, just sample its
+        // coarsest level.
+        let target_lod = lod_for(sfactor).min(max_lod);
 
         // Per-paint filter LUT: `DrawingConfig::filter` re-evaluates
         // `filters_active()`, the quant bit-mask match, and an f32 divide

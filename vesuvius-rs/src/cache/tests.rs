@@ -428,6 +428,44 @@ fn paint_falls_back_to_coarser_lod_when_target_missing() {
 }
 
 #[test]
+fn sampling_past_the_coarsest_lod_samples_the_coarsest_lod() {
+    // Pyramid of LOD 0..=1; each voxel of a LOD-1 chunk holds its in-chunk
+    // x. Sampling at downsampling 4 (LOD 2) must map onto LOD 1 at twice
+    // the coordinates, not climb "down" from a target above the pyramid.
+    struct XRamp;
+    impl ChunkBackfiller for XRamp {
+        fn max_lod(&self) -> u8 {
+            1
+        }
+        fn voxel_extent(&self) -> [u32; 3] {
+            [256, 256, 256]
+        }
+        fn volume_id(&self) -> String {
+            "x-ramp".into()
+        }
+        fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError> {
+            let bytes: Vec<u8> = (0..CHUNK_VOXELS).map(|i| (i % 64) as u8).collect();
+            let extract = Box::new(move |_inputs: &[_]| Ok(vec![(key, ExtractedChunk::Bytes(bytes.clone()))]));
+            Ok(BackfillPlan {
+                covered: vec![key],
+                sources: Vec::new(),
+                extract,
+            })
+        }
+    }
+
+    let root = tmp_root("sample-past-coarsest");
+    let cache = UnifiedCache::for_cache_dir(&root).open_volume(Arc::new(XRamp));
+    let volume = UnifiedVolume::new(cache.clone());
+    let s = cache.wait_for(ChunkKey::new(1, 0, 0, 0), Duration::from_secs(2));
+    assert!(s.as_resident().is_some(), "L1 should be resident: {:?}", s);
+
+    assert_eq!(volume.get([10.0, 3.0, 3.0], 4), 20);
+    let v = volume.get_interpolated([10.25, 3.0, 3.0], 4);
+    assert!((20..=21).contains(&v), "interpolated {v}, expected 20.5");
+}
+
+#[test]
 fn get_falls_back_to_coarser_lod_when_target_missing() {
     // Same setup as the paint test: LOD 0 chunks refused, LOD 1 returns 0x11.
     // VoxelVolume::get must return the LOD-1 byte when the target chunk
