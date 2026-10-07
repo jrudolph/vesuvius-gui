@@ -397,6 +397,7 @@ impl TemplateApp {
         atlas: Option<AtlasMetadata>,
         config: VesuviusConfig,
     ) -> Self {
+        super::volume_pane::install_landing_repaint(&cc.egui_ctx);
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
         let mut app: TemplateApp = if let Some(storage) = cc.storage {

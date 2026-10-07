@@ -1332,3 +1332,35 @@ fn shutdown_flushes_sidecar_and_is_idempotent() {
     assert_eq!(sc2.get_state(0, idx0), STATE_RESIDENT);
     assert_eq!(sc2.get_state(0, idx1), STATE_RESIDENT);
 }
+
+#[test]
+fn paint_report_records_merges_and_polls_landings() {
+    use super::paint_scope::{capture, MissingChunk, PaintReport};
+    let root = tmp_root("paint-scope");
+    let backfiller = Arc::new(SyntheticBackfiller::new("test", [256, 256, 256], 0, |x, y, z, _| {
+        (x ^ y ^ z) as u8
+    }));
+    let cache = UnifiedCache::for_cache_dir(&root).open_volume(backfiller);
+    let a = ChunkKey::new(0, 1, 0, 0);
+
+    super::paint_scope::record(&cache, ChunkKey::new(0, 0, 0, 0), None); // no scope: dropped
+    let ((), report) = capture(|| {
+        super::paint_scope::record(&cache, a, Some(2));
+        let ((), inner) = capture(|| super::paint_scope::record(&cache, ChunkKey::new(0, 2, 0, 0), None));
+        assert_eq!(inner.missing.len(), 1);
+        super::paint_scope::record(&cache, a, Some(3)); // duplicate, worse fallback
+    });
+    assert_eq!(report.missing.len(), 2);
+    assert_eq!(report.missing[&MissingChunk { cache: cache.id(), key: a }], Some(3));
+    let ((), empty) = capture(|| ());
+    assert!(empty.is_complete());
+    assert!(!PaintReport::failed().is_complete());
+    assert!(!PaintReport::failed().poll(Duration::from_secs(60)));
+
+    // Nothing landed since the paint: no repaint wanted.
+    assert!(!report.poll(Duration::from_secs(60)));
+    // A missing chunk lands: the next poll says repaint.
+    cache.state_or_fetch(a);
+    assert!(cache.wait_for(a, Duration::from_secs(2)).is_terminal());
+    assert!(report.poll(Duration::from_secs(60)));
+}

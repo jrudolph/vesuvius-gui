@@ -1,11 +1,19 @@
 //! Per-paint dependency capture: which chunks a paint wanted at its target
 //! LOD but couldn't use yet (it fell back to a coarser LOD, a preview, or
-//! nothing).
+//! nothing) — and, after the paint, when it is worth repeating.
 //!
 //! Wrap a paint in [`capture`]; every unified-cache lookup on this thread
 //! that misses its target chunk records it. An empty report means the paint
 //! drew final data everywhere — Empty chunks and out-of-volume samples count
 //! as complete.
+//!
+//! A kept report then drives refreshes instead of a re-render timer:
+//! [`PaintReport::poll`] says whether one of its missing chunks (or a finer
+//! fallback than the one used) has landed since the paint started, and
+//! optionally renews the missing chunks' fetches so they don't age out of
+//! the queues while nothing re-paints. Landings bump a global epoch, so
+//! polling is a single atomic load until something actually arrives, and
+//! call the [`set_landing_hook`] (rate-limited) so an idle GUI wakes up.
 //!
 //! Thread-local on purpose (for now): a tile render runs on one thread with
 //! its own volume instance, so no paint signature has to change and wrappers
@@ -13,8 +21,12 @@
 //! other threads would under-report. To be replaced by an explicit paint
 //! context argument — see plans/demand-driven-loading.md.
 
+use super::cache::ChunkCache;
 use super::state::ChunkKey;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 /// A chunk a paint needed at its target LOD, tagged with the cache it
 /// belongs to (`ChunkCache::id`) since one paint can read several volumes.
@@ -24,15 +36,95 @@ pub struct MissingChunk {
     pub key: ChunkKey,
 }
 
-#[derive(Debug, Default, Clone)]
+/// How many levels above a missing chunk `poll` looks for a better
+/// fallback when the paint drew nothing for it.
+const MAX_WATCHED_LEVELS: u8 = 6;
+
+#[derive(Default)]
 pub struct PaintReport {
-    pub missing: fxhash::FxHashSet<MissingChunk>,
+    /// Missing target chunk → the coarsest LOD the paint fell back to for
+    /// it (`None`: drew nothing). Levels strictly between the two would
+    /// improve the paint too.
+    pub missing: fxhash::FxHashMap<MissingChunk, Option<u8>>,
+    caches: Vec<ChunkCache>,
+    /// The paint was cancelled before it ran. Incomplete, but `poll` never
+    /// asks to repeat it (nobody shows it).
+    failed: bool,
+    /// Landing epoch already checked (starts at the paint's start).
+    seen_epoch: AtomicU64,
+    /// Last renewal, ms since `clock_origin`.
+    renewed_at_ms: AtomicU64,
 }
 
 impl PaintReport {
+    /// Report for a paint that didn't finish.
+    pub fn failed() -> Self {
+        Self { failed: true, ..Default::default() }
+    }
+
     /// True when the paint used final data everywhere.
     pub fn is_complete(&self) -> bool {
-        self.missing.is_empty()
+        !self.failed && self.missing.is_empty()
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Missing target chunks (a failed paint counts as one).
+    pub fn missing_count(&self) -> usize {
+        self.missing.len() + self.failed as usize
+    }
+
+    fn cache(&self, id: usize) -> Option<&ChunkCache> {
+        self.caches.iter().find(|c| c.id() == id)
+    }
+
+    /// Whether repainting now would draw something better than this
+    /// report's paint: a missing chunk, or a finer fallback for one, has
+    /// landed since. Cheap when nothing landed anywhere (one atomic load).
+    ///
+    /// Every `renew_every`, also keeps the missing chunks' fetches alive
+    /// (`ChunkCache::renew`) — the paint that would otherwise do that isn't
+    /// happening. Call it only while the painted region is on screen.
+    pub fn poll(&self, renew_every: Duration) -> bool {
+        if self.failed || self.missing.is_empty() {
+            return false;
+        }
+        let now_ms = clock_ms();
+        let last = self.renewed_at_ms.load(Ordering::Relaxed);
+        let renew = now_ms.saturating_sub(last) >= renew_every.as_millis() as u64
+            && self
+                .renewed_at_ms
+                .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok();
+        let epoch = LANDED_EPOCH.load(Ordering::Acquire);
+        let landed = self.seen_epoch.swap(epoch, Ordering::Relaxed) != epoch;
+        if !landed && !renew {
+            return false;
+        }
+        let terminal = |cache: &ChunkCache, key| cache.peek(key).is_some_and(|s| s.is_terminal());
+        for (m, fallback) in &self.missing {
+            let cache = self.cache(m.cache).expect("missing chunk's cache was recorded with it");
+            let k = m.key;
+            if renew {
+                if cache.renew(k).is_terminal() {
+                    return true;
+                }
+            } else if terminal(cache, k) {
+                return true;
+            }
+            if landed {
+                let upto = fallback.unwrap_or(k.lod.saturating_add(MAX_WATCHED_LEVELS + 1));
+                for lod in k.lod.saturating_add(1)..upto {
+                    let s = lod - k.lod;
+                    if terminal(cache, ChunkKey::new(lod, k.x >> s, k.y >> s, k.z >> s)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
@@ -53,7 +145,14 @@ impl ScopeGuard {
         // Nested scopes also count towards the outer one.
         SCOPE.with(|s| {
             if let Some(outer) = s.borrow_mut().as_mut() {
-                outer.missing.extend(report.missing.iter().copied());
+                for (m, f) in &report.missing {
+                    merge(outer, *m, *f);
+                }
+                for c in &report.caches {
+                    if outer.cache(c.id()).is_none() {
+                        outer.caches.push(c.clone());
+                    }
+                }
             }
         });
         report
@@ -70,37 +169,77 @@ impl Drop for ScopeGuard {
 
 /// Run `f` (a paint) and report the target chunks it couldn't use.
 pub fn capture<R>(f: impl FnOnce() -> R) -> (R, PaintReport) {
-    let prev = SCOPE.with(|s| s.replace(Some(PaintReport::default())));
+    let fresh = PaintReport {
+        // Anything landing from here on may have been missed by the paint.
+        seen_epoch: AtomicU64::new(LANDED_EPOCH.load(Ordering::Acquire)),
+        renewed_at_ms: AtomicU64::new(clock_ms()),
+        ..Default::default()
+    };
+    let prev = SCOPE.with(|s| s.replace(Some(fresh)));
     let mut guard = ScopeGuard { prev: Some(prev) };
     let result = f();
     let report = guard.finish();
     (result, report)
 }
 
-/// Record a missed target chunk in the current scope, if any.
-pub(super) fn record(cache: usize, key: ChunkKey) {
+fn merge(report: &mut PaintReport, m: MissingChunk, fallback: Option<u8>) {
+    let e = report.missing.entry(m).or_insert(fallback);
+    // Keep the worst fallback: anything finer than it can still help.
+    *e = match (*e, fallback) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        _ => None,
+    };
+}
+
+/// Record a missed target chunk in the current scope, if any. `fallback`
+/// is the LOD drawn instead (`None`: nothing; the target LOD itself when
+/// coarser levels can't improve this paint).
+pub(super) fn record(cache: &ChunkCache, key: ChunkKey, fallback: Option<u8>) {
     SCOPE.with(|s| {
         if let Some(report) = s.borrow_mut().as_mut() {
-            report.missing.insert(MissingChunk { cache, key });
+            let id = cache.id();
+            if report.cache(id).is_none() {
+                report.caches.push(cache.clone());
+            }
+            merge(report, MissingChunk { cache: id, key }, fallback);
         }
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+static LANDED_EPOCH: AtomicU64 = AtomicU64::new(0);
+static LAST_HOOK_MS: AtomicU64 = AtomicU64::new(0);
+static LANDING_HOOK: RwLock<Option<Arc<dyn Fn(Duration) + Send + Sync>>> = RwLock::new(None);
 
-    #[test]
-    fn records_only_inside_scope_and_merges_nested() {
-        record(1, ChunkKey::new(0, 0, 0, 0)); // no scope: dropped
-        let ((), outer) = capture(|| {
-            record(1, ChunkKey::new(0, 1, 0, 0));
-            let ((), inner) = capture(|| record(2, ChunkKey::new(1, 0, 0, 0)));
-            assert_eq!(inner.missing.len(), 1);
-            record(1, ChunkKey::new(0, 1, 0, 0)); // duplicate
-        });
-        assert_eq!(outer.missing.len(), 2);
-        let ((), empty) = capture(|| ());
-        assert!(empty.is_complete());
+/// Landings call the hook at most once per this window, passing it; the
+/// hook must repaint no sooner than that so later landings in the window
+/// are included.
+pub const LANDING_COALESCE: Duration = Duration::from_millis(20);
+
+/// Install the hook called when chunks land (e.g. egui's
+/// `request_repaint_after`), rate-limited to one call per
+/// [`LANDING_COALESCE`] across all caches.
+pub fn set_landing_hook(hook: Option<Arc<dyn Fn(Duration) + Send + Sync>>) {
+    *LANDING_HOOK.write().unwrap() = hook;
+}
+
+fn clock_ms() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    // Offset by the window so the first landing always passes the limiter.
+    ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64 + LANDING_COALESCE.as_millis() as u64
+}
+
+/// A chunk became Resident or Empty (after its state is in the map).
+pub(super) fn landed() {
+    LANDED_EPOCH.fetch_add(1, Ordering::Release);
+    let now = clock_ms();
+    let last = LAST_HOOK_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= LANDING_COALESCE.as_millis() as u64
+        && LAST_HOOK_MS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        if let Some(hook) = LANDING_HOOK.read().unwrap().clone() {
+            hook(LANDING_COALESCE);
+        }
     }
 }

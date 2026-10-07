@@ -644,6 +644,22 @@ impl ChunkCache {
         self.inner.downloader.is_active_chunk(key)
     }
 
+    /// Keep a still-wanted chunk's fetch alive without painting it: a
+    /// Pending chunk is touched in both queues (back to the LIFO head,
+    /// `MAX_AGE` re-armed); a Missing one, or one whose cooldown is over, is
+    /// dispatched again. Unlike `state_or_fetch`'s touch this isn't
+    /// debounced per paint frame — callers renew each chunk rarely.
+    pub fn renew(&self, key: ChunkKey) -> Arc<ChunkState> {
+        if let Some(state) = self.peek(key) {
+            if matches!(state.as_ref(), ChunkState::Pending { .. }) {
+                self.inner.task_queue.touch(key);
+                self.inner.downloader.touch(key);
+                return state;
+            }
+        }
+        self.inner.state_or_fetch(key)
+    }
+
     /// Identity of this cache (stable while it's open), as used in
     /// `paint_scope::MissingChunk`.
     pub fn id(&self) -> usize {
@@ -845,13 +861,14 @@ impl ChunkCache {
         // from any already-Resident parent.
         // The composite reads these chunks straight off the shard mmap, so
         // any that aren't terminal yet are this paint's misses.
-        let id = self.id();
         for cz in cz0..=cz1 {
             for cy in cy0..=cy1 {
                 for cx in cx0..=cx1 {
                     let key = ChunkKey::new(target_lod, cx as u32, cy as u32, cz as u32);
                     if !self.state_or_fetch(key).is_terminal() {
-                        super::paint_scope::record(id, key);
+                        // Coarser levels don't help: their preview was
+                        // synthesized into the target slot at dispatch.
+                        super::paint_scope::record(self, key, Some(target_lod));
                     }
                 }
             }
@@ -1222,6 +1239,7 @@ impl Inner {
             ChunkState::Empty => Ok(None),
             _ => return,
         };
+        super::paint_scope::landed();
         let waiters: Vec<String> = match self.pending_chunk_sources.remove(&key) {
             Some((_, v)) => v,
             None => return,

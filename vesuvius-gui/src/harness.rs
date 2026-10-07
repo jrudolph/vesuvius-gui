@@ -367,6 +367,8 @@ impl PaneHarness {
                 }
             }
         });
+        // As the GUI does: chunk landings request a repaint.
+        crate::gui::install_landing_repaint(&ctx);
         let coord = opts.coord.unwrap_or(world.default_coord);
         let fps = opts.fps.max(1);
         Self {

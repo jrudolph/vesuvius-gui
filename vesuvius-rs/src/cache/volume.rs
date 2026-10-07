@@ -184,12 +184,13 @@ impl UnifiedVolume {
     }
 
     /// Report a target-LOD chunk this paint couldn't use (see `paint_scope`).
-    fn note_missing(&self, key: ChunkKey) {
+    /// `fallback`: the LOD drawn instead, `None` if nothing was.
+    fn note_missing(&self, key: ChunkKey, fallback: Option<u8>) {
         let mut b = self.local.borrow_mut();
         if b.last_missing != Some(key) {
             b.last_missing = Some(key);
             drop(b);
-            super::paint_scope::record(self.cache.id(), key);
+            super::paint_scope::record(&self.cache, key, fallback);
         }
     }
 
@@ -824,7 +825,7 @@ impl UnifiedVolume {
                 // Recorded once per (paint, target chunk): later samples in
                 // this chunk come back through the hot slot above.
                 if found.as_ref().map_or(true, |(lt, _)| *lt != target_lod) {
-                    self.note_missing(key_t);
+                    self.note_missing(key_t, found.as_ref().map(|(lt, _)| *lt));
                 }
                 match found {
                     Some(c) => c,
@@ -1134,7 +1135,7 @@ impl UnifiedVolume {
                     match chunk_ptr {
                         Some(p) => {
                             if shift > 0 {
-                                self.note_missing(ChunkKey::new(target_lod, cx, cy, cz));
+                                self.note_missing(ChunkKey::new(target_lod, cx, cy, cz), Some(lod_try));
                             }
                             return Some(BoundChunk { shift, chunk_ptr: p });
                         }
@@ -1178,7 +1179,7 @@ impl UnifiedVolume {
                 }
             }
         }
-        self.note_missing(ChunkKey::new(target_lod, cx, cy, cz));
+        self.note_missing(ChunkKey::new(target_lod, cx, cy, cz), None);
         None
     }
 }
@@ -1556,7 +1557,10 @@ impl PaintVolume for UnifiedVolume {
                     chunk[u_coord] = tu as u32;
                     chunk[v_coord] = tv as u32;
                     chunk[plane_coord] = t.tile_pc as u32;
-                    self.note_missing(ChunkKey::new(target_lod, chunk[0], chunk[1], chunk[2]));
+                    self.note_missing(
+                        ChunkKey::new(target_lod, chunk[0], chunk[1], chunk[2]),
+                        chosen.as_ref().map(|(l, _)| *l),
+                    );
                 }
 
                 let painted = if let Some((lod_use, state)) = chosen.as_ref() {
