@@ -38,13 +38,22 @@ struct Args {
     #[clap(long, default_value_t = 1.0)]
     zoom: f32,
 
+    /// Trilinear interpolation (the GUI's checkbox). Sampling takes a different cache path
+    /// with it on (interpolate_u8) than off (get / resolve_chunk).
+    #[clap(long, default_value = "on", value_parser = ["on", "off"])]
+    trilinear: String,
+
     /// Start coordinate "a,b,c" (segment u,v,w or volume x,y,z). Default: center.
     #[clap(long)]
     coord: Option<String>,
 
-    /// Start with an empty cache in <out>/cache (cold run)
+    /// Start with an empty cache in <out>/cache (cold run); removed at exit unless --keep-cache
     #[clap(long, conflicts_with = "cache_dir")]
     cold: bool,
+
+    /// Keep the --cold cache directory after the run
+    #[clap(long)]
+    keep_cache: bool,
 
     /// Cache base directory (default: the GUI's)
     #[clap(long)]
@@ -54,12 +63,13 @@ struct Args {
     #[clap(long, default_value = "pane-harness-out")]
     out: PathBuf,
 
-    /// Only render frames when egui asks for a repaint (idle window) instead of continuously
+    /// Idle like eframe: only render when egui asks for a repaint (a view change renders one
+    /// frame, like input would) instead of continuously
     #[clap(long)]
     honor_repaint: bool,
 
     /// Scenario, `;`-separated: settle [timeout] [quiet] | wait <s> | frames <n> | pan <dx> <dy> |
-    /// drag <dx> <dy> <s> | zoom <z> | goto <a> <b> <c> | png <name>
+    /// drag <dx> <dy> <s> | zoom <z> | scroll <dw> | goto <a> <b> <c> | png <name>
     #[clap(long, default_value = "settle 300; png settled")]
     script: String,
 }
@@ -125,17 +135,22 @@ fn run(args: Args) -> Result<(), String> {
         zoom: args.zoom,
         coord,
         honor_repaint: args.honor_repaint,
+        drawing_config: vesuvius_rs::volume::DrawingConfig {
+            trilinear_interpolation: args.trilinear == "on",
+            ..Default::default()
+        },
         ..Default::default()
     };
     let mut harness = PaneHarness::new(world, opts);
     println!(
-        "pane {:?} {}x{} at {:?} zoom {} ({} fps){}",
+        "pane {:?} {}x{} at {:?} zoom {} ({} fps, trilinear {}){}",
         pane,
         width,
         height,
         harness.coord(),
         harness.zoom(),
         args.fps,
+        args.trilinear,
         if args.cold { ", cold cache" } else { "" }
     );
 
@@ -148,12 +163,28 @@ fn run(args: Args) -> Result<(), String> {
         .write_timeline_csv(args.out.join("timeline.csv"))
         .map_err(|e| e.to_string())?;
     std::fs::write(args.out.join("summary.txt"), &summary).map_err(|e| e.to_string())?;
+    if let Ok(reports) = &result {
+        let json = serde_json::json!({
+            "volume": args.volume,
+            "tifxyz": args.tifxyz,
+            "pane": format!("{:?}", pane),
+            "size": [width, height],
+            "zoom": args.zoom,
+            "fps": args.fps,
+            "trilinear": args.trilinear == "on",
+            "cold": args.cold,
+            "phases": reports.iter().map(|r| r.to_json()).collect::<Vec<_>>(),
+        });
+        std::fs::write(args.out.join("summary.json"), serde_json::to_string_pretty(&json).unwrap())
+            .map_err(|e| e.to_string())?;
+    }
     println!("wrote {}", args.out.display());
     result.map(|_| ())
 }
 
 fn main() {
     let args = Args::parse();
+    let cold_cache = (args.cold && !args.keep_cache).then(|| args.out.join("cache"));
     // Before any thread exists: the netlog sink reads this once.
     if std::env::var_os("VESUVIUS_NET_LOG").is_none() {
         let _ = std::fs::create_dir_all(&args.out);
@@ -173,6 +204,10 @@ fn main() {
     // Let in-flight shard writes land before exiting.
     vesuvius_rs::cache::UnifiedCache::shutdown_all();
     runtime.shutdown_timeout(Duration::from_secs(5));
+    // Cold caches can be GBs; don't leave them behind (often on tmpfs).
+    if let Some(dir) = cold_cache {
+        let _ = std::fs::remove_dir_all(dir);
+    }
     if let Err(e) = result {
         eprintln!("error: {}", e);
         std::process::exit(1);

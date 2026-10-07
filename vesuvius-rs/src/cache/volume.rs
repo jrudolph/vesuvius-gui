@@ -116,6 +116,9 @@ struct LocalSlot {
     /// to the cache (see `resolve_chunk`). Cleared per paint, so each such
     /// chunk goes through `state_or_fetch` once per paint.
     revisited: fxhash::FxHashSet<ChunkKey>,
+    /// Last chunk passed to `paint_scope::record`; skips the thread-local
+    /// set insert for the run of samples that hit the same missing chunk.
+    last_missing: Option<ChunkKey>,
 }
 
 impl Default for LocalSlot {
@@ -126,6 +129,7 @@ impl Default for LocalSlot {
             target_key: None,
             chosen: None,
             revisited: Default::default(),
+            last_missing: None,
         }
     }
 }
@@ -176,6 +180,17 @@ impl UnifiedVolume {
         b.target_key = None;
         b.chosen = None;
         b.revisited.clear();
+        b.last_missing = None;
+    }
+
+    /// Report a target-LOD chunk this paint couldn't use (see `paint_scope`).
+    fn note_missing(&self, key: ChunkKey) {
+        let mut b = self.local.borrow_mut();
+        if b.last_missing != Some(key) {
+            b.last_missing = Some(key);
+            drop(b);
+            super::paint_scope::record(self.cache.id(), key);
+        }
     }
 
     /// Decompose a target-LOD chunk coord into `(shard_coord,
@@ -806,6 +821,11 @@ impl UnifiedVolume {
                         self.populate_shard_slot(target_lod, target_shard);
                     }
                 }
+                // Recorded once per (paint, target chunk): later samples in
+                // this chunk come back through the hot slot above.
+                if found.as_ref().map_or(true, |(lt, _)| *lt != target_lod) {
+                    self.note_missing(key_t);
+                }
                 match found {
                     Some(c) => c,
                     None => return 0,
@@ -1112,7 +1132,12 @@ impl UnifiedVolume {
                         unsafe { slot.base.add((in_shard_idx as usize) * CHUNK_VOXELS) }
                     });
                     match chunk_ptr {
-                        Some(p) => return Some(BoundChunk { shift, chunk_ptr: p }),
+                        Some(p) => {
+                            if shift > 0 {
+                                self.note_missing(ChunkKey::new(target_lod, cx, cy, cz));
+                            }
+                            return Some(BoundChunk { shift, chunk_ptr: p });
+                        }
                         // Shard couldn't be opened (I/O error) — climb on.
                         None => continue,
                     }
@@ -1153,6 +1178,7 @@ impl UnifiedVolume {
                 }
             }
         }
+        self.note_missing(ChunkKey::new(target_lod, cx, cy, cz));
         None
     }
 }
@@ -1523,6 +1549,14 @@ impl PaintVolume for UnifiedVolume {
                         chosen = Some((lod_try, s));
                         break;
                     }
+                }
+
+                if chosen.as_ref().map_or(true, |(l, _)| *l != target_lod) {
+                    let mut chunk = [0u32; 3];
+                    chunk[u_coord] = tu as u32;
+                    chunk[v_coord] = tv as u32;
+                    chunk[plane_coord] = t.tile_pc as u32;
+                    self.note_missing(ChunkKey::new(target_lod, chunk[0], chunk[1], chunk[2]));
                 }
 
                 let painted = if let Some((lod_use, state)) = chosen.as_ref() {

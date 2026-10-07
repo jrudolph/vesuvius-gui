@@ -124,9 +124,13 @@ pub struct HarnessOptions {
     pub coord: Option<[i32; 3]>,
     pub drawing_config: DrawingConfig,
     pub extra_resolutions: u32,
-    /// Pace frames like an idle window: when egui didn't ask for a repaint,
-    /// wait (up to 1 s) instead of rendering at `fps`. Default off: frames run
-    /// continuously, like a user moving the mouse over the pane.
+    /// Pace frames like eframe with an idle window: after a frame, only
+    /// render again once egui asked for a repaint (from the frame itself or
+    /// from another thread), never more often than `fps`. With nothing
+    /// requested the harness idles until the current `run_*` call ends;
+    /// script steps that move the view render one frame immediately, like
+    /// input would. Default off: frames run continuously, like a user moving
+    /// the mouse over the pane.
     pub honor_repaint: bool,
 }
 
@@ -166,6 +170,10 @@ pub struct FrameRecord {
     pub cooldown_chunks: Option<usize>,
     /// Fraction of pane pixels covered by any tile texture this frame.
     pub coverage: f32,
+    /// Fraction of pane pixels that are pure black. Includes legit black
+    /// (masked / out-of-segment areas), so compare across runs rather than
+    /// against zero.
+    pub black: f32,
     pub hash: u64,
     /// Pixels differ from the previous frame.
     pub changed: bool,
@@ -177,12 +185,11 @@ impl FrameRecord {
         self.tiles.loading_blank + self.tiles.loading_fallback
     }
 
-    fn downloads_idle(&self) -> bool {
-        self.downloads.map_or(true, |d| d.in_flight == 0 && d.queued == 0)
-            && self.queued_tasks.map_or(true, |q| q == 0)
-            && self.pending_chunks.map_or(true, |p| p == 0)
-            && self.cooldown_chunks.map_or(true, |c| c == 0)
+    /// Every visible tile shows a render that used final data everywhere.
+    pub fn all_complete(&self) -> bool {
+        self.tiles.visible > 0 && self.tiles.complete == self.tiles.visible
     }
+
 }
 
 /// What happened between a view change (or start) and the end of the wait
@@ -194,13 +201,23 @@ pub struct PhaseReport {
     pub duration: Duration,
     /// First frame with every pane pixel covered (placeholders count).
     pub full_coverage: Option<Duration>,
-    /// First frame with no tile slot still loading.
+    /// First frame with no tile slot still loading (placeholders count as
+    /// loaded).
     pub all_tiles_ready: Option<Duration>,
-    /// Time until downloads went idle and pixels stopped changing (only set
-    /// by `run_until_settled`).
+    /// First frame where every visible tile's render used final data
+    /// everywhere (no target chunk missing).
+    pub all_complete: Option<Duration>,
+    /// At the end of the phase: visible tiles not complete, and the summed
+    /// count of target chunks their renders were missing.
+    pub incomplete_at_end: u32,
+    pub missing_at_end: u32,
+    /// Time until every visible tile was complete and pixels stopped changing
+    /// (only set by `run_until_settled`).
     pub settled: Option<Duration>,
     pub min_coverage: f32,
     pub max_blank_tiles: u32,
+    /// Black-pixel fraction of the phase's last frame.
+    pub black_at_end: f32,
     pub downloads: Option<DownloaderStats>,
     pub max_in_flight: usize,
     pub max_queued: usize,
@@ -215,6 +232,42 @@ pub struct PhaseReport {
     pub slow_frames: usize,
 }
 
+impl PhaseReport {
+    pub fn to_json(&self) -> serde_json::Value {
+        let secs = |d: Option<Duration>| d.map(|d| d.as_secs_f64());
+        serde_json::json!({
+            "label": self.label,
+            "frames": self.frames,
+            "duration_s": self.duration.as_secs_f64(),
+            "full_coverage_s": secs(self.full_coverage),
+            "all_tiles_ready_s": secs(self.all_tiles_ready),
+            "all_complete_s": secs(self.all_complete),
+            "incomplete_at_end": self.incomplete_at_end,
+            "missing_at_end": self.missing_at_end,
+            "settled_s": secs(self.settled),
+            "min_coverage": self.min_coverage,
+            "max_blank_tiles": self.max_blank_tiles,
+            "black_at_end": self.black_at_end,
+            "downloads": self.downloads.map(|d| serde_json::json!({
+                "submitted": d.submitted,
+                "completed": d.completed,
+                "not_found": d.not_found,
+                "failed": d.failed,
+                "aged_out": d.aged_out,
+                "bytes": d.bytes,
+            })),
+            "max_in_flight": self.max_in_flight,
+            "max_queued": self.max_queued,
+            "pending_at_end": self.pending_at_end,
+            "cooldown_at_end": self.cooldown_at_end,
+            "render_p50_ms": self.render_p50.as_secs_f64() * 1e3,
+            "render_p95_ms": self.render_p95.as_secs_f64() * 1e3,
+            "render_max_ms": self.render_max.as_secs_f64() * 1e3,
+            "slow_frames": self.slow_frames,
+        })
+    }
+}
+
 impl fmt::Display for PhaseReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let opt = |d: Option<Duration>| d.map_or("never".to_string(), |d| format!("{:.2}s", d.as_secs_f64()));
@@ -227,16 +280,23 @@ impl fmt::Display for PhaseReport {
         )?;
         writeln!(
             f,
-            "  full coverage: {}   all tiles ready: {}   settled: {}",
+            "  full coverage: {}   all tiles ready: {}   all complete: {}   settled: {}",
             opt(self.full_coverage),
             opt(self.all_tiles_ready),
+            opt(self.all_complete),
             opt(self.settled)
         )?;
         writeln!(
             f,
-            "  min coverage: {:.1}%   max blank tiles: {}",
+            "  at end: {} incomplete tiles, {} missing chunk refs",
+            self.incomplete_at_end, self.missing_at_end
+        )?;
+        writeln!(
+            f,
+            "  min coverage: {:.1}%   max blank tiles: {}   black at end: {:.1}%",
             self.min_coverage * 100.0,
-            self.max_blank_tiles
+            self.max_blank_tiles,
+            self.black_at_end * 100.0
         )?;
         if let Some(d) = self.downloads {
             let mb = d.bytes as f64 / 1e6;
@@ -287,11 +347,26 @@ pub struct PaneHarness {
     records: Vec<FrameRecord>,
     phase_start: usize,
     phase_label: String,
+    /// Earliest repaint egui asked for since the last frame (any thread).
+    repaint_at: Arc<std::sync::Mutex<Option<Instant>>>,
+    /// End of the current `run_*` call; bounds idle waits.
+    run_until: Option<Instant>,
 }
 
 impl PaneHarness {
     pub fn new(world: HarnessWorld, opts: HarnessOptions) -> Self {
         let ctx = egui::Context::default();
+        let repaint_at: Arc<std::sync::Mutex<Option<Instant>>> = Default::default();
+        let sink = repaint_at.clone();
+        ctx.set_request_repaint_callback(move |info| {
+            let at = Instant::now().checked_add(info.delay);
+            if let Some(at) = at {
+                let mut slot = sink.lock().unwrap();
+                if slot.map_or(true, |cur| at < cur) {
+                    *slot = Some(at);
+                }
+            }
+        });
         let coord = opts.coord.unwrap_or(world.default_coord);
         let fps = opts.fps.max(1);
         Self {
@@ -310,6 +385,8 @@ impl PaneHarness {
             records: Vec::new(),
             phase_start: 0,
             phase_label: "start".to_string(),
+            repaint_at,
+            run_until: None,
         }
     }
 
@@ -335,6 +412,8 @@ impl PaneHarness {
         let budget = FrameBudget::new(self.frame_interval);
         let size = Vec2::new(self.opts.width as f32, self.opts.height as f32);
 
+        // Requests made during this frame (or after it) schedule the next.
+        self.repaint_at.lock().unwrap().take();
         let mut raw = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
             time: Some(self.start.elapsed().as_secs_f64()),
@@ -396,6 +475,8 @@ impl PaneHarness {
             }
         }
         let coverage = self.composite(&output.shapes);
+        let black = self.pixels.iter().filter(|p| p.r() == 0 && p.g() == 0 && p.b() == 0).count() as f32
+            / self.pixels.len().max(1) as f32;
         for id in &output.textures_delta.free {
             self.textures.remove(id);
         }
@@ -421,17 +502,27 @@ impl PaneHarness {
             pending_chunks: self.base.as_ref().map(|b| b.cache().pending_chunks()),
             cooldown_chunks: self.base.as_ref().map(|b| b.cache().cooldown_chunks()),
             coverage,
+            black,
             hash,
             changed,
             repaint_requested: repaint_delay.is_zero(),
         };
         self.records.push(record);
 
-        let mut next = frame_start + self.frame_interval;
-        if self.opts.honor_repaint && repaint_delay > self.frame_interval {
-            next = frame_start + repaint_delay.min(Duration::from_secs(1));
-        }
-        if let Some(rest) = next.checked_duration_since(Instant::now()) {
+        let next = frame_start + self.frame_interval;
+        if self.opts.honor_repaint {
+            // Idle like eframe: wait for a repaint request, bounded by the
+            // current run (or 1 s when called outside one).
+            let limit = self.run_until.unwrap_or(next + Duration::from_secs(1));
+            loop {
+                let now = Instant::now();
+                let requested = *self.repaint_at.lock().unwrap();
+                if requested.is_some_and(|at| now >= at.max(next)) || now >= limit {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        } else if let Some(rest) = next.checked_duration_since(Instant::now()) {
             std::thread::sleep(rest);
         }
         self.records.last().unwrap()
@@ -527,32 +618,35 @@ impl PaneHarness {
 
     pub fn run_for(&mut self, d: Duration) {
         let end = Instant::now() + d;
+        self.run_until = Some(end);
         while Instant::now() < end {
             self.frame();
         }
+        self.run_until = None;
     }
 
-    /// Run until no tile slot is loading, downloads and cache tasks are idle,
-    /// no chunk is pending or in cooldown, and the pixels haven't changed for
-    /// `quiet`. Cooldown chunks count as unfinished even after their cooldown
-    /// expires (they wait for a tile re-render to be requested again) — so
-    /// chunks that failed and then scrolled off-screen keep a later phase
-    /// from settling; `cooldown_at_end` in the report shows that. Returns the time from the
-    /// start of the current phase to settling, or `None` on timeout.
+    /// Run until every visible tile's last render was complete (the renderer
+    /// reported no missing target chunk) and the pixels haven't changed for
+    /// `quiet`. Downloads for chunks the view no longer needs don't block
+    /// settling. Returns the time from the start of the current phase to
+    /// settling, or `None` on timeout.
     pub fn run_until_settled(&mut self, timeout: Duration, quiet: Duration) -> Option<Duration> {
         let deadline = Instant::now() + timeout;
+        self.run_until = Some(deadline);
         let mut last_change = self.start.elapsed();
-        loop {
+        let result = loop {
             let r = self.frame().clone();
-            if r.changed || r.loading() > 0 || !r.downloads_idle() {
+            if r.changed || !r.all_complete() {
                 last_change = r.t;
             } else if r.t.saturating_sub(last_change) >= quiet {
-                return Some(last_change.saturating_sub(self.phase_t0()));
+                break Some(last_change.saturating_sub(self.phase_t0()));
             }
             if Instant::now() >= deadline {
-                return None;
+                break None;
             }
-        }
+        };
+        self.run_until = None;
+        result
     }
 
     fn phase_t0(&self) -> Duration {
@@ -582,6 +676,13 @@ impl PaneHarness {
             done_y += sy;
             self.frame();
         }
+    }
+
+    /// Move along the pane's depth axis (w for segment panes), like the
+    /// scroll wheel does.
+    pub fn scroll(&mut self, dw: i32) {
+        let (_, _, d) = self.opts.pane.coordinates();
+        self.coord[d] = (self.coord[d] + dw).clamp(*self.ranges[d].start(), *self.ranges[d].end());
     }
 
     pub fn set_zoom(&mut self, zoom: f32) {
@@ -628,9 +729,13 @@ impl PaneHarness {
             duration: recs.last().map_or(Duration::ZERO, |r| r.t.saturating_sub(t0)),
             full_coverage: first(&|r| r.coverage >= 0.9999),
             all_tiles_ready: first(&|r| r.loading() == 0),
+            all_complete: first(&|r| r.all_complete()),
+            incomplete_at_end: recs.last().map_or(0, |r| r.tiles.visible - r.tiles.complete),
+            missing_at_end: recs.last().map_or(0, |r| r.tiles.missing_chunks),
             settled,
             min_coverage: recs.iter().map(|r| r.coverage).fold(1.0, f32::min),
             max_blank_tiles: recs.iter().map(|r| r.tiles.loading_blank).max().unwrap_or(0),
+            black_at_end: recs.last().map_or(0.0, |r| r.black),
             downloads,
             max_in_flight: recs.iter().filter_map(|r| r.downloads).map(|d| d.in_flight).max().unwrap_or(0),
             max_queued: recs.iter().filter_map(|r| r.downloads).map(|d| d.queued).max().unwrap_or(0),
@@ -664,14 +769,14 @@ impl PaneHarness {
         writeln!(
             f,
             "frame,t_ms,render_ms,u,v,w,zoom,visible,ready,recalculating,loading_fallback,loading_blank,\
-             budget_skipped,coverage,changed,repaint,dl_in_flight,dl_queued,dl_submitted,dl_completed,\
+             budget_skipped,complete,missing_chunks,coverage,black,changed,repaint,dl_in_flight,dl_queued,dl_submitted,dl_completed,\
              dl_not_found,dl_failed,dl_aged_out,dl_bytes,queued_tasks,pending_chunks,cooldown_chunks"
         )?;
         for r in &self.records {
             let d = r.downloads.unwrap_or_default();
             writeln!(
                 f,
-                "{},{:.1},{:.2},{},{},{},{},{},{},{},{},{},{},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{:.1},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 r.frame,
                 r.t.as_secs_f64() * 1e3,
                 r.render.as_secs_f64() * 1e3,
@@ -685,7 +790,10 @@ impl PaneHarness {
                 r.tiles.loading_fallback,
                 r.tiles.loading_blank,
                 r.tiles.budget_skipped,
+                r.tiles.complete,
+                r.tiles.missing_chunks,
                 r.coverage,
+                r.black,
                 r.changed as u8,
                 r.repaint_requested as u8,
                 d.in_flight,
@@ -714,6 +822,7 @@ impl PaneHarness {
 /// - `pan <dx> <dy>` — jump by screen pixels (starts a phase)
 /// - `drag <dx> <dy> <s>` — continuous pan over `s` seconds (starts a phase)
 /// - `zoom <z>` (starts a phase)
+/// - `scroll <dw>` — move along the depth axis, like the wheel (starts a phase)
 /// - `goto <u> <v> <w>` (starts a phase)
 /// - `png <name>` — save the current frame as `<name>.png`
 #[derive(Debug, Clone, PartialEq)]
@@ -724,6 +833,7 @@ pub enum Step {
     Pan(f32, f32),
     Drag(f32, f32, Duration),
     Zoom(f32),
+    Scroll(i32),
     Goto([i32; 3]),
     Png(String),
 }
@@ -770,6 +880,10 @@ pub fn parse_script(script: &str) -> Result<Vec<Step>, String> {
             "zoom" => {
                 arity(1)?;
                 Step::Zoom(num(parts[1])?)
+            }
+            "scroll" => {
+                arity(1)?;
+                Step::Scroll(int(parts[1])?)
             }
             "goto" => {
                 arity(3)?;
@@ -826,6 +940,10 @@ pub fn run_script(
             Step::Zoom(z) => {
                 harness.begin_phase(format!("zoom {}", z));
                 harness.set_zoom(*z);
+            }
+            Step::Scroll(dw) => {
+                harness.begin_phase(format!("scroll {}", dw));
+                harness.scroll(*dw);
             }
             Step::Goto(c) => {
                 harness.begin_phase(format!("goto {:?}", c));

@@ -18,6 +18,7 @@ mod disk;
 mod downloader;
 mod lifo;
 mod netlog;
+pub mod paint_scope;
 mod s3_auth;
 pub mod epoch;
 pub mod purge;

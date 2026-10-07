@@ -644,6 +644,12 @@ impl ChunkCache {
         self.inner.downloader.is_active_chunk(key)
     }
 
+    /// Identity of this cache (stable while it's open), as used in
+    /// `paint_scope::MissingChunk`.
+    pub fn id(&self) -> usize {
+        Arc::as_ptr(&self.inner) as *const () as usize
+    }
+
     /// Downloader gauges and counters (see `DownloaderStats`). Note the
     /// downloader may be shared with other volumes opened from the same
     /// `UnifiedCache`.
@@ -837,10 +843,16 @@ impl ChunkCache {
         // Pass 2: target chunks. Each first dispatch flips the bitmap
         // to Dispatched and (inside dispatch_chunk) tries upscale fill
         // from any already-Resident parent.
+        // The composite reads these chunks straight off the shard mmap, so
+        // any that aren't terminal yet are this paint's misses.
+        let id = self.id();
         for cz in cz0..=cz1 {
             for cy in cy0..=cy1 {
                 for cx in cx0..=cx1 {
-                    let _ = self.state_or_fetch(ChunkKey::new(target_lod, cx as u32, cy as u32, cz as u32));
+                    let key = ChunkKey::new(target_lod, cx as u32, cy as u32, cz as u32);
+                    if !self.state_or_fetch(key).is_terminal() {
+                        super::paint_scope::record(id, key);
+                    }
                 }
             }
         }

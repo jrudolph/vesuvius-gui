@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
+use vesuvius_rs::cache::paint_scope::{self, PaintReport};
 use vesuvius_rs::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
 
 const ZOOM_RES_FACTOR: f32 = 1.;
@@ -60,12 +61,18 @@ pub struct TileFrameStats {
     pub loading_blank: u32,
     /// Loading tiles not polled because the frame budget ran out.
     pub budget_skipped: u32,
+    /// Ready/recalculating tiles whose shown render drew final data
+    /// everywhere (no target chunk missing).
+    pub complete: u32,
+    /// Sum over shown renders of target chunks they had to fall back on
+    /// (chunks shared by several tiles count once per tile).
+    pub missing_chunks: u32,
 }
 
 #[derive(Clone, Copy)]
 enum TileOutcome {
-    Ready,
-    Recalculating,
+    Ready { missing: u32 },
+    Recalculating { missing: u32 },
     Loading { has_fallback: bool, budget_skipped: bool },
 }
 
@@ -89,8 +96,17 @@ impl FrameBudget {
         let mut t = self.tiles.get();
         t.visible += 1;
         match outcome {
-            TileOutcome::Ready => t.ready += 1,
-            TileOutcome::Recalculating => t.recalculating += 1,
+            TileOutcome::Ready { missing } | TileOutcome::Recalculating { missing } => {
+                if matches!(outcome, TileOutcome::Ready { .. }) {
+                    t.ready += 1;
+                } else {
+                    t.recalculating += 1;
+                }
+                if missing == 0 {
+                    t.complete += 1;
+                }
+                t.missing_chunks += missing;
+            }
             TileOutcome::Loading {
                 has_fallback,
                 budget_skipped,
@@ -212,8 +228,36 @@ impl TileCacheKey {
     }
 }
 
+/// A finished tile render plus what it couldn't draw at full detail.
+struct RenderedTile {
+    image: ColorImage,
+    /// Target-LOD chunks the render had to fall back on (see
+    /// `vesuvius_rs::cache::paint_scope`). Empty: the tile is complete.
+    report: Arc<PaintReport>,
+}
+
+impl RenderedTile {
+    fn missing(&self) -> u32 {
+        self.report.missing.len() as u32
+    }
+
+    /// Placeholder for a cancelled or failed render. Never complete (one
+    /// sentinel miss on cache id 0), so it stays eligible for re-render.
+    fn failed() -> Self {
+        let mut report = PaintReport::default();
+        report.missing.insert(paint_scope::MissingChunk {
+            cache: 0,
+            key: vesuvius_rs::cache::ChunkKey::new(0, 0, 0, 0),
+        });
+        Self {
+            image: ColorImage::example(),
+            report: Arc::new(report),
+        }
+    }
+}
+
 struct CancellableImageFuture {
-    future: Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>>,
+    future: Pin<Box<dyn futures::Future<Output = Arc<RenderedTile>> + Send + Sync>>,
     is_cancelled: Arc<AtomicBool>,
 }
 impl Drop for CancellableImageFuture {
@@ -233,6 +277,7 @@ enum AsyncTexture {
         cached_at: quanta::Instant,
         content_hash: u64,   // Hash of tile pixel data
         backoff_factor: u64, // TTL multiplier for unchanged tiles (1, 2, 4, 8, 16)
+        report: Arc<PaintReport>, // What the shown render fell back on
     },
     ReadyRecalculating {
         texture: egui::TextureHandle,
@@ -240,6 +285,7 @@ enum AsyncTexture {
         cached_at: quanta::Instant,
         content_hash: u64,   // Hash of current tile data
         backoff_factor: u64, // Current backoff factor to preserve
+        report: Arc<PaintReport>, // What the shown render fell back on
     },
 }
 
@@ -287,7 +333,7 @@ fn hash_image(image: &ColorImage) -> u64 {
 }
 
 /// Poll a future with timeout, shared logic for Loading and ReadyRecalculating states
-fn poll_tile_future(future: Arc<Mutex<CancellableImageFuture>>, timeout: std::time::Duration) -> Poll<Arc<ColorImage>> {
+fn poll_tile_future(future: Arc<Mutex<CancellableImageFuture>>, timeout: std::time::Duration) -> Poll<Arc<RenderedTile>> {
     let mut future_guard = future.lock().unwrap();
     let waker = futures::task::noop_waker();
     let mut context = Context::from_waker(&waker);
@@ -740,13 +786,16 @@ impl VolumePane {
                 cached_at,
                 content_hash,
                 backoff_factor,
+                report,
             }) => {
+                let missing = report.missing.len() as u32;
                 // Check if tile needs recalculation
                 let async_tex = AsyncTexture::Ready {
                     texture: texture.clone(),
                     cached_at,
                     content_hash,
                     backoff_factor,
+                    report: report.clone(),
                 };
 
                 if async_tex.needs_recalculation() {
@@ -761,13 +810,14 @@ impl VolumePane {
                             cached_at,
                             content_hash,
                             backoff_factor,
+                            report,
                         },
                     );
                 } else {
                     // Refresh cache entry to keep it alive
                     set(ui, key, async_tex);
                 }
-                budget.record_tile(TileOutcome::Ready);
+                budget.record_tile(TileOutcome::Ready { missing });
                 vec![(texture, full_uv(), full_uv())]
             }
 
@@ -777,7 +827,9 @@ impl VolumePane {
                 cached_at,
                 content_hash,
                 backoff_factor,
+                report,
             }) => {
+                let missing = report.missing.len() as u32;
                 // Skip the recalc peek entirely if the frame deadline is gone.
                 if !budget.polling_allowed() {
                     set(
@@ -789,18 +841,19 @@ impl VolumePane {
                             cached_at,
                             content_hash,
                             backoff_factor,
+                            report,
                         },
                     );
                     ui.ctx().request_repaint();
-                    budget.record_tile(TileOutcome::Recalculating);
+                    budget.record_tile(TileOutcome::Recalculating { missing });
                     return vec![(texture, full_uv(), full_uv())];
                 }
                 // Poll the recalculation future briefly (non-blocking check)
                 // Use minimal timeout since we don't want to block UI
                 match poll_tile_future(future.clone(), Duration::from_micros(100)) {
-                    Poll::Ready(new_image) => {
+                    Poll::Ready(rendered) => {
                         // Calculate hash of new image to check if content changed
-                        let new_hash = hash_image(new_image.as_ref());
+                        let new_hash = hash_image(&rendered.image);
 
                         // If content unchanged, increase backoff; otherwise reset
                         let new_backoff = if new_hash == content_hash {
@@ -819,7 +872,7 @@ impl VolumePane {
                                 self.pane_type.coordinates().2,
                                 key.volume_id
                             ),
-                            new_image.as_ref().clone(),
+                            rendered.image.clone(),
                             Default::default(),
                         );
                         set(
@@ -830,9 +883,12 @@ impl VolumePane {
                                 cached_at: quanta::Instant::now(),
                                 content_hash: new_hash,
                                 backoff_factor: new_backoff,
+                                report: rendered.report.clone(),
                             },
                         );
-                        budget.record_tile(TileOutcome::Ready);
+                        budget.record_tile(TileOutcome::Ready {
+                            missing: rendered.missing(),
+                        });
                         vec![(new_texture, full_uv(), full_uv())]
                     }
                     Poll::Pending => {
@@ -846,10 +902,11 @@ impl VolumePane {
                                 cached_at,
                                 content_hash,
                                 backoff_factor,
+                                report,
                             },
                         );
                         ui.ctx().request_repaint(); // Check again next frame
-                        budget.record_tile(TileOutcome::Recalculating);
+                        budget.record_tile(TileOutcome::Recalculating { missing });
                         vec![(texture, full_uv(), full_uv())]
                     }
                 }
@@ -874,8 +931,8 @@ impl VolumePane {
                     return draws;
                 };
                 match poll_tile_future(future.clone(), timeout) {
-                    Poll::Ready(image) => {
-                        let content_hash = hash_image(image.as_ref());
+                    Poll::Ready(rendered) => {
+                        let content_hash = hash_image(&rendered.image);
                         let texture = ui.ctx().load_texture(
                             format!(
                                 "{}_{}_{}_{}_{}",
@@ -885,7 +942,7 @@ impl VolumePane {
                                 self.pane_type.coordinates().2,
                                 key.volume_id
                             ),
-                            image.as_ref().clone(),
+                            rendered.image.clone(),
                             Default::default(),
                         );
                         set(
@@ -896,9 +953,12 @@ impl VolumePane {
                                 cached_at: quanta::Instant::now(),
                                 content_hash,
                                 backoff_factor: 1, // Initial backoff
+                                report: rendered.report.clone(),
                             },
                         );
-                        budget.record_tile(TileOutcome::Ready);
+                        budget.record_tile(TileOutcome::Ready {
+                            missing: rendered.missing(),
+                        });
                         return vec![(texture, full_uv(), full_uv())];
                     }
                     Poll::Pending => {
@@ -1104,25 +1164,31 @@ impl VolumePane {
 
         let handle = tokio::task::spawn_blocking(move || {
             if is_cancelled_clone.load(std::sync::atomic::Ordering::SeqCst) {
-                return Arc::new(egui::ColorImage::example());
+                return Arc::new(RenderedTile::failed());
             }
 
             let volume_pane = VolumePane::new(pane_type, is_segment_pane);
             let overlay = overlay_shared.map(|c| c());
-            let image = volume_pane.create_tile_sync(&key_clone, shared(), overlay);
-            Arc::new(image)
+            // The whole tile render runs on this thread, so the paint scope
+            // sees every cache lookup it makes (base, overlay, all levels).
+            let (image, report) =
+                paint_scope::capture(|| volume_pane.create_tile_sync(&key_clone, shared(), overlay));
+            Arc::new(RenderedTile {
+                image,
+                report: Arc::new(report),
+            })
         });
 
         let key = key.clone();
 
         // Map the JoinError to a default error image and box the future
-        let future: Pin<Box<dyn futures::Future<Output = Arc<ColorImage>> + Send + Sync>> = Box::pin(async move {
+        let future: Pin<Box<dyn futures::Future<Output = Arc<RenderedTile>> + Send + Sync>> = Box::pin(async move {
             match handle.await {
-                Ok(image) => image,
+                Ok(rendered) => rendered,
                 Err(_join_error) => {
                     println!("Error loading tile ({}, {}): task failed", key.tile_u, key.tile_v);
                     // Return a simple error image
-                    Arc::new(egui::ColorImage::example())
+                    Arc::new(RenderedTile::failed())
                 }
             }
         });

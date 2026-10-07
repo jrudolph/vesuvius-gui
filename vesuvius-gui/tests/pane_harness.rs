@@ -48,6 +48,5 @@ async fn cold_view_settles() {
     println!("{}", report);
 
     assert!(settled.is_some(), "view never settled");
-    assert_eq!(report.pending_at_end, Some(0), "chunks stranded in Pending");
-    assert_eq!(report.cooldown_at_end, Some(0), "chunks left in cooldown");
+    assert_eq!(report.incomplete_at_end, 0, "visible tiles still missing data");
 }
