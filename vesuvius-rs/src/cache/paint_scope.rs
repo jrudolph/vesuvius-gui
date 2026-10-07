@@ -50,8 +50,9 @@ pub struct PaintReport {
     /// improve the paint too.
     pub missing: fxhash::FxHashMap<MissingChunk, Option<u8>>,
     caches: Vec<ChunkCache>,
-    /// The lease the paint ran under.
+    /// The lease the paint ran under, and the paint's generation in it.
     lease: Option<Arc<Lease>>,
+    generation: u64,
     /// (cache id, chunk) pairs that already recorded `lease` during the
     /// paint. Emptied when the paint ends.
     attached: fxhash::FxHashSet<(usize, ChunkKey)>,
@@ -153,6 +154,9 @@ impl ScopeGuard {
         let prev = self.prev.take().expect("finished once");
         let mut report = SCOPE.with(|s| std::mem::replace(&mut *s.borrow_mut(), prev)).unwrap_or_default();
         report.attached = Default::default();
+        if let Some(lease) = &report.lease {
+            lease.end_paint(report.generation);
+        }
         // Nested scopes also count towards the outer one.
         SCOPE.with(|s| {
             if let Some(outer) = s.borrow_mut().as_mut() {
@@ -181,8 +185,10 @@ impl Drop for ScopeGuard {
 /// Run `f` (a paint) under `lease` and report the target chunks it
 /// couldn't use.
 pub fn capture<R>(lease: Option<Arc<Lease>>, f: impl FnOnce() -> R) -> (R, PaintReport) {
+    let generation = lease.as_ref().map_or(0, |l| l.begin_paint());
     let fresh = PaintReport {
         lease,
+        generation,
         // Anything landing from here on may have been missed by the paint.
         seen_epoch: AtomicU64::new(LANDED_EPOCH.load(Ordering::Acquire)),
         renewed_at_ms: AtomicU64::new(clock_ms()),

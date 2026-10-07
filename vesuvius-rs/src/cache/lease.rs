@@ -14,6 +14,12 @@
 //!
 //! Liveness counts frames, not wall time, so an idle GUI (no frames) keeps
 //! its requests.
+//!
+//! A lease only stands for what its owner *currently* needs: each paint
+//! under it is a render generation, and a chunk stays wanted by the lease
+//! only if the latest finished paint (or the one in progress) requested it
+//! again. When a tile's target data lands, the coarser levels it had been
+//! falling back on drop out of its interest with its next paint.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -48,6 +54,11 @@ pub(super) fn priority_generation() -> u64 {
 pub struct Lease {
     renewed_frame: AtomicU64,
     priority: AtomicU32,
+    /// Generation of the latest paint started under this lease.
+    started: AtomicU64,
+    /// Generation of the latest paint finished under this lease. Chunks
+    /// attached before it are no longer wanted by this lease.
+    finished: AtomicU64,
 }
 
 impl Lease {
@@ -55,7 +66,21 @@ impl Lease {
         Arc::new(Self {
             renewed_frame: AtomicU64::new(frame()),
             priority: AtomicU32::new(priority),
+            started: AtomicU64::new(0),
+            finished: AtomicU64::new(0),
         })
+    }
+
+    /// A paint starts under this lease; chunks it requests are attached at
+    /// the returned generation.
+    pub(super) fn begin_paint(&self) -> u64 {
+        self.started.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// The paint of `generation` finished: from now on only chunks it (or a
+    /// later paint) requested are wanted.
+    pub(super) fn end_paint(&self, generation: u64) {
+        self.finished.fetch_max(generation, Ordering::Relaxed);
     }
 
     /// Keep the lease live through the current frame at `priority`.
@@ -117,26 +142,37 @@ impl Liveness {
     }
 }
 
-/// The leases that asked for one chunk.
+/// The leases that asked for one chunk, each with the generation of the
+/// lease's paint that asked last.
 #[derive(Default)]
 pub(super) struct Interest {
-    leases: Vec<Weak<Lease>>,
+    leases: Vec<(Weak<Lease>, u64)>,
 }
 
 impl Interest {
+    /// Record that `lease`'s latest started paint wants the chunk.
     pub fn attach(&mut self, lease: &Arc<Lease>) {
         let weak = Arc::downgrade(lease);
-        if !self.leases.iter().any(|l| l.ptr_eq(&weak)) {
-            self.leases.retain(|l| l.strong_count() > 0);
-            self.leases.push(weak);
+        let generation = lease.started.load(Ordering::Relaxed);
+        match self.leases.iter_mut().find(|(l, _)| l.ptr_eq(&weak)) {
+            Some((_, g)) => *g = (*g).max(generation),
+            None => {
+                self.leases.retain(|(l, _)| l.strong_count() > 0);
+                self.leases.push((weak, generation));
+            }
         }
     }
 
-    /// `Live` with the best priority among live leases, else `Dead`.
+    /// `Live` with the best priority among live leases that still want the
+    /// chunk, else `Dead`.
     pub fn liveness(&self) -> Liveness {
         self.leases
             .iter()
-            .filter_map(|l| l.upgrade()?.live_priority())
+            .filter_map(|(l, generation)| {
+                let lease = l.upgrade()?;
+                (*generation >= lease.finished.load(Ordering::Relaxed)).then_some(())?;
+                lease.live_priority()
+            })
             .min()
             .map_or(Liveness::Dead, Liveness::Live)
     }
@@ -170,6 +206,21 @@ mod tests {
         assert_eq!(interest.liveness(), Liveness::Dead);
         assert!(near.renew(1), "renewing an expired lease reports it died");
         assert_eq!(interest.liveness(), Liveness::Live(1));
+
+        // Only what the latest finished paint (or the running one) asked for
+        // stays wanted.
+        let coarse = {
+            let mut i = Interest::default();
+            i.attach(&near);
+            i
+        };
+        let mut target = Interest::default();
+        let g = near.begin_paint();
+        target.attach(&near);
+        assert_eq!(coarse.liveness(), Liveness::Live(1), "still wanted while the paint runs");
+        near.end_paint(g);
+        assert_eq!(coarse.liveness(), Liveness::Dead, "not requested by the finished paint");
+        assert_eq!(target.liveness(), Liveness::Live(1));
 
         assert_eq!(Liveness::Unleased.or(Liveness::Dead), Liveness::Dead);
         assert_eq!(Liveness::Dead.or(Liveness::Live(3)), Liveness::Live(3));
