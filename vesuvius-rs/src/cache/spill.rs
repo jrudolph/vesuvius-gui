@@ -200,15 +200,22 @@ impl RawStore {
                 }
             }
         }
+        // The same key can be written concurrently (two fetches of one
+        // URL). Each writer gets its own temp file and maps the inode it
+        // wrote, so another writer truncating or replacing the file under
+        // `path` can never shorten our mapping; the renames just race for
+        // which complete copy stays.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let path = self.path_for(key);
-        let tmp = path.with_extension("tmp");
-        {
-            let mut f = File::create(&tmp)?;
-            f.write_all(bytes)?;
-        }
-        std::fs::rename(&tmp, &path)?;
-        let file = File::open(&path)?;
+        let tmp = path.with_extension(format!(
+            "{}-{}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = File::options().read(true).write(true).create_new(true).open(&tmp)?;
+        file.write_all(bytes)?;
         let mmap = unsafe { MmapOptions::new().map(&file)? };
+        std::fs::rename(&tmp, &path)?;
 
         let total = self.total.fetch_add(bytes.len() as u64, Ordering::Relaxed) + bytes.len() as u64;
         if total > self.cap_bytes {
@@ -317,6 +324,29 @@ mod tests {
             "spill files must be unlinked; found: {:?}",
             listing.iter().map(|e| e.path()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn concurrent_puts_of_one_key_each_map_a_complete_copy() {
+        let root = tmp_root();
+        let store = std::sync::Arc::new(RawStore::with_cap(&root, 1 << 30));
+        let bytes: std::sync::Arc<Vec<u8>> = std::sync::Arc::new((0..262144u32).map(|i| (i * 13 & 0xff) as u8).collect());
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (store, bytes) = (store.clone(), bytes.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..20 {
+                        let mmap = store.put("https://x/same-chunk", &bytes).unwrap();
+                        assert_eq!(mmap.len(), bytes.len(), "mapping shortened by a concurrent writer");
+                        assert!(mmap[..] == bytes[..]);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(store.get("https://x/same-chunk").unwrap().len(), bytes.len());
     }
 
     #[test]
