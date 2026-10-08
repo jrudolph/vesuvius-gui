@@ -5,7 +5,7 @@
 //! Because tifxyz already is a regular UV→XYZ grid we never need triangle
 //! rasterization: painting is a direct bilinear lookup per output pixel. The
 //! grid implicitly triangulates as (r,c)-(r,c+1)-(r+1,c) + (r,c+1)-(r+1,c+1)-(r+1,c)
-//! — the same triangulation `paint_plane_intersection` walks to draw the
+//! — the same triangulation `plane_intersection` walks to draw the
 //! segment outline on the orthogonal XYZ panes.
 
 use std::fs::File;
@@ -24,8 +24,8 @@ use super::composition::{
     OverlayCombineParams,
 };
 use super::{
-    AffineTransform, CompositingMode, DrawingConfig, Image, PaintVolume, SurfaceVolume, Volume, VolumeCons,
-    VoxelPaintVolume, VoxelVolume,
+    AffineTransform, CompositingMode, DrawingConfig, Image, OutlineSegment, PaintVolume, SurfaceVolume, Volume,
+    VolumeCons, VoxelPaintVolume, VoxelVolume,
 };
 
 // ---------- on-disk metadata ----------
@@ -259,7 +259,7 @@ fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 
 /// Build post-affine per-quad AABBs once per `TifXyzData::build`. Invalid quads
 /// (any corner invalid, or grid smaller than 2x2) get sentinel `[+inf; 3, -inf; 3]`
-/// so the plane-axis cull in `paint_plane_intersection` rejects them with a single
+/// so the plane-axis cull in `plane_intersection` rejects them with a single
 /// comparison instead of four `valid[]` loads + four `xyz[]` loads + six min/max.
 fn build_quad_aabb(base: &TifXyzBase, xyz: &[[f32; 3]]) -> Vec<[f32; 6]> {
     let cols = base.cols;
@@ -862,87 +862,32 @@ impl VoxelVolume for TifXyzVolume {
 }
 
 impl SurfaceVolume for TifXyzVolume {
-    /// Walk the implicit grid triangulation and draw a line for every triangle
-    /// that crosses the current plane. Mirrors `ObjVolume::paint_plane_intersection`
-    /// pixel-for-pixel (same colors, same `highlight_uv_section` handling, same
-    /// optional vertex markers) so the segment outline overlay is identical on
-    /// the XYZ panes whether the segment came from .obj or .tifxyz.
-    fn paint_plane_intersection(
-        &self,
-        xyz: [i32; 3],
-        u_coord: usize,
-        v_coord: usize,
-        plane_coord: usize,
-        width: usize,
-        height: usize,
-        _sfactor: u8,
-        paint_zoom: u8,
-        highlight_uv_section: Option<[i32; 3]>,
-        config: &DrawingConfig,
-        buffer: &mut Image,
-    ) {
-        let u = xyz[u_coord];
-        let v = xyz[v_coord];
-        let w = xyz[plane_coord];
-
-        let min_u = u - width as i32 / 2 * paint_zoom as i32;
-        let max_u = u + width as i32 / 2 * paint_zoom as i32;
-        let min_v = v - height as i32 / 2 * paint_zoom as i32;
-        let max_v = v + height as i32 / 2 * paint_zoom as i32;
-
-        let (uv_section_min, uv_section_max) = if let Some(h) = highlight_uv_section {
-            (
-                [
-                    (h[0] as f64 - width as f64 / 2. * paint_zoom as f64) / self.tex_width as f64,
-                    (h[1] as f64 - height as f64 / 2. * paint_zoom as f64) / self.tex_height as f64,
-                ],
-                [
-                    (h[0] as f64 + width as f64 / 2. * paint_zoom as f64) / self.tex_width as f64,
-                    (h[1] as f64 + height as f64 / 2. * paint_zoom as f64) / self.tex_height as f64,
-                ],
-            )
-        } else {
-            ([0f64, 0f64], [0f64, 0f64])
-        };
-
-        let draw_outline_vertices = config.draw_outline_vertices;
-
+    /// Intersect the implicit grid triangulation (the same one `ObjVolume` gets
+    /// from a .obj) with the plane, so the outline is identical either way.
+    fn plane_intersection(&self, u_coord: usize, v_coord: usize, plane_coord: usize, w: i32) -> Vec<OutlineSegment> {
         let cols = self.data.base.cols;
         let rows = self.data.base.rows;
         if rows < 2 || cols < 2 {
-            return;
+            return vec![];
         }
         let qcols = cols - 1;
 
         let xyz_grid = &self.data.xyz;
         let quad_aabb = &self.data.quad_aabb;
-        let inv_cols = 1.0 / cols as f64;
-        let inv_rows = 1.0 / rows as f64;
-
-        // f32 versions of the paint-area bounds for the per-quad cull. Voxel coords
-        // stay well within f32 precision, and the cache is f32, so this avoids
-        // mixing widths in the hot loop.
+        let tex_per_col = self.tex_width as f32 / cols as f32;
+        let tex_per_row = self.tex_height as f32 / rows as f32;
         let w_f32 = w as f32;
-        let min_u_f32 = min_u as f32;
-        let max_u_f32 = max_u as f32;
-        let min_v_f32 = min_v as f32;
-        let max_v_f32 = max_v as f32;
+        let w = w as f64;
+        let corner = |i: usize| xyz_grid[i].map(|c| c as f64);
 
+        let mut segments = Vec::new();
         for r in 0..rows - 1 {
             let qrow_base = r * qcols;
             let row_base = r * cols;
             for c in 0..cols - 1 {
                 let bb = quad_aabb[qrow_base + c];
-                // Plane-axis first: invalid quads use a `+inf/-inf` sentinel that
-                // also fails this test, so one branch covers both "invalid" and
-                // "doesn't cross the plane" — by far the common reject paths.
+                // Invalid quads use a `+inf/-inf` sentinel that also fails this test.
                 if bb[plane_coord] > w_f32 || bb[3 + plane_coord] < w_f32 {
-                    continue;
-                }
-                if bb[3 + u_coord] < min_u_f32 || bb[u_coord] > max_u_f32 {
-                    continue;
-                }
-                if bb[3 + v_coord] < min_v_f32 || bb[v_coord] > max_v_f32 {
                     continue;
                 }
 
@@ -950,112 +895,20 @@ impl SurfaceVolume for TifXyzVolume {
                 let i10 = i00 + 1;
                 let i01 = i00 + cols;
                 let i11 = i01 + 1;
-                let p00 = xyz_grid[i00];
-                let p10 = xyz_grid[i10];
-                let p01 = xyz_grid[i01];
-                let p11 = xyz_grid[i11];
+                let (p00, p10, p01, p11) = (corner(i00), corner(i10), corner(i01), corner(i11));
 
-                let should_highlight = if highlight_uv_section.is_some() {
-                    // normalized UV bbox of this quad (one cell wide/tall)
-                    let u_min = c as f64 * inv_cols;
-                    let u_max = (c + 1) as f64 * inv_cols;
-                    let v_min = r as f64 * inv_rows;
-                    let v_max = (r + 1) as f64 * inv_rows;
-                    u_min <= uv_section_max[0]
-                        && u_max >= uv_section_min[0]
-                        && v_min <= uv_section_max[1]
-                        && v_max >= uv_section_min[1]
-                } else {
-                    false
-                };
+                let tex_min = [c as f32 * tex_per_col, r as f32 * tex_per_row];
+                let tex_max = [(c + 1) as f32 * tex_per_col, (r + 1) as f32 * tex_per_row];
 
                 // triangle 1: p00, p10, p01 ; triangle 2: p10, p11, p01
-                draw_tri_plane_intersection(
-                    p00, p10, p01,
-                    u_coord, v_coord, plane_coord,
-                    w, min_u, min_v, paint_zoom,
-                    should_highlight, draw_outline_vertices,
-                    width, height, buffer,
-                );
-                draw_tri_plane_intersection(
-                    p10, p11, p01,
-                    u_coord, v_coord, plane_coord,
-                    w, min_u, min_v, paint_zoom,
-                    should_highlight, draw_outline_vertices,
-                    width, height, buffer,
-                );
+                for tri in [[p00, p10, p01], [p10, p11, p01]] {
+                    if let Some((a, b)) = super::triangle_plane_segment(tri, u_coord, v_coord, plane_coord, w) {
+                        segments.push(OutlineSegment { a, b, tex_min, tex_max });
+                    }
+                }
             }
         }
-    }
-}
-
-#[inline]
-fn draw_tri_plane_intersection(
-    v1: [f32; 3],
-    v2: [f32; 3],
-    v3: [f32; 3],
-    u_coord: usize,
-    v_coord: usize,
-    plane_coord: usize,
-    w: i32,
-    min_u: i32,
-    min_v: i32,
-    paint_zoom: u8,
-    should_highlight: bool,
-    draw_outline_vertices: bool,
-    width: usize,
-    height: usize,
-    buffer: &mut Image,
-) {
-    let w_f = w as f64;
-    let pc = plane_coord;
-
-    let mut points: [[f64; 3]; 2] = [[0.0; 3]; 2];
-    let mut n_points = 0usize;
-
-    let add_intersection = |a: [f32; 3], b: [f32; 3], n: &mut usize, pts: &mut [[f64; 3]; 2]| {
-        if *n >= 2 {
-            return;
-        }
-        let da = a[pc] as f64 - w_f;
-        let db = b[pc] as f64 - w_f;
-        if da.signum() == db.signum() {
-            return;
-        }
-        let t = da / (da - db);
-        let mut coords = [0.0f64; 3];
-        coords[u_coord] = a[u_coord] as f64 + t * (b[u_coord] as f64 - a[u_coord] as f64);
-        coords[v_coord] = a[v_coord] as f64 + t * (b[v_coord] as f64 - a[v_coord] as f64);
-        coords[plane_coord] = w_f;
-        pts[*n] = coords;
-        *n += 1;
-    };
-
-    add_intersection(v1, v2, &mut n_points, &mut points);
-    add_intersection(v2, v3, &mut n_points, &mut points);
-    add_intersection(v3, v1, &mut n_points, &mut points);
-
-    if n_points != 2 {
-        return;
-    }
-
-    let p1 = points[0];
-    let p2 = points[1];
-    let x0 = ((p1[u_coord] - min_u as f64) / paint_zoom as f64) as i32;
-    let y0 = ((p1[v_coord] - min_v as f64) / paint_zoom as f64) as i32;
-    let x1 = ((p2[u_coord] - min_u as f64) / paint_zoom as f64) as i32;
-    let y1 = ((p2[v_coord] - min_v as f64) / paint_zoom as f64) as i32;
-
-    let (r, g, b, rp, gp, bp) = if should_highlight {
-        (0xff, 0xaa, 0, 0, 0xff, 0)
-    } else {
-        (0xff, 0, 0xff, 0, 0, 0xff)
-    };
-
-    super::objvolume::line(x0, y0, x1, y1, buffer, width, height, r, g, b);
-    if draw_outline_vertices {
-        super::objvolume::point(x0, y0, buffer, 4, rp, gp, bp);
-        super::objvolume::point(x1, y1, buffer, 4, rp, gp, bp);
+        segments
     }
 }
 
@@ -1125,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn paint_plane_intersection_draws_lines_through_segment() {
+    fn plane_intersection_finds_segments() {
         let Ok(base) = TifXyzBase::load(Path::new(FIXTURE)) else {
             eprintln!("skipping: fixture not present");
             return;
@@ -1134,29 +987,9 @@ mod tests {
         let z_plane = 4950i32;
         let data = TifXyzData::build(base, &None);
         let vol = TifXyzVolume::from_data(data, EmptyVolume {}.into_volume(), None);
-        let mut image = crate::volume::Image::new_from_color(256, 256, ecolor::Color32::TRANSPARENT);
-        // XY pane: u_coord=0, v_coord=1, plane_coord=2. Center around the
-        // approximate xy midpoint of the bbox, 32 voxels per pixel to span the
-        // whole segment within 256 px.
-        vol.paint_plane_intersection(
-            [4500, 2800, z_plane],
-            0,
-            1,
-            2,
-            256,
-            256,
-            1,
-            32,
-            None,
-            &DrawingConfig::default(),
-            &mut image,
-        );
-        let drawn = image
-            .data
-            .iter()
-            .filter(|c| **c != ecolor::Color32::TRANSPARENT)
-            .count();
-        assert!(drawn > 0, "expected paint_plane_intersection to draw at least one pixel");
+        // XY pane: u_coord=0, v_coord=1, plane_coord=2.
+        let segments = vol.plane_intersection(0, 1, 2, z_plane);
+        assert!(!segments.is_empty(), "expected the plane to cut the segment");
     }
 
     #[test]

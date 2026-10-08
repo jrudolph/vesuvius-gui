@@ -1,6 +1,6 @@
 use crate::volume::{PaintVolume, VoxelPaintVolume, VoxelVolume};
 
-use super::{DrawingConfig, Image, SurfaceVolume};
+use super::{DrawingConfig, Image, OutlineSegment, SurfaceVolume};
 
 pub struct EmptyVolume {}
 impl VoxelVolume for EmptyVolume {
@@ -30,19 +30,7 @@ impl PaintVolume for EmptyVolume {
 }
 
 impl SurfaceVolume for EmptyVolume {
-    fn paint_plane_intersection(
-        &self,
-        _xyz: [i32; 3],
-        _u_coord: usize,
-        _v_coord: usize,
-        _plane_coord: usize,
-        _width: usize,
-        _height: usize,
-        _sfactor: u8,
-        _paint_zoom: u8,
-        _highlight_uv_section: Option<[i32; 3]>,
-        _config: &DrawingConfig,
-        _buffer: &mut Image,
-    ) {
+    fn plane_intersection(&self, _u_coord: usize, _v_coord: usize, _plane_coord: usize, _w: i32) -> Vec<OutlineSegment> {
+        vec![]
     }
 }

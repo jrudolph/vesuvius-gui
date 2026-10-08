@@ -409,21 +409,48 @@ pub trait VoxelPaintVolume: PaintVolume + VoxelVolume {
 }
 impl<T: PaintVolume + VoxelVolume> VoxelPaintVolume for T {}
 
+/// One piece of a surface's intersection with an axis-aligned plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OutlineSegment {
+    /// Endpoints in world coordinates along the pane's `(u_coord, v_coord)` axes.
+    pub a: [f32; 2],
+    pub b: [f32; 2],
+    /// Texture-space (segment pane pixel) bounds of the triangle the segment
+    /// came from, to highlight the part of the outline visible in the segment pane.
+    pub tex_min: [f32; 2],
+    pub tex_max: [f32; 2],
+}
+
+/// Where triangle `tri` crosses the plane `[plane_coord] == w`, projected onto
+/// `(u_coord, v_coord)`. `None` if it doesn't cross.
+pub(crate) fn triangle_plane_segment(
+    tri: [[f64; 3]; 3],
+    u_coord: usize,
+    v_coord: usize,
+    plane_coord: usize,
+    w: f64,
+) -> Option<([f32; 2], [f32; 2])> {
+    let mut points = [[0f32; 2]; 3];
+    let mut n = 0;
+    for (p, q) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+        let dp = p[plane_coord] - w;
+        let dq = q[plane_coord] - w;
+        if dp.signum() != dq.signum() {
+            let t = dp / (dp - dq);
+            points[n] = [
+                (p[u_coord] + t * (q[u_coord] - p[u_coord])) as f32,
+                (p[v_coord] + t * (q[v_coord] - p[v_coord])) as f32,
+            ];
+            n += 1;
+        }
+    }
+    (n == 2).then(|| (points[0], points[1]))
+}
+
 pub trait SurfaceVolume: PaintVolume + VoxelVolume {
-    fn paint_plane_intersection(
-        &self,
-        xyz: [i32; 3],
-        u_coord: usize,
-        v_coord: usize,
-        plane_coord: usize,
-        width: usize,
-        height: usize,
-        sfactor: u8,
-        paint_zoom: u8,
-        highlight_uv_section: Option<[i32; 3]>,
-        config: &DrawingConfig,
-        buffer: &mut Image,
-    );
+    /// All segments where the surface crosses the plane `xyz[plane_coord] == w`.
+    /// Independent of any viewport, so callers can cache it per slice.
+    fn plane_intersection(&self, u_coord: usize, v_coord: usize, plane_coord: usize, w: i32) -> Vec<OutlineSegment>;
 }
 
 #[derive(Clone)]

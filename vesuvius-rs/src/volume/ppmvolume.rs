@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, Seek, SeekFrom};
 
-use super::{AutoPaintVolume, Image, SurfaceVolume, Volume, VoxelVolume};
+use super::{AutoPaintVolume, OutlineSegment, SurfaceVolume, Volume, VoxelVolume};
 use libm::modf;
 
 pub struct PPMFile {
@@ -149,19 +149,7 @@ impl VoxelVolume for PPMVolume {
 }
 impl AutoPaintVolume for PPMVolume {}
 impl SurfaceVolume for PPMVolume {
-    fn paint_plane_intersection(
-        &self,
-        _xyz: [i32; 3],
-        _u_coord: usize,
-        _v_coord: usize,
-        _plane_coord: usize,
-        _width: usize,
-        _height: usize,
-        _sfactor: u8,
-        _paint_zoom: u8,
-        _highlight_uv_section: Option<[i32; 3]>,
-        _config: &super::DrawingConfig,
-        _buffer: &mut Image,
-    ) {
+    fn plane_intersection(&self, _u_coord: usize, _v_coord: usize, _plane_coord: usize, _w: i32) -> Vec<OutlineSegment> {
+        vec![]
     }
 }

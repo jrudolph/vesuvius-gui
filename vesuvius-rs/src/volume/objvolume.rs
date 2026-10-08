@@ -1,4 +1,4 @@
-use super::{Image, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
+use super::{Image, OutlineSegment, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
 use crate::volume::composition::{
     AlphaCompositionState, AlphaHeightMapCompositionState, Compositor, MaxCompositionState, NoCompositionState,
     OverlayCombineParams,
@@ -1283,167 +1283,47 @@ impl PaintVolume for ObjVolume {
 }
 
 impl SurfaceVolume for ObjVolume {
-    fn paint_plane_intersection(
-        &self,
-        xyz: [i32; 3],
-        u_coord: usize,
-        v_coord: usize,
-        plane_coord: usize,
-        width: usize,
-        height: usize,
-        _sfactor: u8,
-        paint_zoom: u8,
-        highlight_uv_section: Option<[i32; 3]>,
-        config: &super::DrawingConfig,
-        image: &mut Image,
-    ) {
-        let u = xyz[u_coord];
-        let v = xyz[v_coord];
-        let w = xyz[plane_coord];
-
-        let min_u = u - width as i32 / 2 * paint_zoom as i32;
-        let max_u = u + width as i32 / 2 * paint_zoom as i32;
-        let min_v = v - height as i32 / 2 * paint_zoom as i32;
-        let max_v = v + height as i32 / 2 * paint_zoom as i32;
-
-        let (uv_section_min, uv_section_max) = if let Some(h) = highlight_uv_section {
-            (
-                [
-                    (h[0] as f64 - width as f64 / 2. * paint_zoom as f64) / self.width as f64,
-                    (h[1] as f64 - height as f64 / 2. * paint_zoom as f64) / self.height as f64,
-                ],
-                [
-                    (h[0] as f64 + width as f64 / 2. * paint_zoom as f64) / self.width as f64,
-                    (h[1] as f64 + height as f64 / 2. * paint_zoom as f64) / self.height as f64,
-                ],
-            )
-        } else {
-            ([0f64, 0f64], [0f64, 0f64])
-        };
-
-        let draw_outline_vertices = config.draw_outline_vertices;
-
-        let mut mins = [0.0, 0.0, 0.0];
-        let mut maxs = [0.0, 0.0, 0.0];
-
-        mins[u_coord] = min_u as f64;
-        maxs[u_coord] = max_u as f64;
-
-        mins[v_coord] = min_v as f64;
-        maxs[v_coord] = max_v as f64;
-
-        mins[plane_coord] = w as f64;
-        maxs[plane_coord] = w as f64;
-
+    fn plane_intersection(&self, u_coord: usize, v_coord: usize, plane_coord: usize, w: i32) -> Vec<OutlineSegment> {
         let obj = &self.obj;
-        for i in obj.xyz_index.in_bounds(mins, maxs) {
+        let w = w as f64;
+
+        let mut mins = obj.xyz_index.min;
+        let mut maxs = obj.xyz_index.max;
+        mins[plane_coord] = w;
+        maxs[plane_coord] = w;
+
+        // the index lists a triangle once for every cell it overlaps
+        let mut candidates = obj.xyz_index.in_bounds(mins, maxs);
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        let (tex_w, tex_h) = (self.width as f64, self.height as f64);
+        let mut segments = Vec::new();
+        for i in candidates {
             let tri = &obj.base.triangles[i];
-            {
-                {
-                    let v1 = &obj.vertices[tri.v[0] as usize];
-                    let v2 = &obj.vertices[tri.v[1] as usize];
-                    let v3 = &obj.vertices[tri.v[2] as usize];
+            let vs = tri.v.map(|v| {
+                let v = &obj.vertices[v as usize];
+                [v.x, v.y, v.z]
+            });
+            let Some((a, b)) = super::triangle_plane_segment(vs, u_coord, v_coord, plane_coord, w) else {
+                continue;
+            };
 
-                    let minx = v1.x.min(v2.x).min(v3.x);
-                    let maxx = v1.x.max(v2.x).max(v3.x);
-
-                    let miny = v1.y.min(v2.y).min(v3.y);
-                    let maxy = v1.y.max(v2.y).max(v3.y);
-
-                    let minz = v1.z.min(v2.z).min(v3.z);
-                    let maxz = v1.z.max(v2.z).max(v3.z);
-
-                    // clip to paint area
-                    if !(minx > maxs[0]
-                        || maxx < mins[0]
-                        || miny > maxs[1]
-                        || maxy < mins[1]
-                        || minz > maxs[2]
-                        || maxz < mins[2])
-                    {
-                        fn coord(v: &Vertex) -> [f64; 3] {
-                            [v.x, v.y, v.z]
-                        }
-                        fn intersects(v1: &Vertex, v2: &Vertex, w: i32, plane_coord: usize) -> bool {
-                            (coord(v1)[plane_coord] - w as f64).signum() != (coord(v2)[plane_coord] - w as f64).signum()
-                        }
-
-                        let mut points: Vec<[f64; 3]> = vec![];
-
-                        let mut add_intersection_points = |v1: &Vertex, v2: &Vertex| {
-                            if intersects(v1, v2, w, plane_coord) {
-                                let x1 = coord(v1)[u_coord];
-                                let y1 = coord(v1)[v_coord];
-
-                                let x2 = coord(v2)[u_coord];
-                                let y2 = coord(v2)[v_coord];
-
-                                let d1 = w as f64 - coord(v1)[plane_coord];
-                                let d2 = w as f64 - coord(v2)[plane_coord];
-
-                                let t = d1 / (d1 - d2);
-
-                                let mut coords = [0.0, 0.0, 0.0];
-                                coords[u_coord] = x1 + t * (x2 - x1);
-                                coords[v_coord] = y1 + t * (y2 - y1);
-                                coords[plane_coord] = w as f64;
-
-                                points.push(coords);
-                            }
-                        };
-
-                        add_intersection_points(v1, v2);
-                        add_intersection_points(v2, v3);
-                        add_intersection_points(v3, v1);
-
-                        if points.len() == 2 {
-                            let should_highlight = {
-                                if highlight_uv_section.is_some() {
-                                    let v1t = &obj.base.tex_vertices[tri.t[0] as usize];
-                                    let v2t = &obj.base.tex_vertices[tri.t[1] as usize];
-                                    let v3t = &obj.base.tex_vertices[tri.t[2] as usize];
-
-                                    let min_u_t = v1t.u.min(v2t.u).min(v3t.u);
-                                    let max_u_t = v1t.u.max(v2t.u).max(v3t.u);
-
-                                    let min_v_t = self.v(v1t.v).min(self.v(v2t.v)).min(self.v(v3t.v));
-                                    let max_v_t = self.v(v1t.v).max(self.v(v2t.v)).max(self.v(v3t.v));
-
-                                    min_u_t <= uv_section_max[0] as f64
-                                        && max_u_t >= uv_section_min[0] as f64
-                                        && min_v_t <= uv_section_max[1] as f64
-                                        && max_v_t >= uv_section_min[1] as f64
-                                } else {
-                                    false
-                                }
-                            };
-
-                            let p1 = points[0];
-                            let p2 = points[1];
-
-                            // convert to image coordinates
-                            let x0 = ((p1[u_coord] - min_u as f64) / paint_zoom as f64) as i32;
-                            let y0 = ((p1[v_coord] - min_v as f64) / paint_zoom as f64) as i32;
-
-                            let x1 = ((p2[u_coord] - min_u as f64) / paint_zoom as f64) as i32;
-                            let y1 = ((p2[v_coord] - min_v as f64) / paint_zoom as f64) as i32;
-
-                            let (r, g, b, rp, gp, bp) = if should_highlight {
-                                (0xff, 0xaa, 0, 0, 0xff, 0)
-                            } else {
-                                (0xff, 0, 0xff, 0, 0, 0xff)
-                            };
-
-                            line(x0, y0, x1, y1, image, width, height, r, g, b);
-                            if draw_outline_vertices {
-                                point(x0, y0, image, 4, rp, gp, bp);
-                                point(x1, y1, image, 4, rp, gp, bp);
-                            }
-                        }
-                    }
-                }
-            }
+            let ts = tri.t.map(|t| {
+                let t = &obj.base.tex_vertices[t as usize];
+                [t.u * tex_w, self.v(t.v) * tex_h]
+            });
+            let tex_min = [
+                ts[0][0].min(ts[1][0]).min(ts[2][0]) as f32,
+                ts[0][1].min(ts[1][1]).min(ts[2][1]) as f32,
+            ];
+            let tex_max = [
+                ts[0][0].max(ts[1][0]).max(ts[2][0]) as f32,
+                ts[0][1].max(ts[1][1]).max(ts[2][1]) as f32,
+            ];
+            segments.push(OutlineSegment { a, b, tex_min, tex_max });
         }
+        segments
     }
 }
 
@@ -1483,17 +1363,6 @@ pub(super) fn line(x0: i32, y0: i32, x1: i32, y1: i32, buffer: &mut Image, width
         if e2 <= dx {
             error += dx;
             y += sy;
-        }
-    }
-}
-
-pub(super) fn point(x0: i32, y0: i32, buffer: &mut Image, width: usize, r: u8, g: u8, b: u8) {
-    let halfw = width as i32 / 2;
-    for x in x0 - halfw..x0 + halfw {
-        for y in y0 - halfw..y0 + halfw {
-            if x >= 0 && x < buffer.width as i32 && y >= 0 && y < buffer.height as i32 {
-                buffer.set_rgb(x as usize, y as usize, r, g, b);
-            }
         }
     }
 }

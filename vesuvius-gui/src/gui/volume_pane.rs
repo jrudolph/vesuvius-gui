@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use vesuvius_rs::cache::lease::{self, Lease, Priority};
 use vesuvius_rs::cache::paint_scope::{self, PaintReport};
-use vesuvius_rs::volume::{DrawingConfig, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
+use vesuvius_rs::volume::{DrawingConfig, OutlineSegment, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
 
 const ZOOM_RES_FACTOR: f32 = 1.;
 const TILE_SIZE: usize = 256;
@@ -438,6 +438,80 @@ pub struct VolumePane {
 
 const MAX_DOWNSAMPLE: u8 = 32;
 
+/// Outline line width and vertex marker size, in points.
+const OUTLINE_WIDTH: f32 = 1.5;
+const OUTLINE_VERTEX_SIZE: f32 = 4.0;
+
+/// A segment's surface together with its outline on the slice each XYZ pane
+/// currently shows, so the intersection is only recomputed when that slice
+/// changes (not on pan or zoom). Replacing the surface means a new `SurfaceOutline`.
+pub struct SurfaceOutline {
+    surface: Arc<dyn SurfaceVolume>,
+    /// Indexed by plane axis.
+    slices: std::cell::RefCell<[Option<OutlineSlice>; 3]>,
+}
+
+struct OutlineSlice {
+    uv_coords: [usize; 2],
+    w: i32,
+    segments: Arc<Vec<OutlineSegment>>,
+}
+
+impl SurfaceOutline {
+    pub fn new(surface: Arc<dyn SurfaceVolume>) -> Self {
+        Self {
+            surface,
+            slices: Default::default(),
+        }
+    }
+
+    fn segments(&self, u_coord: usize, v_coord: usize, plane_coord: usize, w: i32) -> Arc<Vec<OutlineSegment>> {
+        let mut slices = self.slices.borrow_mut();
+        let slot = &mut slices[plane_coord];
+        if let Some(slice) = slot {
+            if slice.uv_coords == [u_coord, v_coord] && slice.w == w {
+                return slice.segments.clone();
+            }
+        }
+        let segments = Arc::new(self.surface.plane_intersection(u_coord, v_coord, plane_coord, w));
+        *slot = Some(OutlineSlice {
+            uv_coords: [u_coord, v_coord],
+            w,
+            segments: segments.clone(),
+        });
+        segments
+    }
+}
+
+/// A line from `a` to `b` with square caps: a solid core of `half_width` on
+/// each side, fading out to transparent over `feather` (like epaint's own
+/// antialiasing, but without a `Shape` per segment).
+fn add_feathered_line(mesh: &mut egui::Mesh, a: egui::Pos2, b: egui::Pos2, half_width: f32, feather: f32, color: Color32) {
+    let dir = b - a;
+    let len = dir.length();
+    if len == 0.0 {
+        return;
+    }
+    let dir = dir / len;
+    let normal = dir.rot90();
+    // extend the ends so consecutive segments overlap at their joints
+    let (a, b) = (a - dir * half_width, b + dir * half_width);
+
+    let base = mesh.vertices.len() as u32;
+    let offsets = [half_width + feather, half_width, -half_width, -half_width - feather];
+    let colors = [Color32::TRANSPARENT, color, color, Color32::TRANSPARENT];
+    for end in [a, b] {
+        for (offset, color) in offsets.iter().zip(colors) {
+            mesh.colored_vertex(end + normal * *offset, color);
+        }
+    }
+    for k in 0..3 {
+        let (a0, a1, b0, b1) = (base + k, base + k + 1, base + 4 + k, base + 4 + k + 1);
+        mesh.add_triangle(a0, a1, b1);
+        mesh.add_triangle(a0, b1, b0);
+    }
+}
+
 /// Snap a continuous zoom factor to a power-of-two `paint_zoom` (1, 2, 4, …, MAX_DOWNSAMPLE).
 /// Anything in `[1.0, ∞)` paints at native resolution; `[0.5, 1.0)` → 2, `[0.25, 0.5)` → 4, etc.
 /// Power-of-two stepping keeps adjacent-zoom tile grids aligned so cross-mip lookups are trivial.
@@ -466,6 +540,68 @@ impl VolumePane {
             pane_type,
             is_segment_pane,
         }
+    }
+
+    /// Antialiased lines for the outline segments inside `rect`, highlighting
+    /// those whose triangle is visible in a segment pane centered at `highlight_tex`.
+    fn outline_mesh(
+        &self,
+        ctx: &egui::Context,
+        segments: &[OutlineSegment],
+        coord: [i32; 3],
+        zoom: f32,
+        rect: egui::Rect,
+        highlight_tex: [i32; 3],
+        draw_vertices: bool,
+    ) -> egui::Mesh {
+        let (u_coord, v_coord, _) = self.pane_type.coordinates();
+        let half_w = rect.width() / zoom / 2.0;
+        let half_h = rect.height() / zoom / 2.0;
+        let (cu, cv) = (coord[u_coord] as f32, coord[v_coord] as f32);
+        // cull a bit outside so line ends and vertex markers don't pop at the border
+        let margin = (OUTLINE_WIDTH + OUTLINE_VERTEX_SIZE) / zoom;
+        let (min_u, max_u) = (cu - half_w - margin, cu + half_w + margin);
+        let (min_v, max_v) = (cv - half_h - margin, cv + half_h + margin);
+
+        // The segment pane is assumed to show the same extent as this pane.
+        let hl_min = [highlight_tex[0] as f32 - half_w, highlight_tex[1] as f32 - half_h];
+        let hl_max = [highlight_tex[0] as f32 + half_w, highlight_tex[1] as f32 + half_h];
+
+        let center = rect.center();
+        let to_screen = |p: [f32; 2]| egui::pos2(center.x + (p[0] - cu) * zoom, center.y + (p[1] - cv) * zoom);
+        let feather = 1.0 / ctx.pixels_per_point();
+
+        let mut mesh = egui::Mesh::default();
+        for s in segments {
+            if s.a[0].max(s.b[0]) < min_u
+                || s.a[0].min(s.b[0]) > max_u
+                || s.a[1].max(s.b[1]) < min_v
+                || s.a[1].min(s.b[1]) > max_v
+            {
+                continue;
+            }
+            let highlight = s.tex_min[0] <= hl_max[0]
+                && s.tex_max[0] >= hl_min[0]
+                && s.tex_min[1] <= hl_max[1]
+                && s.tex_max[1] >= hl_min[1];
+            let (line_color, vertex_color) = if highlight {
+                (Color32::from_rgb(0xff, 0xaa, 0), Color32::from_rgb(0, 0xff, 0))
+            } else {
+                (Color32::from_rgb(0xff, 0, 0xff), Color32::from_rgb(0, 0, 0xff))
+            };
+
+            let (a, b) = (to_screen(s.a), to_screen(s.b));
+            add_feathered_line(&mut mesh, a, b, OUTLINE_WIDTH / 2.0, feather, line_color);
+            if draw_vertices {
+                for p in [a, b] {
+                    mesh.add_colored_rect(
+                        egui::Rect::from_center_size(p, egui::Vec2::splat(OUTLINE_VERTEX_SIZE)),
+                        vertex_color,
+                    );
+                }
+            }
+        }
+        mesh
     }
 
     fn calculate_visible_tiles(
@@ -568,7 +704,7 @@ impl VolumePane {
         coord: &mut [i32; 3],
         world: &Volume,
         overlay: Option<&Volume>,
-        surface_volume: Option<Arc<dyn SurfaceVolume>>,
+        surface_outline: Option<&SurfaceOutline>,
         zoom: &mut f32,
         drawing_config: &DrawingConfig,
         extra_resolutions: u32,
@@ -612,42 +748,20 @@ impl VolumePane {
             painter.image(texture.id(), adjusted_rect, uv, egui::Color32::WHITE);
         }
 
-        // Add segment outlines if configured
-        if let (Some(surface_vol), Some(outlines_coord)) = (surface_volume, segment_outlines_coord) {
-            // paint segment outline on a new texture that is not cached or tiled
-            let (u_coord, v_coord, d_coord) = self.pane_type.coordinates();
-            let paint_zoom = paint_zoom_for(*zoom);
-
+        if let (Some(outline), Some(outlines_coord)) = (surface_outline, segment_outlines_coord) {
             if !self.is_segment_pane && drawing_config.show_segment_outlines {
-                let scaling = *zoom * paint_zoom as f32;
-                let width = (frame_width as f32 / scaling) as usize;
-                let height = (frame_height as f32 / scaling) as usize;
-
-                let mut image = vesuvius_rs::volume::Image::new_from_color(width, height, Color32::TRANSPARENT);
-                surface_vol.paint_plane_intersection(
+                let (u_coord, v_coord, plane_coord) = self.pane_type.coordinates();
+                let segments = outline.segments(u_coord, v_coord, plane_coord, coord[plane_coord]);
+                let mesh = self.outline_mesh(
+                    ui.ctx(),
+                    &segments,
                     *coord,
-                    u_coord,
-                    v_coord,
-                    d_coord,
-                    width,
-                    height,
-                    1,
-                    paint_zoom,
-                    Some(outlines_coord),
-                    drawing_config,
-                    &mut image,
+                    *zoom,
+                    response.rect,
+                    outlines_coord,
+                    drawing_config.draw_outline_vertices,
                 );
-                let image: egui::ColorImage = to_color_image(image);
-                let texture = ui.ctx().load_texture(self.pane_type.label(), image, Default::default());
-                // Adjust rect to be relative to response.rect
-                let adjusted_rect = egui::Rect::from_min_size(response.rect.min, response.rect.size());
-                // Paint the segment outline texture
-                painter.image(
-                    texture.id(),
-                    adjusted_rect,
-                    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)),
-                    egui::Color32::WHITE,
-                );
+                painter.add(egui::Shape::mesh(mesh));
             }
         }
 

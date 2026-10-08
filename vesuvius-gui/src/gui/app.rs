@@ -1,5 +1,5 @@
 use crate::gui::atlas_download;
-use crate::gui::{FrameBudget, PaneType, VolumePane, UV_PANE_BUDGET_FRACTION};
+use crate::gui::{FrameBudget, PaneType, SurfaceOutline, VolumePane, UV_PANE_BUDGET_FRACTION};
 use directories::BaseDirs;
 use egui::CollapsingHeader;
 use egui::Color32;
@@ -100,7 +100,7 @@ pub struct SegmentMode {
     // This is the same reference as `world`. We need to add it just because upcasting between SurfaceVolume and VoxelPaintVolume is so hard.
     // TODO: remove when there's a better way to upcast
     #[serde(skip)]
-    surface_volume: Arc<dyn SurfaceVolume>,
+    surface_volume: SurfaceOutline,
     #[serde(skip)]
     segment_volume: Option<SegmentVolume>,
     #[serde(skip)]
@@ -132,7 +132,7 @@ impl Default for SegmentMode {
             height: 1000,
             ranges: [0..=1000, 0..=1000, -40..=40],
             world: EmptyVolume {}.into_volume(),
-            surface_volume: Arc::new(EmptyVolume {}),
+            surface_volume: SurfaceOutline::new(Arc::new(EmptyVolume {})),
             segment_volume: None,
             uv_pane: VolumePane::new(PaneType::UV, true),
             convert_to_world_coords: Box::new(|x| x),
@@ -607,7 +607,7 @@ impl TemplateApp {
             segment.height = height as usize;
             segment.ranges = [0..=width, 0..=height, -40..=40];
             segment.world = seg_vol.as_volume();
-            segment.surface_volume = seg_vol.as_surface();
+            segment.surface_volume = SurfaceOutline::new(seg_vol.as_surface());
             let seg_for_convert = seg_vol.clone();
             segment.convert_to_world_coords = Box::new(move |coords| seg_for_convert.convert_to_volume_coords(coords));
             segment.segment_volume = Some(seg_vol);
@@ -726,7 +726,7 @@ impl TemplateApp {
             segment.height = height as usize;
             segment.ranges = [0..=width, 0..=height, -40..=40];
             segment.world = seg_vol.as_volume();
-            segment.surface_volume = seg_vol.as_surface();
+            segment.surface_volume = SurfaceOutline::new(seg_vol.as_surface());
             let seg_for_convert = seg_vol.clone();
             segment.convert_to_world_coords = Box::new(move |coords| seg_for_convert.convert_to_volume_coords(coords));
             segment.segment_volume = Some(seg_vol);
@@ -777,7 +777,7 @@ impl TemplateApp {
 
         let seg_vol = prev.with_base(base, segment.width, segment.height, &segment.last_transform);
         segment.world = seg_vol.as_volume();
-        segment.surface_volume = seg_vol.as_surface();
+        segment.surface_volume = SurfaceOutline::new(seg_vol.as_surface());
         let seg_for_convert = seg_vol.clone();
         segment.convert_to_world_coords = Box::new(move |coords| seg_for_convert.convert_to_volume_coords(coords));
         segment.segment_volume = Some(seg_vol);
@@ -1735,7 +1735,7 @@ impl TemplateApp {
             &mut self.coord,
             &self.world,
             overlay,
-            self.segment_mode.as_ref().map(|s| s.surface_volume.clone()),
+            self.segment_mode.as_ref().map(|s| &s.surface_volume),
             &mut self.zoom,
             &self.drawing_config,
             self.extra_resolutions,
