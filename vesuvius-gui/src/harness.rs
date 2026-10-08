@@ -362,6 +362,11 @@ pub struct PaneHarness {
     run_until: Option<Instant>,
     /// Set by `run_until_settled`: don't idle-wait once the view is complete.
     return_when_settled: bool,
+    /// The pane is not drawn (as when the GUI switches to a layout without
+    /// it); frames still run and advance the lease clock, as other panes
+    /// would.
+    hidden: bool,
+    is_segment: bool,
 }
 
 impl PaneHarness {
@@ -401,6 +406,8 @@ impl PaneHarness {
             repaint_at,
             run_until: None,
             return_when_settled: false,
+            hidden: false,
+            is_segment: world.is_segment,
         }
     }
 
@@ -444,9 +451,14 @@ impl PaneHarness {
             frame_interval,
             coord,
             zoom,
+            hidden,
             ..
         } = self;
         let output = ctx.run(raw, |ctx| {
+            if *hidden {
+                vesuvius_rs::cache::lease::advance_frame(ctx.cumulative_pass_nr());
+                return;
+            }
             egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
                 // Single-pane layout: the pane gets the whole frame budget,
                 // like GuiLayout::UV / XY in the app.
@@ -716,6 +728,18 @@ impl PaneHarness {
         self.zoom = zoom;
     }
 
+    pub fn set_pane(&mut self, pane: PaneType) {
+        self.pane = VolumePane::new(pane, self.is_segment);
+    }
+
+    /// Stop drawing the pane for `d` (frames keep running), then show it
+    /// again; the phase after it starts at the reveal.
+    pub fn hide_for(&mut self, d: Duration) {
+        self.hidden = true;
+        self.run_for(d);
+        self.hidden = false;
+    }
+
     pub fn set_coord(&mut self, coord: [i32; 3]) {
         self.coord = coord;
     }
@@ -875,7 +899,22 @@ pub enum Step {
     Zoom(f32),
     Scroll(i32),
     Goto([i32; 3]),
+    Hide(Duration),
+    /// Switch the pane to another type (as the GUI's layout buttons do).
+    Pane(PaneType),
     Png(String),
+}
+
+pub fn parse_pane(s: &str) -> Result<PaneType, String> {
+    Ok(match s.to_ascii_lowercase().as_str() {
+        "uv" => PaneType::UV,
+        "uw" => PaneType::UW,
+        "vw" => PaneType::VW,
+        "xy" => PaneType::XY,
+        "xz" => PaneType::XZ,
+        "yz" => PaneType::YZ,
+        other => return Err(format!("unknown pane `{}`", other)),
+    })
 }
 
 pub fn parse_script(script: &str) -> Result<Vec<Step>, String> {
@@ -928,6 +967,14 @@ pub fn parse_script(script: &str) -> Result<Vec<Step>, String> {
             "goto" => {
                 arity(3)?;
                 Step::Goto([int(parts[1])?, int(parts[2])?, int(parts[3])?])
+            }
+            "pane" => {
+                arity(1)?;
+                Step::Pane(parse_pane(parts[1])?)
+            }
+            "hide" => {
+                arity(1)?;
+                Step::Hide(secs(parts[1])?)
             }
             "png" => {
                 arity(1)?;
@@ -988,6 +1035,18 @@ pub fn run_script(
             Step::Goto(c) => {
                 harness.begin_phase(format!("goto {:?}", c));
                 harness.set_coord(*c);
+            }
+            Step::Hide(d) => {
+                harness.begin_phase(format!("hidden {:.1}s", d.as_secs_f64()));
+                harness.hide_for(*d);
+                let r = harness.phase_report(None);
+                report(&r);
+                reports.push(r);
+                harness.begin_phase("shown again");
+            }
+            Step::Pane(t) => {
+                harness.begin_phase(format!("pane {}", t.label()));
+                harness.set_pane(*t);
             }
             Step::Png(name) => {
                 let path: PathBuf = out_dir.join(format!("{}.png", name));

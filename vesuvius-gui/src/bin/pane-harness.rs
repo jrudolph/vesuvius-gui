@@ -10,7 +10,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
 use vesuvius_gui::gui::PaneType;
-use vesuvius_gui::harness::{parse_script, run_script, HarnessOptions, HarnessWorld, PaneHarness};
+use vesuvius_gui::harness::{parse_pane, parse_script, run_script, HarnessOptions, HarnessWorld, PaneHarness};
 
 #[derive(Parser, Debug)]
 #[command(about, long_about = None)]
@@ -72,18 +72,6 @@ struct Args {
     /// drag <dx> <dy> <s> | zoom <z> | scroll <dw> | goto <a> <b> <c> | png <name>
     #[clap(long, default_value = "settle 300; png settled")]
     script: String,
-}
-
-fn parse_pane(s: &str) -> Result<PaneType, String> {
-    Ok(match s.to_ascii_lowercase().as_str() {
-        "uv" => PaneType::UV,
-        "uw" => PaneType::UW,
-        "vw" => PaneType::VW,
-        "xy" => PaneType::XY,
-        "xz" => PaneType::XZ,
-        "yz" => PaneType::YZ,
-        other => return Err(format!("unknown pane `{}`", other)),
-    })
 }
 
 fn run(args: Args) -> Result<(), String> {
