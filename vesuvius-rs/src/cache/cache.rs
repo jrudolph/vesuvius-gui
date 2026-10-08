@@ -1524,7 +1524,8 @@ impl Inner {
                         }));
                     }
                     log::trace!("[{}] raw-store hit (chunk {})", source_key, chunk_key);
-                    let payload = Arc::new(LazySource::new(Arc::new(mmap))) as SourcePayload;
+                    let payload = Arc::new(LazySource::new(Arc::new(mmap)).with_on_reject(self.raw_rejecter(&raw_key)))
+                        as SourcePayload;
                     self.complete_source(source_key, Ok(Some(payload)));
                     return RegisterResult::Queued;
                 }
@@ -1540,7 +1541,9 @@ impl Inner {
                     // re-downloading.
                     let outcome: SourceOutcome = match result {
                         Ok(Some(bytes)) => match inner.raw.put(&raw_key, &bytes) {
-                            Ok(mmap) => Ok(Some(Arc::new(LazySource::new(Arc::new(mmap))) as SourcePayload)),
+                            Ok(mmap) => Ok(Some(Arc::new(
+                                LazySource::new(Arc::new(mmap)).with_on_reject(inner.raw_rejecter(&raw_key)),
+                            ) as SourcePayload)),
                             Err(e) => {
                                 log::warn!("[{}] spill failed ({}); falling back to in-memory", key_for_done, e);
                                 Ok(Some(Arc::new(LazySource::new(Arc::new(bytes.to_vec()))) as SourcePayload))
@@ -1562,6 +1565,18 @@ impl Inner {
                 self.downloader.submit(&url, range, chunk_key, liveness, on_done);
                 log::trace!("[{}] submitted (chunk {})", source_key, chunk_key);
                 RegisterResult::Queued
+            }
+        }
+    }
+
+    /// Reject hook for a payload retained under `raw_key`: drops the stored
+    /// copy, so the retry downloads it again.
+    fn raw_rejecter(self: &Arc<Self>, raw_key: &str) -> impl Fn() + Send + Sync + 'static {
+        let inner = Arc::downgrade(self);
+        let raw_key = raw_key.to_string();
+        move || {
+            if let Some(inner) = inner.upgrade() {
+                inner.raw.remove(&raw_key);
             }
         }
     }

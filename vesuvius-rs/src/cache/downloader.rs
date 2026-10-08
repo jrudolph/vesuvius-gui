@@ -369,7 +369,27 @@ fn worker_loop(inner: Arc<DownloaderInner>, client: Client) {
                 // acceptable. Here we surface either as Ok(Some(bytes)).
                 if code == 200 || code == 206 {
                     let t_body = Instant::now();
+                    let content_length = resp.content_length();
                     match resp.bytes() {
+                        Ok(bytes) if content_length.is_some_and(|l| l != bytes.len() as u64) => {
+                            // A body that disagrees with its own header: a
+                            // truncated transfer or a server bug. Flag it, and
+                            // retry after cooldown rather than store it.
+                            body_ms = t_body.elapsed().as_millis() as u64;
+                            got_bytes = bytes.len() as u64;
+                            log::error!(
+                                "[{}] {} body is {} bytes but Content-Length says {}",
+                                job.url,
+                                code,
+                                bytes.len(),
+                                content_length.unwrap()
+                            );
+                            Err(DownloadError::Transient(format!(
+                                "body {} bytes, Content-Length {}",
+                                bytes.len(),
+                                content_length.unwrap()
+                            )))
+                        }
                         Ok(bytes) => {
                             body_ms = t_body.elapsed().as_millis() as u64;
                             got_bytes = bytes.len() as u64;

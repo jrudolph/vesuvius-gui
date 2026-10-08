@@ -72,6 +72,9 @@ pub struct LazySource {
     /// single batch extract reads the snapshot and fills every requester
     /// its plan geometry covers, so one decode serves the whole wave.
     requesters: std::sync::Mutex<Vec<crate::cache::ChunkKey>>,
+    /// Called by [`reject`](Self::reject): drops the retained copy of
+    /// these bytes so a retry downloads them again.
+    on_reject: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl LazySource {
@@ -80,6 +83,20 @@ impl LazySource {
             raw,
             decoded: std::sync::OnceLock::new(),
             requesters: std::sync::Mutex::new(Vec::new()),
+            on_reject: None,
+        }
+    }
+
+    pub fn with_on_reject(mut self, on_reject: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_reject = Some(Box::new(on_reject));
+        self
+    }
+
+    /// The bytes turned out to be unusable (e.g. the wrong size for their
+    /// chunk): forget any retained copy of them.
+    pub fn reject(&self) {
+        if let Some(f) = &self.on_reject {
+            f();
         }
     }
 

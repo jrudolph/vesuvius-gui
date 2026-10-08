@@ -137,6 +137,8 @@ impl ChunkBackfiller for OmeZarrBackfiller {
 
         let mut sources: Vec<SourceSpec> = Vec::new();
         let mut coords: Vec<[usize; 3]> = Vec::new();
+        // Per source, for error reports: its URL (or source key).
+        let mut labels: Vec<String> = Vec::new();
         let covered = covered_cache_chunks([cz_lo, cy_lo, cx_lo], [cz_hi, cy_hi, cx_hi], &nchunk, &shape, key.lod);
         for cz in cz_lo..=cz_hi {
             for cy in cy_lo..=cy_hi {
@@ -180,6 +182,10 @@ impl ChunkBackfiller for OmeZarrBackfiller {
                             SourceSpec::Compute { key: source_key, fetch }
                         }
                     };
+                    labels.push(match &spec {
+                        SourceSpec::Download { url, .. } => url.clone(),
+                        _ => spec.key().to_string(),
+                    });
                     sources.push(spec);
                     coords.push(coord);
                 }
@@ -189,6 +195,8 @@ impl ChunkBackfiller for OmeZarrBackfiller {
         let key_dbg = key;
         let array_for_decode = array.clone();
         let covered_for_extract = covered.clone();
+        let nchunk_for_extract = nchunk.clone();
+        let labels_for_extract = labels;
         let extract = Box::new(
             move |outcomes: &[SourceOutcome]| -> Result<Vec<(ChunkKey, ExtractedChunk)>, BackfillError> {
                 triage_outcomes(outcomes)?;
@@ -204,10 +212,11 @@ impl ChunkBackfiller for OmeZarrBackfiller {
                         Err(_) => unreachable!("error already short-circuited"),
                     };
                     let Some(payload) = payload_opt else { continue };
+                    let lazy = payload.clone().downcast::<LazySource>().ok();
                     let ctx = if let Ok(ctx_arc) = payload.clone().downcast::<ChunkContext>() {
                         // Local-fallback Compute payload, already decoded.
                         ctx_arc
-                    } else if let Ok(lazy) = payload.clone().downcast::<LazySource>() {
+                    } else if let Some(lazy) = &lazy {
                         // Download payload — raw bytes are mmap-backed by
                         // the cache's raw store (or heap on spill failure).
                         // v2 decodes into a ChunkContext rather than a flat
@@ -220,6 +229,31 @@ impl ChunkBackfiller for OmeZarrBackfiller {
                     } else {
                         return Err(BackfillError::Permanent("source payload type".into()));
                     };
+                    // A native chunk holds exactly its declared shape. Anything
+                    // else is broken input (a truncated transfer, a server
+                    // bug, a bad local copy): flag it loudly, drop any
+                    // retained copy, and let the chunk retry after cooldown.
+                    let expected = nchunk_for_extract.iter().product::<usize>();
+                    if ctx.len() != expected {
+                        log::error!(
+                            "[{}] native chunk {:?} decoded to {} bytes, expected {} ({:?}); source: {}",
+                            key_dbg,
+                            coord,
+                            ctx.len(),
+                            expected,
+                            nchunk_for_extract,
+                            labels_for_extract[i]
+                        );
+                        if let Some(lazy) = &lazy {
+                            lazy.reject();
+                        }
+                        return Err(BackfillError::Transient(format!(
+                            "native chunk {} has {} bytes, expected {}",
+                            labels_for_extract[i],
+                            ctx.len(),
+                            expected
+                        )));
+                    }
                     decoded.insert(*coord, ctx);
                 }
 

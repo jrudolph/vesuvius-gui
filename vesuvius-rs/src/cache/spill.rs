@@ -168,6 +168,22 @@ impl RawStore {
         unsafe { MmapOptions::new().map(&file).ok() }
     }
 
+    /// Drop the bytes stored under `key` (e.g. found to be corrupt), so the
+    /// next request downloads them again. Mappings already handed out stay
+    /// valid.
+    pub fn remove(&self, key: &str) {
+        let path = self.path_for(key);
+        match std::fs::metadata(&path).and_then(|m| std::fs::remove_file(&path).map(|_| m.len())) {
+            Ok(len) => {
+                self.total.fetch_sub(len.min(self.total.load(Ordering::Relaxed)), Ordering::Relaxed);
+            }
+            // Already gone (evicted, or the payload came from the
+            // anonymous spill fallback).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::error!("raw store: removing {} failed: {}", path.display(), e),
+        }
+    }
+
     /// Persist `bytes` under `key` and return a read mmap of them. On any
     /// write failure (or with retention disabled) falls back to the
     /// anonymous single-use spill so the download itself still succeeds.
@@ -347,6 +363,17 @@ mod tests {
             t.join().unwrap();
         }
         assert_eq!(store.get("https://x/same-chunk").unwrap().len(), bytes.len());
+    }
+
+    #[test]
+    fn removed_raw_entries_miss_but_handed_out_mappings_stay_valid() {
+        let root = tmp_root();
+        let store = RawStore::with_cap(&root, 1 << 30);
+        let mmap = store.put("https://x/bad", &[7u8; 32768]).unwrap();
+        store.remove("https://x/bad");
+        assert!(store.get("https://x/bad").is_none());
+        assert_eq!(mmap.len(), 32768);
+        store.remove("https://x/bad"); // already gone: fine
     }
 
     #[test]

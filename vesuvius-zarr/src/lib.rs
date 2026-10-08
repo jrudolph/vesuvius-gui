@@ -764,6 +764,14 @@ pub enum ChunkContext {
     Raw(RawContext),
 }
 impl ChunkContext {
+    /// Number of voxels (bytes) held.
+    pub fn len(&self) -> usize {
+        match self {
+            ChunkContext::Heap(data) => data.len(),
+            ChunkContext::Raw(raw) => raw.len(),
+        }
+    }
+
     pub fn get(&self, idx: usize) -> u8 {
         match self {
             ChunkContext::Heap(data) => data[idx],
