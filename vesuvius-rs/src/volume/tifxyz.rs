@@ -90,7 +90,10 @@ pub struct TifXyzVolume {
 
 fn decode_float32_tif(path: &Path) -> Result<(usize, usize, Vec<f32>)> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut decoder = Decoder::new(BufReader::new(file)).with_context(|| format!("tiff header for {}", path.display()))?;
+    // Large meshes are written as a single uncompressed strip (>128MB), which exceeds the default decoder limits.
+    let mut decoder = Decoder::new(BufReader::new(file))
+        .with_context(|| format!("tiff header for {}", path.display()))?
+        .with_limits(tiff::decoder::Limits::unlimited());
     let (w, h) = decoder.dimensions().with_context(|| format!("tiff dims for {}", path.display()))?;
     let img = decoder
         .read_image()
