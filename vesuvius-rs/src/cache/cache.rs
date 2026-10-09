@@ -1238,9 +1238,11 @@ impl Inner {
             }
             LoadOutcome::Missing => {}
         }
+        // Outside the volume there is definitively no data: terminal, so
+        // views reaching past the volume's edge still count as complete.
         if self.is_out_of_bounds(key) {
             log::trace!("[{}] out of bounds", key);
-            return long_cooldown();
+            return Arc::new(ChunkState::Empty);
         }
         // Claim the chunk's per-shard dispatched bit. This is what lets
         // the volume's per-voxel slow path tell "fetch in flight" from
@@ -1285,7 +1287,7 @@ impl Inner {
 
         let plan = match self.backfiller.plan(key) {
             Ok(p) => p,
-            Err(BackfillError::OutOfBounds) => return long_cooldown(),
+            Err(BackfillError::OutOfBounds) => return Arc::new(ChunkState::Empty),
             Err(BackfillError::Permanent(reason)) => {
                 log::warn!("[{}] permanent (plan): {}", key, reason);
                 return long_cooldown();
@@ -1778,7 +1780,7 @@ impl Inner {
                 }
             }
             Err(BackfillError::OutOfBounds) => {
-                failure_state = Some(long_cooldown());
+                failure_state = Some(Arc::new(ChunkState::Empty));
                 outcome_label = "oob";
             }
             Err(BackfillError::Permanent(reason)) => {
