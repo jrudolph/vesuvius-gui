@@ -278,10 +278,11 @@ fn out_of_bounds_short_circuits() {
     let backfiller = Arc::new(SyntheticBackfiller::new("test", [64, 64, 64], 0, |_, _, _, _| 7));
     let cache = UnifiedCache::for_cache_dir(&root).open_volume(backfiller);
 
-    // (chunk_x=2) at LOD 0 covers voxels 128..192 — past the extent.
+    // (chunk_x=2) at LOD 0 covers voxels 128..192 — past the extent:
+    // definitively no data, terminal right away.
     let key = ChunkKey::new(0, 2, 0, 0);
     let state = cache.state_or_fetch(key);
-    assert!(matches!(state.as_ref(), ChunkState::CooldownMiss { .. }));
+    assert!(matches!(state.as_ref(), ChunkState::Empty));
 }
 
 #[test]
@@ -739,7 +740,7 @@ fn synth_gate_disables_when_source_has_too_many_native_chunks() {
     // (1024³ voxels at LOD 0 → 16³ = 4096 native chunks). That's way over
     // budget, so synthesis must be disabled — `cache.max_lod()` should
     // report the inner's max_lod unchanged and chunks above it should
-    // cooldown-miss as if no wrapper were present.
+    // be out of bounds (Empty) as if no wrapper were present.
     struct WideSingleLod;
     impl ChunkBackfiller for WideSingleLod {
         fn max_lod(&self) -> u8 {
@@ -771,12 +772,11 @@ fn synth_gate_disables_when_source_has_too_many_native_chunks() {
     // LOD 1 is genuinely out of bounds when synth is disabled — the cache's
     // is_out_of_bounds check refuses any key.lod > backfiller.max_lod().
     // Without the gate, we'd see a Resident chunk synthesized from 4096
-    // native LOD-0 chunks; with the gate firing, it cooldown-misses
-    // immediately.
+    // native LOD-0 chunks; with the gate firing, it is Empty immediately.
     let state = cache.wait_for(ChunkKey::new(1, 0, 0, 0), Duration::from_secs(5));
     assert!(
-        matches!(state.as_ref(), ChunkState::CooldownMiss { .. }),
-        "expected CooldownMiss for above-max_lod key when synth is gated off, got {:?}",
+        matches!(state.as_ref(), ChunkState::Empty),
+        "expected Empty for above-max_lod key when synth is gated off, got {:?}",
         state
     );
 

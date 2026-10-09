@@ -1404,7 +1404,10 @@ impl VolumePane {
         let max_level: u32 = min_level + key.extra_resolutions;
 
         for level in (min_level..=max_level).rev() {
-            let sfactor = 1 << level as u8;
+            // sfactor is a u8: a strongly negative LOD bias at far zoom-out
+            // can ask for more. Coarser than the pyramid samples its
+            // coarsest level anyway.
+            let sfactor = 1u8 << level.min(7);
             world.reset_for_painting();
             world.paint(
                 tile_coord,

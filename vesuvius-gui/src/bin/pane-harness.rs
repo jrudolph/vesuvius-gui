@@ -43,6 +43,10 @@ struct Args {
     #[clap(long, default_value = "on", value_parser = ["on", "off"])]
     trilinear: String,
 
+    /// LOD bias (the GUI's slider): positive samples finer, negative coarser.
+    #[clap(long, default_value_t = 0, allow_hyphen_values = true)]
+    lod_bias: i32,
+
     /// Start coordinate "a,b,c" (segment u,v,w or volume x,y,z). Default: center.
     #[clap(long)]
     coord: Option<String>,
@@ -125,6 +129,7 @@ fn run(args: Args) -> Result<(), String> {
         honor_repaint: args.honor_repaint,
         drawing_config: vesuvius_rs::volume::DrawingConfig {
             trilinear_interpolation: args.trilinear == "on",
+            lod_bias: args.lod_bias,
             ..Default::default()
         },
         ..Default::default()
