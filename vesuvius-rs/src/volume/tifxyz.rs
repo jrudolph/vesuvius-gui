@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use libm::modf;
+use rayon::prelude::*;
 use serde::Deserialize;
 use tiff::decoder::{Decoder, DecodingResult};
 
@@ -23,6 +24,7 @@ use super::composition::{
     AlphaCompositionState, AlphaHeightMapCompositionState, Compositor, MaxCompositionState, NoCompositionState,
     OverlayCombineParams,
 };
+use super::slab_index::SlabIndex;
 use super::{
     AffineTransform, CompositingMode, DrawingConfig, Image, OutlineSegment, PaintVolume, SurfaceVolume, Volume,
     VolumeCons, VoxelPaintVolume, VoxelVolume,
@@ -65,10 +67,8 @@ pub struct TifXyzData {
     base: Arc<TifXyzBase>,
     xyz: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
-    /// `(rows-1) * (cols-1)` post-affine quad AABBs as `[min_x, min_y, min_z, max_x, max_y, max_z]`.
-    /// Invalid quads (any corner invalid, or grid too small) use sentinel
-    /// `[+inf, +inf, +inf, -inf, -inf, -inf]` so any plane test rejects them in one branch.
-    quad_aabb: Vec<[f32; 6]>,
+    /// Valid quads (index `r * (cols-1) + c`) near each axis-aligned plane, for the outline.
+    quad_index: SlabIndex,
     applied_transform: Option<AffineTransform>,
 }
 
@@ -259,8 +259,7 @@ fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 
 /// Build post-affine per-quad AABBs once per `TifXyzData::build`. Invalid quads
 /// (any corner invalid, or grid smaller than 2x2) get sentinel `[+inf; 3, -inf; 3]`
-/// so the plane-axis cull in `plane_intersection` rejects them with a single
-/// comparison instead of four `valid[]` loads + four `xyz[]` loads + six min/max.
+/// which `SlabIndex` leaves out.
 fn build_quad_aabb(base: &TifXyzBase, xyz: &[[f32; 3]]) -> Vec<[f32; 6]> {
     let cols = base.cols;
     let rows = base.rows;
@@ -334,7 +333,7 @@ impl TifXyzData {
             (base.pre_xyz.clone(), base.pre_normals.clone())
         };
 
-        let quad_aabb = build_quad_aabb(&base, &xyz);
+        let quad_index = SlabIndex::build(&build_quad_aabb(&base, &xyz));
 
         log::info!(
             "TifXyzData::build (transform={}) in {:?}",
@@ -346,7 +345,7 @@ impl TifXyzData {
             base,
             xyz,
             normals,
-            quad_aabb,
+            quad_index,
             applied_transform: transform.clone(),
         })
     }
@@ -873,42 +872,33 @@ impl SurfaceVolume for TifXyzVolume {
         let qcols = cols - 1;
 
         let xyz_grid = &self.data.xyz;
-        let quad_aabb = &self.data.quad_aabb;
         let tex_per_col = self.tex_width as f32 / cols as f32;
         let tex_per_row = self.tex_height as f32 / rows as f32;
-        let w_f32 = w as f32;
-        let w = w as f64;
         let corner = |i: usize| xyz_grid[i].map(|c| c as f64);
 
-        let mut segments = Vec::new();
-        for r in 0..rows - 1 {
-            let qrow_base = r * qcols;
-            let row_base = r * cols;
-            for c in 0..cols - 1 {
-                let bb = quad_aabb[qrow_base + c];
-                // Invalid quads use a `+inf/-inf` sentinel that also fails this test.
-                if bb[plane_coord] > w_f32 || bb[3 + plane_coord] < w_f32 {
-                    continue;
-                }
+        let quad_segments = |q: u32| {
+            let (r, c) = (q as usize / qcols, q as usize % qcols);
+            let i00 = r * cols + c;
+            let i10 = i00 + 1;
+            let i01 = i00 + cols;
+            let i11 = i01 + 1;
+            let (p00, p10, p01, p11) = (corner(i00), corner(i10), corner(i01), corner(i11));
 
-                let i00 = row_base + c;
-                let i10 = i00 + 1;
-                let i01 = i00 + cols;
-                let i11 = i01 + 1;
-                let (p00, p10, p01, p11) = (corner(i00), corner(i10), corner(i01), corner(i11));
+            let tex_min = [c as f32 * tex_per_col, r as f32 * tex_per_row];
+            let tex_max = [(c + 1) as f32 * tex_per_col, (r + 1) as f32 * tex_per_row];
 
-                let tex_min = [c as f32 * tex_per_col, r as f32 * tex_per_row];
-                let tex_max = [(c + 1) as f32 * tex_per_col, (r + 1) as f32 * tex_per_row];
-
-                // triangle 1: p00, p10, p01 ; triangle 2: p10, p11, p01
-                for tri in [[p00, p10, p01], [p10, p11, p01]] {
-                    if let Some((a, b)) = super::triangle_plane_segment(tri, u_coord, v_coord, plane_coord, w) {
-                        segments.push(OutlineSegment { a, b, tex_min, tex_max });
-                    }
-                }
-            }
-        }
-        segments
+            // triangle 1: p00, p10, p01 ; triangle 2: p10, p11, p01
+            [[p00, p10, p01], [p10, p11, p01]].into_iter().filter_map(move |tri| {
+                let (a, b) = super::triangle_plane_segment(tri, u_coord, v_coord, plane_coord, w as f64)?;
+                Some(OutlineSegment { a, b, tex_min, tex_max })
+            })
+        };
+        self.data
+            .quad_index
+            .near_plane(plane_coord, w)
+            .par_chunks(1024)
+            .flat_map_iter(|chunk| chunk.iter().flat_map(|&q| quad_segments(q)))
+            .collect()
     }
 }
 

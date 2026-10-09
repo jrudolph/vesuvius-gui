@@ -6,6 +6,7 @@ mod layers;
 mod objvolume;
 mod overlay;
 mod ppmvolume;
+mod slab_index;
 mod tifxyz;
 mod transform;
 mod volume64x4;

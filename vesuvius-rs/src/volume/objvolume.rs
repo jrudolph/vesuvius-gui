@@ -1,10 +1,12 @@
+use super::slab_index::SlabIndex;
 use super::{Image, OutlineSegment, PaintVolume, SurfaceVolume, Volume, VoxelVolume};
 use crate::volume::composition::{
     AlphaCompositionState, AlphaHeightMapCompositionState, Compositor, MaxCompositionState, NoCompositionState,
     OverlayCombineParams,
 };
 use crate::volume::{AffineTransform, CompositingMode, VoxelPaintVolume};
-use libm::{pow, sqrt};
+use libm::sqrt;
+use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::Instant;
 use wavefront_obj::obj::{self, Object, Primitive, TVertex, Vertex};
@@ -20,110 +22,6 @@ pub struct Triangle {
 }
 
 // TODO: create a single AABB index for both XYZ and UV index
-struct XYZIndex {
-    n: usize, // same in every direction
-    min: [f64; 3],
-    max: [f64; 3],
-    grid: Vec<Vec<usize>>, // n * n * n cell with indices to the faces
-}
-impl XYZIndex {
-    fn new(vertices: &[Vertex], triangles: &[Triangle], n: usize) -> Self {
-        let mut grid = vec![vec![]; n * n * n];
-
-        fn minmax(vertices: &[Vertex], coord: impl Fn(&Vertex) -> f64) -> (f64, f64) {
-            (
-                vertices.iter().map(|v| coord(v)).fold(f64::INFINITY, f64::min),
-                vertices.iter().map(|v| coord(v)).fold(f64::NEG_INFINITY, f64::max),
-            )
-        }
-
-        let (min_x, max_x) = minmax(vertices, |v| v.x);
-        let (min_y, max_y) = minmax(vertices, |v| v.y);
-        let (min_z, max_z) = minmax(vertices, |v| v.z);
-
-        let dx = (max_x - min_x) / n as f64;
-        let dy = (max_y - min_y) / n as f64;
-        let dz = (max_z - min_z) / n as f64;
-
-        for (i, tri) in triangles.iter().enumerate() {
-            let vert1 = vertices[tri.v[0] as usize];
-            let vert2 = vertices[tri.v[1] as usize];
-            let vert3 = vertices[tri.v[2] as usize];
-
-            let min_x_t = vert1.x.min(vert2.x).min(vert3.x);
-            let max_x_t = vert1.x.max(vert2.x).max(vert3.x);
-
-            let min_y_t = vert1.y.min(vert2.y).min(vert3.y);
-            let max_y_t = vert1.y.max(vert2.y).max(vert3.y);
-
-            let min_z_t = vert1.z.min(vert2.z).min(vert3.z);
-            let max_z_t = vert1.z.max(vert2.z).max(vert3.z);
-
-            let min_x_cell = (((min_x_t - min_x) / dx) as usize).max(0).min(n - 1);
-            let max_x_cell = (((max_x_t - min_x) / dx) as usize).max(0).min(n - 1);
-
-            let min_y_cell = (((min_y_t - min_y) / dy) as usize).max(0).min(n - 1);
-            let max_y_cell = (((max_y_t - min_y) / dy) as usize).max(0).min(n - 1);
-
-            let min_z_cell = (((min_z_t - min_z) / dz) as usize).max(0).min(n - 1);
-            let max_z_cell = (((max_z_t - min_z) / dz) as usize).max(0).min(n - 1);
-
-            for x in min_x_cell..=max_x_cell {
-                for y in min_y_cell..=max_y_cell {
-                    for z in min_z_cell..=max_z_cell {
-                        let idx = x * n * n + y * n + z;
-                        grid[idx].push(i);
-                    }
-                }
-            }
-        }
-
-        /* let num_cells = rows * cols;
-        let max_occ = grid.iter().map(|g| g.len()).max().unwrap();
-        println!("FaceIndex: {} cells, max occ: {}", num_cells, max_occ); */
-
-        let min = [min_x, min_y, min_z];
-        let max = [max_x, max_y, max_z];
-
-        Self { n, min, max, grid }
-    }
-
-    fn in_bounds(&self, min: [f64; 3], max: [f64; 3]) -> Vec<usize> {
-        let min_x_cell = (((min[0] - self.min[0]) / (self.max[0] - self.min[0]) * self.n as f64) as usize)
-            .max(0)
-            .min(self.n - 1);
-        let max_x_cell = (((max[0] - self.min[0]) / (self.max[0] - self.min[0]) * self.n as f64) as usize)
-            .max(0)
-            .min(self.n - 1);
-
-        let min_y_cell = (((min[1] - self.min[1]) / (self.max[1] - self.min[1]) * self.n as f64) as usize)
-            .max(0)
-            .min(self.n - 1);
-
-        let max_y_cell = (((max[1] - self.min[1]) / (self.max[1] - self.min[1]) * self.n as f64) as usize)
-            .max(0)
-            .min(self.n - 1);
-
-        let min_z_cell = (((min[2] - self.min[2]) / (self.max[2] - self.min[2]) * self.n as f64) as usize)
-            .max(0)
-            .min(self.n - 1);
-        let max_z_cell = (((max[2] - self.min[2]) / (self.max[2] - self.min[2]) * self.n as f64) as usize)
-            .max(0)
-            .min(self.n - 1);
-
-        let mut indices = vec![];
-        for x in min_x_cell..=max_x_cell {
-            for y in min_y_cell..=max_y_cell {
-                for z in min_z_cell..=max_z_cell {
-                    let idx = x * self.n * self.n + y * self.n + z;
-                    indices.extend(self.grid[idx].iter());
-                }
-            }
-        }
-        indices
-    }
-}
-
 struct UVIndex {
     rows: usize,
     cols: usize,
@@ -285,11 +183,30 @@ impl ObjFileBase {
     }
 }
 
+fn build_xyz_index(vertices: &[Vertex], triangles: &[Triangle]) -> SlabIndex {
+    let aabbs: Vec<[f32; 6]> = triangles
+        .iter()
+        .map(|tri| {
+            let [a, b, c] = tri.v.map(|v| vertices[v as usize]);
+            [
+                a.x.min(b.x).min(c.x) as f32,
+                a.y.min(b.y).min(c.y) as f32,
+                a.z.min(b.z).min(c.z) as f32,
+                a.x.max(b.x).max(c.x) as f32,
+                a.y.max(b.y).max(c.y) as f32,
+                a.z.max(b.z).max(c.z) as f32,
+            ]
+        })
+        .collect();
+    SlabIndex::build(&aabbs)
+}
+
 pub struct ObjFile {
     base: Arc<ObjFileBase>,
     vertices: Vec<Vertex>, // post-affine
     normals: Vec<Vertex>,  // post-affine
-    xyz_index: XYZIndex,
+    /// Triangles near each axis-aligned plane, for the outline.
+    xyz_index: SlabIndex,
 }
 impl ObjFile {
     pub fn new(object: Object, transform: &Option<AffineTransform>, projection: ProjectionKind) -> Self {
@@ -316,10 +233,7 @@ impl ObjFile {
         log::info!("ObjFile::from_base affine took {:?}", t_affine.elapsed());
 
         let t_xyz = Instant::now();
-        let target_cell_num = 100.;
-        let num_tris = base.triangles.len() as f64;
-        let n = pow(num_tris / target_cell_num, 1. / 3.) as usize;
-        let xyz_index = XYZIndex::new(&vertices, &base.triangles, n);
+        let xyz_index = build_xyz_index(&vertices, &base.triangles);
         log::info!("ObjFile::from_base xyz_index took {:?}", t_xyz.elapsed());
 
         Self {
@@ -375,8 +289,7 @@ impl ObjFile {
         log::info!("ObjFile::new_orthographic uv_index took {:?}", t_uv.elapsed());
 
         let t_xyz = Instant::now();
-        let n = pow(num_tris / target_cell_num, 1. / 3.) as usize;
-        let xyz_index = XYZIndex::new(&vertices, &triangles, n);
+        let xyz_index = build_xyz_index(&vertices, &triangles);
         log::info!("ObjFile::new_orthographic xyz_index took {:?}", t_xyz.elapsed());
 
         // pre_* fields are unused for orthographic (no caching) but populated for layout
@@ -509,7 +422,7 @@ impl ObjVolume {
 
     /// Produce a new `ObjVolume` sharing this one's `Arc<ObjFileBase>` (parsed mesh + UV
     /// index + inversion check + tex vertices) but with a fresh affine applied to a clone
-    /// of the pre-affine vertices/normals, and a fresh `XYZIndex` built against them.
+    /// of the pre-affine vertices/normals, and a fresh `xyz_index` built against them.
     /// Used to switch the base volume under an obj segment (Ctrl+1/2/3) without re-parsing
     /// the obj file. Only valid for `ProjectionKind::None` bases — orthographic projections
     /// embed post-affine positions into their UVs and must go through `load_from_obj`.
@@ -1285,33 +1198,21 @@ impl PaintVolume for ObjVolume {
 impl SurfaceVolume for ObjVolume {
     fn plane_intersection(&self, u_coord: usize, v_coord: usize, plane_coord: usize, w: i32) -> Vec<OutlineSegment> {
         let obj = &self.obj;
-        let w = w as f64;
-
-        let mut mins = obj.xyz_index.min;
-        let mut maxs = obj.xyz_index.max;
-        mins[plane_coord] = w;
-        maxs[plane_coord] = w;
-
-        // the index lists a triangle once for every cell it overlaps
-        let mut candidates = obj.xyz_index.in_bounds(mins, maxs);
-        candidates.sort_unstable();
-        candidates.dedup();
-
         let (tex_w, tex_h) = (self.width as f64, self.height as f64);
-        let mut segments = Vec::new();
-        for i in candidates {
-            let tri = &obj.base.triangles[i];
+        // same as `self.v`, without capturing `self` (not `Sync`) in the parallel closure
+        let inverted = obj.base.has_inverted_uv_tris;
+        let tex_v = move |v: f64| if inverted { v } else { 1.0 - v };
+        let segment = |i: u32| {
+            let tri = &obj.base.triangles[i as usize];
             let vs = tri.v.map(|v| {
                 let v = &obj.vertices[v as usize];
                 [v.x, v.y, v.z]
             });
-            let Some((a, b)) = super::triangle_plane_segment(vs, u_coord, v_coord, plane_coord, w) else {
-                continue;
-            };
+            let (a, b) = super::triangle_plane_segment(vs, u_coord, v_coord, plane_coord, w as f64)?;
 
             let ts = tri.t.map(|t| {
                 let t = &obj.base.tex_vertices[t as usize];
-                [t.u * tex_w, self.v(t.v) * tex_h]
+                [t.u * tex_w, tex_v(t.v) * tex_h]
             });
             let tex_min = [
                 ts[0][0].min(ts[1][0]).min(ts[2][0]) as f32,
@@ -1321,9 +1222,13 @@ impl SurfaceVolume for ObjVolume {
                 ts[0][0].max(ts[1][0]).max(ts[2][0]) as f32,
                 ts[0][1].max(ts[1][1]).max(ts[2][1]) as f32,
             ];
-            segments.push(OutlineSegment { a, b, tex_min, tex_max });
-        }
-        segments
+            Some(OutlineSegment { a, b, tex_min, tex_max })
+        };
+        obj.xyz_index
+            .near_plane(plane_coord, w)
+            .par_chunks(1024)
+            .flat_map_iter(|chunk| chunk.iter().filter_map(|&i| segment(i)))
+            .collect()
     }
 }
 
