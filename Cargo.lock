@@ -4698,6 +4698,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vc-delta3d-sys"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "728c6014233211ed9a8494513664dc7523c49afed8b979f7edc1ba6eff140b0f"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4728,7 +4737,7 @@ dependencies = [
 name = "vesuvius-delta3d"
 version = "0.1.0"
 dependencies = [
- "cc",
+ "vc-delta3d-sys",
 ]
 
 [[package]]

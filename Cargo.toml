@@ -61,6 +61,7 @@ sha2            = { version = "0.10" }
 tempfile        = { version = "3" }
 tiff            = { version = "0.10" }
 tokio           = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync", "signal" ] }
+vc-delta3d-sys  = { version = "0.3.2" }
 wavefront_obj   = { version = "11.0" }
 
 [profile.release-with-debug]
