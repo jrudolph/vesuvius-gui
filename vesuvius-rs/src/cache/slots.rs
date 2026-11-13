@@ -248,6 +248,12 @@ impl SlotStore {
         })
     }
 
+    /// The memory backing `key`'s slot, whatever its state.
+    pub fn slot_memory(&self, key: ChunkKey) -> (Arc<Region>, usize) {
+        let r = self.resolve(key).unwrap_or_else(|| panic!("[{}] out of bounds", key));
+        (self.shard(key.lod, r.shard).mem, r.in_shard_idx as usize * CHUNK_VOXELS)
+    }
+
     /// `(shard, in_shard_idx)` of `key`; `None` out of bounds.
     pub fn locate(&self, key: ChunkKey) -> Option<(ShardCoord, u64)> {
         self.resolve(key).map(|r| (r.shard, r.in_shard_idx))

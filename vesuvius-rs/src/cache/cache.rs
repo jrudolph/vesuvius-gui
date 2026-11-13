@@ -1825,6 +1825,10 @@ impl Inner {
             });
             self.log_append(key, Format::Vc, &encoded);
         }
+        // Stamp the slot as fresh before it becomes RESIDENT, so a purge
+        // running right now doesn't take it for an old chunk (the slot may
+        // still carry the epoch of an earlier tenant).
+        self.slots.set_access_epoch(key, self.epoch.current());
         match self.slots.write_atomic(key, &bytes) {
             WriteOutcome::Wrote => {
                 let ep = self.epoch.record_fill(CHUNK_VOXELS as u64);
@@ -1836,10 +1840,10 @@ impl Inner {
                 return Arc::new(ChunkState::Empty);
             }
         }
-        let (mmap, offset) = self
-            .slots
-            .try_load(key)
-            .unwrap_or_else(|| panic!("[{}] not resident right after filling it", key));
+        // Not `try_load`: under memory pressure the purge may legitimately
+        // have evicted the chunk again already. Readers then see zeros until
+        // the next paint re-requests it, like any eviction race.
+        let (mmap, offset) = self.slots.slot_memory(key);
         log::debug!("[{}] ready ({:?})", key, t0.elapsed());
         Arc::new(ChunkState::Resident { mmap, offset })
     }
