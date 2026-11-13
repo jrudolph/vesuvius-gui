@@ -4,9 +4,13 @@
 //! `(volume hash, lod, x, y, z)`:
 //!
 //! - [`Format::Empty`]: no payload, the chunk is definitively absent.
-//! - [`Format::Vc`]: a vc-delta3d payload. Either the ng bytes exactly as
-//!   downloaded, or `delta`-encoded by us. The payload describes itself, so
-//!   readers decode both with `vesuvius_delta3d::decode_into`.
+//! - [`Format::Vc`]: a vc-delta3d payload as downloaded (ng).
+//! - [`Format::Delta`]: a vc-delta3d payload `delta`-encoded by us (cheaper
+//!   to decode).
+//!
+//! The payload describes itself, so readers decode both with
+//! `vesuvius_delta3d::decode_into`; the format only says whether it is
+//! worth re-encoding.
 //!
 //! ### Files
 //!
@@ -61,6 +65,7 @@ const EVICT_LOCK: &str = "evict.lock";
 pub enum Format {
     Empty = 0,
     Vc = 1,
+    Delta = 2,
 }
 
 impl Format {
@@ -68,6 +73,7 @@ impl Format {
         match v {
             0 => Some(Format::Empty),
             1 => Some(Format::Vc),
+            2 => Some(Format::Delta),
             _ => None,
         }
     }
@@ -91,6 +97,7 @@ pub fn volume_hash(volume_id: &str) -> u64 {
 pub enum Record {
     Empty,
     Vc(Vec<u8>),
+    Delta(Vec<u8>),
 }
 
 #[derive(Clone, Debug)]
@@ -256,6 +263,7 @@ impl SegLog {
         Some(match loc.format {
             Format::Empty => Record::Empty,
             Format::Vc => Record::Vc(payload),
+            Format::Delta => Record::Delta(payload),
         })
     }
 
@@ -271,7 +279,7 @@ impl SegLog {
 
     /// Append a record. `payload` must be empty for [`Format::Empty`].
     pub fn append(&self, key: &LogKey, format: Format, payload: &[u8]) -> std::io::Result<()> {
-        assert!(format == Format::Vc || payload.is_empty(), "Empty record with payload");
+        assert!(format != Format::Empty || payload.is_empty(), "Empty record with payload");
         self.inner.append(key, format, payload)?;
         self.inner.appended.fetch_add(1, Ordering::Relaxed);
         Ok(())

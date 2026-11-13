@@ -157,6 +157,7 @@ impl SlotStore {
         }
     }
 
+    #[cfg(test)]
     pub fn try_load(&self, key: ChunkKey) -> Option<(Arc<Region>, usize)> {
         match self.load(key) {
             LoadOutcome::Resident { mmap, offset } => Some((mmap, offset)),

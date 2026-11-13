@@ -1820,10 +1820,10 @@ impl Inner {
             ExtractedChunk::Encoded { bytes, encoded } => (bytes, Some(encoded)),
         };
         if persist && self.log.is_some() {
-            let encoded = encoded.unwrap_or_else(|| {
-                vesuvius_delta3d::encode_preset(&bytes, [super::CHUNK_SIDE; 3], vesuvius_delta3d::Preset::Delta)
-            });
-            self.log_append(key, Format::Vc, &encoded);
+            match encoded.filter(|_| log_policy().ng_passthrough) {
+                Some(ng) => self.log_append(key, Format::Vc, &ng),
+                None => self.log_append(key, Format::Delta, &encode_delta(&bytes)),
+            }
         }
         // Stamp the slot as fresh before it becomes RESIDENT, so a purge
         // running right now doesn't take it for an old chunk (the slot may
@@ -1863,12 +1863,12 @@ impl Inner {
         }
         match data {
             ExtractedChunk::Empty => self.log_append(key, Format::Empty, &[]),
-            ExtractedChunk::Bytes(bytes) => {
-                let encoded =
-                    vesuvius_delta3d::encode_preset(&bytes, [super::CHUNK_SIDE; 3], vesuvius_delta3d::Preset::Delta);
-                self.log_append(key, Format::Vc, &encoded);
+            ExtractedChunk::Encoded { encoded, .. } if log_policy().ng_passthrough => {
+                self.log_append(key, Format::Vc, &encoded)
             }
-            ExtractedChunk::Encoded { encoded, .. } => self.log_append(key, Format::Vc, &encoded),
+            ExtractedChunk::Bytes(bytes) | ExtractedChunk::Encoded { bytes, .. } => {
+                self.log_append(key, Format::Delta, &encode_delta(&bytes))
+            }
         }
     }
 
@@ -1900,18 +1900,20 @@ impl Inner {
                 self.slots.mark_empty(key);
                 Some(Arc::new(ChunkState::Empty))
             }
-            Format::Vc => {
+            Format::Vc | Format::Delta if log_policy().paint_decode && super::paint_scope::in_scope() => {
+                // Painting: decode right here instead of queueing, so the
+                // tile completes in one paint from local data and the
+                // decoded working set is bounded by the tiles painting at
+                // once (see the GUI's paint limit).
+                let data = decode_log_record(log, &lk)?;
+                Some(self.primary_state(key, data, std::time::Instant::now(), false))
+            }
+            Format::Vc | Format::Delta => {
                 let log = log.clone();
                 let extract = Box::new(
                     move |_: &[SourceOutcome]| -> Result<Vec<(ChunkKey, ExtractedChunk)>, BackfillError> {
-                        match log.read(&lk) {
-                            Some(Record::Vc(payload)) => {
-                                let mut bytes = vec![0u8; CHUNK_VOXELS];
-                                vesuvius_delta3d::decode_into(&payload, &mut bytes)
-                                    .unwrap_or_else(|e| panic!("[{}] decoding segment log record: {}", key, e));
-                                Ok(vec![(key, ExtractedChunk::Bytes(bytes))])
-                            }
-                            Some(Record::Empty) => Ok(vec![(key, ExtractedChunk::Empty)]),
+                        match decode_log_record(&log, &lk) {
+                            Some(data) => Ok(vec![(key, data)]),
                             // Evicted since the lookup: requestable again,
                             // the next dispatch goes to the backfiller.
                             None => Err(BackfillError::Cancelled),
@@ -2097,6 +2099,58 @@ impl Inner {
             || start[2] >= extent[2] as u64
             || key.lod > self.backfiller.max_lod()
     }
+}
+
+/// How the cache uses the segment log; from env, read once.
+struct LogPolicy {
+    /// Keep downloaded ng chunks as they are (`VESUVIUS_LOG_NG_PASSTHROUGH=1`)
+    /// instead of storing them `delta`-encoded (~25% bigger, ~3.5× cheaper
+    /// to decode). Records already stored as ng are re-encoded on their first
+    /// decode unless this is set.
+    ng_passthrough: bool,
+    /// Decode log hits on the painting thread (`VESUVIUS_PAINT_DECODE=0`
+    /// turns it off: they are queued like any fetch).
+    paint_decode: bool,
+}
+
+fn log_policy() -> &'static LogPolicy {
+    static P: OnceLock<LogPolicy> = OnceLock::new();
+    P.get_or_init(|| {
+        let flag = |var: &str, default: bool| match std::env::var(var).as_deref() {
+            Ok("1") => true,
+            Ok("0") => false,
+            Ok(v) => panic!("{} must be 0 or 1, got {:?}", var, v),
+            Err(_) => default,
+        };
+        LogPolicy {
+            ng_passthrough: flag("VESUVIUS_LOG_NG_PASSTHROUGH", false),
+            paint_decode: flag("VESUVIUS_PAINT_DECODE", true),
+        }
+    })
+}
+
+fn encode_delta(bytes: &[u8]) -> Vec<u8> {
+    vesuvius_delta3d::encode_preset(bytes, [super::CHUNK_SIDE; 3], vesuvius_delta3d::Preset::Delta)
+}
+
+/// Read and decode `lk`'s record. An ng record is re-encoded as `delta` and
+/// appended (unless ng passthrough is configured), so later decodes are
+/// cheaper. `None` if the log no longer has it.
+fn decode_log_record(log: &SegLog, lk: &LogKey) -> Option<ExtractedChunk> {
+    let (payload, ng) = match log.read(lk)? {
+        Record::Empty => return Some(ExtractedChunk::Empty),
+        Record::Vc(p) => (p, true),
+        Record::Delta(p) => (p, false),
+    };
+    let mut bytes = vec![0u8; CHUNK_VOXELS];
+    vesuvius_delta3d::decode_into(&payload, &mut bytes)
+        .unwrap_or_else(|e| panic!("[{}] decoding segment log record: {}", lk.chunk, e));
+    if ng && !log_policy().ng_passthrough {
+        if let Err(e) = log.append(lk, Format::Delta, &encode_delta(&bytes)) {
+            log::warn!("[{}] re-encoding log record failed: {}", lk.chunk, e);
+        }
+    }
+    Some(ExtractedChunk::Bytes(bytes))
 }
 
 fn worker_loop(inner: Arc<Inner>) {

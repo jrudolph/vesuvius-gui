@@ -191,6 +191,11 @@ impl Drop for ScopeGuard {
     }
 }
 
+/// True on a thread that is painting under `capture`.
+pub fn in_scope() -> bool {
+    SCOPE.with(|s| s.borrow().is_some())
+}
+
 /// Run `f` (a paint) under `lease` and report the target chunks it
 /// couldn't use.
 pub fn capture<R>(lease: Option<Arc<Lease>>, f: impl FnOnce() -> R) -> (R, PaintReport) {
