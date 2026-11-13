@@ -1,5 +1,6 @@
 mod app;
 mod atlas_download;
+pub mod paint_limit;
 mod volume_pane;
 
 pub use app::{ObjFileConfig, TemplateApp, VesuviusConfig};

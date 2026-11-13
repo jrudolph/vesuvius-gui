@@ -28,7 +28,7 @@ async fn cold_view_settles() {
     let mut world = HarnessWorld::open_volume(&volume, Some(cache.path())).unwrap();
     let pane = match env("PANE_HARNESS_TIFXYZ") {
         Some(dir) => {
-            world = world.with_tifxyz(dir).unwrap();
+            world = world.with_tifxyz(dir, &None).unwrap();
             PaneType::UV
         }
         None => PaneType::XY,

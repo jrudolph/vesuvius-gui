@@ -1344,6 +1344,11 @@ impl VolumePane {
             if is_cancelled_clone.load(std::sync::atomic::Ordering::SeqCst) {
                 return Arc::new(RenderedTile::failed());
             }
+            let _permit = super::paint_limit::acquire();
+            // It may have been cancelled while waiting for its turn.
+            if is_cancelled_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                return Arc::new(RenderedTile::failed());
+            }
 
             let volume_pane = VolumePane::new(pane_type, is_segment_pane);
             let overlay = overlay_shared.map(|c| c());

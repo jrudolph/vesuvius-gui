@@ -205,6 +205,13 @@ fn run(args: Args) -> Result<(), String> {
     }
     println!("  {}", cache_line);
     summary.push_str(&format!("  {}\n", cache_line));
+    let p = vesuvius_gui::gui::paint_limit::stats();
+    let paint_line = format!(
+        "tile paints: limit {} (0 = unlimited), peak painting {}, peak waiting {}",
+        p.limit, p.peak_active, p.peak_waiting
+    );
+    println!("  {}", paint_line);
+    summary.push_str(&format!("  {}\n", paint_line));
     harness
         .write_timeline_csv(args.out.join("timeline.csv"))
         .map_err(|e| e.to_string())?;
