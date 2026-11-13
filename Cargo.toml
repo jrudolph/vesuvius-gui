@@ -20,6 +20,7 @@ base64          = { version = "0.22" }
 bytes           = { version = "1" }
 cc              = { version = "1" }
 clap            = { version = "4", features = [ "derive" ] }
+crc32fast       = { version = "1" }
 dashmap         = { version = "6" }
 derive_more     = { version = "2", features = [ "debug" ] }
 directories     = { version = "6" }

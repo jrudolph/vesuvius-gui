@@ -22,6 +22,7 @@ pub mod paint_scope;
 mod s3_auth;
 pub mod epoch;
 pub mod purge;
+pub mod seglog;
 mod sidecar;
 mod spill;
 mod state;

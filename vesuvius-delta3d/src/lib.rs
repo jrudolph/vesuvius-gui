@@ -78,11 +78,34 @@ pub fn decode_expecting(buf: &[u8], expected: usize) -> Result<Vec<u8>, Delta3dE
 /// Encode a C-order uint8 volume of `shape` (z, y, x) with the default `fast` preset, lossless.
 /// Panics if the library rejects the input.
 pub fn encode(data: &[u8], shape: [usize; 3]) -> Vec<u8> {
+    encode_with(data, shape, None)
+}
+
+/// Encoder presets (`vc_preset` in `codec.h`), fastest to smallest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preset {
+    Delta = 1,
+    Faster = 8,
+    Fast = 3,
+    Balanced = 9,
+    Small = 10,
+    Slower = 6,
+}
+
+/// Like [`encode`], with an explicit preset.
+pub fn encode_preset(data: &[u8], shape: [usize; 3], preset: Preset) -> Vec<u8> {
+    encode_with(data, shape, Some(preset))
+}
+
+fn encode_with(data: &[u8], shape: [usize; 3], preset: Option<Preset>) -> Vec<u8> {
     assert_eq!(data.len(), shape.iter().product::<usize>(), "data does not match shape {:?}", shape);
     // SAFETY: plain C calls; `out` is released with vc_free after copying.
     unsafe {
         let mut opts = ffi::vc_default_options();
         opts.shape = shape.map(|s| u32::try_from(s).expect("shape fits u32"));
+        if let Some(p) = preset {
+            opts.preset = p as c_int;
+        }
         let mut out: *mut u8 = std::ptr::null_mut();
         let mut out_size = 0usize;
         let ok = ffi::vc_compress(data.as_ptr().cast(), data.len(), &opts, &mut out, &mut out_size);
