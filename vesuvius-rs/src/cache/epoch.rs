@@ -16,7 +16,7 @@
 //! Hot path (per chunk access) does at most one relaxed `current()` load,
 //! one comparison, and on transition two histogram updates under the mutex.
 //!
-//! The budget is a plain number (`VESUVIUS_MEMORY_CACHE_GB`, default 4 GiB of
+//! The budget is a plain number (`VESUVIUS_MEMORY_CACHE_GB`, default 2 GiB of
 //! decoded chunks). A fill that pushes the resident set over the high-water
 //! mark wakes the purge thread, which evicts the oldest chunks down to the
 //! low-water mark. There is no reaction to system memory pressure; swap is the
@@ -41,7 +41,7 @@ const LOW_WATER_PCT: u64 = 80;
 pub const EPOCH_SLOTS: usize = 256;
 
 /// Default decoded-chunk budget.
-pub const DEFAULT_CAP_BYTES: u64 = 4 << 30;
+pub const DEFAULT_CAP_BYTES: u64 = 2 << 30;
 
 /// Env var for the decoded-chunk budget (memory), in GiB.
 pub const CAP_ENV_VAR: &str = "VESUVIUS_MEMORY_CACHE_GB";
