@@ -180,6 +180,31 @@ fn run(args: Args) -> Result<(), String> {
         println!("{}", r);
         summary.push_str(&format!("{}\n", r));
     });
+    let unified = vesuvius_rs::cache::UnifiedCache::for_cache_dir(
+        cache_dir.clone().unwrap_or_else(vesuvius_zarr::base_cache_dir),
+    );
+    let epoch = unified.epoch_state();
+    let mib = |chunks: u64| chunks * vesuvius_rs::cache::CHUNK_VOXELS as u64 >> 20;
+    let mut cache_line = format!(
+        "decoded chunks: {} resident ({} MiB), peak {} ({} MiB), budget {} MiB",
+        epoch.total_chunks(),
+        mib(epoch.total_chunks()),
+        epoch.peak_chunks(),
+        mib(epoch.peak_chunks()),
+        epoch.cap_bytes() >> 20
+    );
+    if let Some(log) = unified.log() {
+        let st = log.stats();
+        cache_line.push_str(&format!(
+            "; log: {} records, {} MiB, {} appended, {} promoted",
+            st.records,
+            st.bytes_on_disk >> 20,
+            st.appended,
+            st.promoted
+        ));
+    }
+    println!("  {}", cache_line);
+    summary.push_str(&format!("  {}\n", cache_line));
     harness
         .write_timeline_csv(args.out.join("timeline.csv"))
         .map_err(|e| e.to_string())?;

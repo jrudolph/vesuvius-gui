@@ -94,6 +94,8 @@ struct Inner {
     bytes_per_epoch: u64,
     cap_bytes: u64,
     total_chunks: u64,
+    /// Highest `total_chunks` seen (stats).
+    peak_chunks: u64,
     epoch_chunks: [u32; EPOCH_SLOTS],
 }
 
@@ -106,6 +108,7 @@ impl EpochState {
                 bytes_per_epoch: derive_bytes_per_epoch(cap_bytes),
                 cap_bytes,
                 total_chunks: 0,
+                peak_chunks: 0,
                 epoch_chunks: [0; EPOCH_SLOTS],
             }),
             targets: Mutex::new(Vec::new()),
@@ -185,6 +188,11 @@ impl EpochState {
         self.inner.lock().unwrap().total_chunks
     }
 
+    /// Highest number of resident chunks so far.
+    pub fn peak_chunks(&self) -> u64 {
+        self.inner.lock().unwrap().peak_chunks
+    }
+
     pub fn cap_bytes(&self) -> u64 {
         self.inner.lock().unwrap().cap_bytes
     }
@@ -206,6 +214,7 @@ impl EpochState {
             s.bytes_since_advance = s.bytes_since_advance.saturating_add(bytes_written);
             self.maybe_advance(&mut s);
             s.total_chunks += 1;
+            s.peak_chunks = s.peak_chunks.max(s.total_chunks);
             let cur = self.current.load(Ordering::Relaxed);
             s.epoch_chunks[cur as usize] = s.epoch_chunks[cur as usize].saturating_add(1);
             (cur, s.total_chunks)
