@@ -1,7 +1,9 @@
 //! Unified chunk cache.
 //!
-//! A single in-memory + on-disk LRU-ish cache of fixed-size 64³ raw u8 chunks,
-//! shared by every volume backend. Backends become `ChunkBackfiller`s that
+//! A cache of fixed-size 64³ raw u8 chunks shared by every volume backend:
+//! decoded chunks live in process memory (`slots.rs`, LRU budget in
+//! `epoch.rs`), and every chunk is also kept compressed in a persistent,
+//! cross-process segment log (`seglog.rs`). Backends become `ChunkBackfiller`s that
 //! produce chunks on demand; the cache owns all the state (mmap, fetch
 //! dispatch, hot-slot, …).
 //!
@@ -14,7 +16,8 @@
 
 mod backfiller;
 mod cache;
-mod disk;
+mod region;
+mod slots;
 mod downloader;
 pub mod lease;
 mod netlog;
@@ -36,7 +39,7 @@ mod tests;
 
 pub use backfiller::{BackfillError, BackfillPlan, ChunkBackfiller, SourceOutcome, SourcePayload, SourceSpec};
 pub use cache::{configured_workers, ChunkCache, UnifiedCache};
-pub use disk::{DispatchedBits, ShardCoord, ShardSnapshot};
+pub use slots::{DispatchedBits, ShardCoord, ShardSnapshot};
 pub use downloader::{DownloadError, Downloader, DownloaderStats};
 pub use state::{ChunkKey, ChunkState};
 pub use volume::UnifiedVolume;

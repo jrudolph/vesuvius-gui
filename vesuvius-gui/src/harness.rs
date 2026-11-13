@@ -64,7 +64,7 @@ impl HarnessWorld {
 
         let root = cache_root.map(Path::to_path_buf).unwrap_or_else(base_cache_dir);
         // Same startup step as the GUI's main().
-        UnifiedCache::for_cache_dir(&root).run_startup_maintenance();
+        UnifiedCache::for_cache_dir(&root);
 
         match &vref {
             NewVolumeReference::OmeZarr { id, location } => {

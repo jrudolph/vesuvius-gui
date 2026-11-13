@@ -233,14 +233,10 @@ async fn main() -> eframe::Result<()> {
 
     env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
 
-    // Bring the unified chunk cache online before anything that might
-    // open a volume. `for_cache_dir` runs the disk survey (seeds the
-    // epoch histogram from on-disk sidecars); `run_startup_maintenance`
-    // then synchronously evicts down to the low-water mark if the
-    // survey shows we're over high water or low on free space, so the
-    // app starts in a known good state instead of racing the
-    // background watchdog through its first 30 s.
-    UnifiedCache::for_cache_dir(base_cache_dir()).run_startup_maintenance();
+    // Bring the unified chunk cache online before anything that might open a
+    // volume: this indexes the segment log (and recovers segments of crashed
+    // processes).
+    UnifiedCache::for_cache_dir(base_cache_dir());
 
     let native_options = Default::default();
 

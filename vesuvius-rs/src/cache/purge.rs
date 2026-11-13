@@ -13,18 +13,17 @@
 //!    cutoff.
 //! 2. **Sweep.** Walk every per-volume Sidecar; for each chunk with
 //!    `access_epoch` in the "older than T" set, transition the state
-//!    bitmap to Missing (Release) and punch a hole in the matching shard.
+//!    bitmap to Missing (Release) and release the slot's memory.
 //!
-//! The state-bitmap transition happens BEFORE the hole punch on purpose —
+//! The state-bitmap transition happens BEFORE the release on purpose —
 //! a reader that already passed the Resident check before the bitmap was
 //! updated may read zeros, which our consumers tolerate as a transient
 //! glitch (re-validates on the next frame). The reverse order would let a
 //! reader return Resident bytes that have already been deallocated, which
-//! is a permanent corruption window. Always: bitmap-first, then punch.
+//! is a permanent corruption window. Always: bitmap-first, then release.
 //!
 //! This module holds the planner and the `PurgeTarget` contract; the
-//! triggers live in `epoch.rs` (watermark + statvfs checks on the
-//! watchdog tick, plus `run_startup_maintenance`) and the sweep itself
+//! trigger lives in `epoch.rs` (budget high-water mark) and the sweep itself
 //! in `cache.rs` (`Inner::run_purge`).
 
 use super::epoch::{EpochState, EPOCH_SLOTS};

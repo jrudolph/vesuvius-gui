@@ -1,4 +1,4 @@
-use memmap::Mmap;
+use super::region::Region;
 use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -47,7 +47,7 @@ pub enum ChunkState {
     /// Loaded — bytes live at `offset..offset+CHUNK_VOXELS` inside `mmap`.
     /// The mmap is shared with every other resident chunk in the same LOD
     /// data file.
-    Resident { mmap: Arc<Mmap>, offset: usize },
+    Resident { mmap: Arc<Region>, offset: usize },
     /// Definitively absent: every backing source reported "not present"
     /// (e.g., 404 / 403). Sampling returns 0 without consulting any LOD
     /// fallback. Persisted in the chunk-state sidecar so subsequent sessions

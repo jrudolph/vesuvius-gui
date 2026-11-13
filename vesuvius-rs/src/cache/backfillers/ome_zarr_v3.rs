@@ -24,7 +24,7 @@
 //!      comment in `plan_v3_chunk`.
 //!
 //! Source payload is the same as `Download` produces elsewhere:
-//! `Arc<LazySource>` over raw-store-backed bytes.
+//! `Arc<LazySource>` over spilled (mmap-backed) bytes.
 
 use crate::cache::backfiller::{
     BackfillError, BackfillPlan, ExtractedChunk, LazySource, SourceOutcome, SourcePayload, SourceSpec,
@@ -136,28 +136,25 @@ pub(super) fn plan_v3_chunk(
         }
     }
 
-    // Lazy materialization: when there's something to download, cover only
-    // the requesting chunk. The old behavior (cover all ~64 cache chunks
-    // inside the sub-chunk box) decoded once but wrote the full 16.7MB of
-    // children to disk per sub-chunk — for slab/slice browsing ~3/4 of
-    // that is depth the viewport never visits, and the write volume cycles
-    // the decoded cache. Siblings that ARE requested register on the same
-    // source (deduped) and share the decode via `LazySource`; siblings
-    // requested after the source entry is gone re-decode from the raw
-    // store without a network round trip.
+    // Lazy materialization: when there's something to download, claim only
+    // the requesting chunk, so slab/slice browsing doesn't fill the decoded
+    // tier with depth the viewport never visits. Siblings that ARE requested
+    // register on the same source (deduped) and share the decode via
+    // `LazySource`; the rest of a larger sub-chunk goes to the segment log
+    // only (`log_box`), so a later request decodes it locally.
     //
     // The all-absent case keeps full-box coverage: zero-filling the whole
     // box costs no decode and saves ~63 future dispatches over empty
-    // space.
-    // `eager` (offline renderer) forces full-sub-chunk coverage even when
-    // there's data to download: the 256³ decode happens once and persists
-    // all ~64 child cache chunks, so later siblings hit disk instead of
-    // re-decoding from the raw store per chunk.
-    let covered = if sources.is_empty() || eager {
-        super::ome_zarr::covered_cache_chunks([cz_lo, cy_lo, cx_lo], [cz_hi, cy_hi, cx_hi], &sub, &shape, key.lod)
-    } else {
-        vec![key]
-    };
+    // space. `eager` (offline renderer) also claims the full box: it
+    // eventually reads the whole sub-chunk.
+    let full_box =
+        || super::ome_zarr::covered_cache_chunks([cz_lo, cy_lo, cx_lo], [cz_hi, cy_hi, cx_hi], &sub, &shape, key.lod);
+    let covered = if sources.is_empty() || eager { full_box() } else { vec![key] };
+    // Sub-chunks larger than a cache chunk (c3d 256³): the extract also
+    // fills every other cache chunk of the box, so one decode puts all of
+    // them into the segment log. The cache only makes the requested ones
+    // resident; the rest are logged, ready for a cheap decode later.
+    let log_box = if !sources.is_empty() && sub != [CHUNK_SIDE; 3] { full_box() } else { Vec::new() };
 
     log::trace!(
         "[{}] v3 plan → {} download(s) over {} considered sub-chunk(s), covers {} cache chunk(s)",
@@ -190,6 +187,7 @@ pub(super) fn plan_v3_chunk(
             // then fill every requester chunk this plan's sub-chunk box
             // covers. Followers skip-met against the promoted states.
             let mut decoded: HashMap<[usize; 3], Arc<Vec<u8>>> = HashMap::new();
+            let mut raws: HashMap<[usize; 3], Arc<LazySource>> = HashMap::new();
             let mut targets: Vec<ChunkKey> = covered_for_extract.clone();
             for (i, coord) in source_coords.iter().enumerate() {
                 let payload_opt: &Option<SourcePayload> = match &outcomes[i] {
@@ -232,16 +230,19 @@ pub(super) fn plan_v3_chunk(
                     .decoded_with(|bytes| decoder.decode_sub_chunk(bytes))
                     .map_err(|e| BackfillError::Permanent(format!("v3 sub-chunk decode at {:?}: {}", coord, e)))?;
                 decoded.insert(*coord, decoded_bytes);
+                raws.insert(*coord, lazy);
+            }
+            for k in &log_box {
+                if !targets.contains(k) {
+                    targets.push(*k);
+                }
             }
 
-            Ok(super::ome_zarr::fill_covered_chunks(
-                key_dbg,
-                &targets,
-                &shape,
-                &sub,
-                &decoded,
-                "v3",
-            ))
+            let fills = super::ome_zarr::fill_covered_chunks(key_dbg, &targets, &shape, &sub, &decoded, "v3");
+            Ok(fills
+                .into_iter()
+                .map(|(k, data)| (k, passthrough(k, data, &raws, &shape, &sub)))
+                .collect())
         },
     );
 
@@ -250,4 +251,33 @@ pub(super) fn plan_v3_chunk(
         sources,
         extract,
     })
+}
+
+/// A cache chunk that is exactly one interior vc-delta3d 64³ sub-chunk keeps
+/// the downloaded bytes, so the segment log stores them instead of encoding
+/// the chunk again.
+fn passthrough(
+    k: ChunkKey,
+    data: ExtractedChunk,
+    raws: &HashMap<[usize; 3], Arc<LazySource>>,
+    shape: &[usize; 3],
+    sub: &[usize; 3],
+) -> ExtractedChunk {
+    let ExtractedChunk::Bytes(bytes) = data else { return data };
+    let c = [k.z as usize, k.y as usize, k.x as usize];
+    let interior = (0..3).all(|i| (c[i] + 1) * CHUNK_SIDE <= shape[i]);
+    if *sub != [CHUNK_SIDE; 3] || !interior {
+        return ExtractedChunk::Bytes(bytes);
+    }
+    let Some(raw) = raws.get(&c).and_then(|l| l.raw_bytes()) else {
+        return ExtractedChunk::Bytes(bytes);
+    };
+    match vesuvius_delta3d::decoded_size(raw) {
+        Ok(n) if n == bytes.len() => ExtractedChunk::Encoded {
+            bytes,
+            encoded: raw.to_vec(),
+        },
+        // c3d sub-chunks: re-encode.
+        _ => ExtractedChunk::Bytes(bytes),
+    }
 }

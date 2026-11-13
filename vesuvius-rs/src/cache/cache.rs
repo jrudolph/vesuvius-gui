@@ -16,7 +16,8 @@
 //!      chunk as a waiter on the existing source.
 //!   4. When a source resolves, every waiter chunk's counter drops by one;
 //!      when a chunk's counter hits zero, an `Extract` task is queued.
-//!   5. Extract runs the backfiller's closure → writes to disk → mmaps →
+//!   5. Extract runs the backfiller's closure → appends to the segment log
+//!      → fills the chunk's memory slot →
 //!      transitions chunk state to `Resident`.
 //!
 //! ### Priority ordering + lease liveness
@@ -43,12 +44,13 @@ use super::backfiller::{
     BackfillError, BackfillPlan, ChunkBackfiller, ExtractedChunk, LazySource, SourceOutcome, SourcePayload,
     SourceSpec,
 };
-use super::disk::{DiskStore, LoadOutcome, ShardCoord, ShardSnapshot};
+use super::slots::{LoadOutcome, ShardCoord, ShardSnapshot, SlotStore};
 use super::downloader::{DownloadError, DownloadResult, Downloader, DownloaderStats, OnDone};
 use super::epoch::{self, EpochState};
 use super::lease::{Interest, Lease, Liveness, LivenessFn, Priority};
 use super::purge::{PurgePlan, PurgeTarget};
-use super::spill::RawStore;
+use super::seglog::{self, Format, LogKey, Record, SegLog};
+use super::spill::SpillStore;
 use super::state::{ChunkKey, ChunkState};
 use super::work_queue::{QueueEntry, WorkQueue};
 use super::CHUNK_VOXELS;
@@ -110,13 +112,16 @@ struct Inner {
     /// that may try to insert into the same shard — re-entrant DashMap
     /// access deadlocks.
     dispatching: DashMap<ChunkKey, ()>,
-    disk: DiskStore,
-    /// Keyed on-disk retention for downloaded source bytes. Doubles as
-    /// the spill between the downloader and Extract (compressed payloads
-    /// stay off the heap) and as a (url, range)-keyed cache so a region
-    /// evicted from the decoded chunk store re-decodes locally instead of
-    /// re-downloading. Shared dir across volumes; see `spill::RawStore`.
-    raw: RawStore,
+    /// Decoded chunks, in process memory.
+    slots: SlotStore,
+    /// Persistent compressed copy of every chunk (shared by all volumes of
+    /// the unified root). `None` when disabled.
+    log: Option<SegLog>,
+    /// This volume's id in `log` keys.
+    log_volume: u64,
+    /// Spill for downloaded source bytes between download and Extract
+    /// (keeps compressed payloads off the heap).
+    spill: SpillStore,
     backfiller: Arc<dyn ChunkBackfiller>,
     /// `Mutex<HashMap>` rather than `DashMap` so claim-the-slot for a fresh
     /// source key is atomic. The lock is never held across `try_submit`
@@ -207,6 +212,9 @@ enum SourceState {
 }
 
 struct ChunkProgress {
+    /// The extract decodes a segment-log record: its output is already
+    /// persisted and must not be appended again.
+    from_log: bool,
     /// Order matches the original `BackfillPlan.sources` ordering — the
     /// extract closure receives outcomes in this order.
     order: Vec<String>,
@@ -264,6 +272,7 @@ enum RegisterResult {
 pub struct UnifiedCache {
     unified_root: PathBuf,
     epoch: Arc<EpochState>,
+    log: Option<SegLog>,
     /// Per-volume `Inner` registry, keyed by `backfiller.volume_id()`.
     /// `Weak` so external drop of every `ChunkCache` for a volume
     /// allows reclamation; in practice the per-cache worker threads +
@@ -307,9 +316,15 @@ impl UnifiedCache {
         // caller routing through either entry point sees identical
         // state.
         let epoch = epoch::shared_for_unified_root(&key, epoch::cap_bytes_from_env());
+        let params = seglog::Params::from_env();
+        let log = (params.cap_bytes > 0).then(|| {
+            let dir = key.join("log");
+            SegLog::open(&dir, params).unwrap_or_else(|e| panic!("opening segment log {}: {}", dir.display(), e))
+        });
         let unified = Arc::new(UnifiedCache {
             unified_root: key.clone(),
             epoch,
+            log,
             volumes: Mutex::new(HashMap::new()),
         });
         reg.insert(key, unified.clone());
@@ -327,70 +342,17 @@ impl UnifiedCache {
         &self.epoch
     }
 
-    /// Run the synchronous startup-time maintenance pass: if the
-    /// on-disk residency observed by the construction-time survey is
-    /// already above the high-water mark (or disk free space is below
-    /// `MIN_FREE_BYTES`), evict down to the low-water mark before
-    /// returning. Call this once at app startup, after building the
-    /// `UnifiedCache` and before opening any volumes, so the app
-    /// starts in a known good state rather than racing the
-    /// background watchdog.
-    ///
-    /// Returns the number of chunks evicted (0 if the cache was
-    /// already comfortably below water).
-    pub fn run_startup_maintenance(&self) -> u64 {
-        log::info!(
-            target: super::purge::LOG_TARGET,
-            "startup maintenance: surveying {} (cap={} GiB, resident={} chunks)",
-            self.unified_root.display(),
-            self.epoch.cap_bytes() / (1024 * 1024 * 1024),
-            self.epoch.total_chunks(),
-        );
-        self.epoch.run_purge_pass("startup")
+    /// The segment log, if enabled.
+    pub fn log(&self) -> Option<&SegLog> {
+        self.log.as_ref()
     }
 
-    /// Synchronously flush every live volume's sidecar plus the
-    /// cache-wide epoch state. Call this from the app's `on_exit` hook
-    /// so a graceful shutdown durably records every chunk written
-    /// during the session, even if the per-volume sync watchdog hasn't
-    /// fired since the last batch of writes.
-    ///
-    /// Without this, the registry holds `Weak<Inner>` but workers and
-    /// the purge target keep strong refs through process lifetime — so
-    /// `DiskStore::Drop` never runs and the last 0–10 s of writes are
-    /// lost when the process exits between watchdog ticks.
-    ///
-    /// Idempotent: re-flushing after no writes is cheap (the snapshot
-    /// path early-returns when `pending == 0`). Safe to call from any
-    /// thread.
+    /// Seal the current log segment so other processes (and the next run)
+    /// see everything written so far. Call from the app's exit path.
     pub fn shutdown(&self) {
-        // Snapshot the volume map under the lock, then drop the lock
-        // before flushing — `disk.flush()` can block on fsync and we
-        // don't want to hold the registry lock for that long.
-        let live: Vec<Arc<Inner>> = {
-            let mut volumes = self.volumes.lock().unwrap();
-            volumes.retain(|_, w| w.strong_count() > 0);
-            volumes.values().filter_map(|w| w.upgrade()).collect()
-        };
-        let n_vols = live.len();
-        for inner in &live {
-            inner.flush();
+        if let Some(log) = &self.log {
+            log.shutdown();
         }
-        let epoch_path = epoch::epoch_state_path(&self.unified_root);
-        if let Err(e) = self.epoch.save(&epoch_path) {
-            log::warn!(
-                target: super::purge::LOG_TARGET,
-                "shutdown: epoch state save failed at {}: {}",
-                epoch_path.display(),
-                e
-            );
-        }
-        log::info!(
-            target: super::purge::LOG_TARGET,
-            "shutdown: flushed {} volume(s) under {}",
-            n_vols,
-            self.unified_root.display()
-        );
     }
 
     /// Flush every `UnifiedCache` registered in the process. Call this
@@ -427,15 +389,14 @@ impl UnifiedCache {
                 return ChunkCache { inner };
             }
         }
-        let chunks_root = self.unified_root.join(&volume_id);
-        let _ = std::fs::create_dir_all(&chunks_root);
         let inner = ChunkCache::build_inner(
-            chunks_root,
+            self.unified_root.join("spill"),
             backfiller,
             configured_workers(),
             Arc::new(Downloader::new()),
             self.epoch.clone(),
-            super::disk::SHARD_CHUNKS_PER_AXIS,
+            self.log.clone(),
+            super::slots::SHARD_CHUNKS_PER_AXIS,
         );
         volumes.insert(volume_id, Arc::downgrade(&inner));
         ChunkCache { inner }
@@ -451,15 +412,13 @@ impl UnifiedCache {
         backfiller: Arc<dyn ChunkBackfiller>,
         shard_chunks_per_axis: u32,
     ) -> ChunkCache {
-        let volume_id = backfiller.volume_id();
-        let chunks_root = self.unified_root.join(&volume_id);
-        let _ = std::fs::create_dir_all(&chunks_root);
         let inner = ChunkCache::build_inner(
-            chunks_root,
+            self.unified_root.join("spill"),
             backfiller,
             configured_workers(),
             Arc::new(Downloader::new()),
             self.epoch.clone(),
+            self.log.clone(),
             shard_chunks_per_axis,
         );
         ChunkCache { inner }
@@ -468,45 +427,33 @@ impl UnifiedCache {
 
 impl ChunkCache {
     fn build_inner(
-        root: PathBuf,
+        spill_root: PathBuf,
         backfiller: Arc<dyn ChunkBackfiller>,
         workers: usize,
         downloader: Arc<Downloader>,
         epoch: Arc<EpochState>,
+        log: Option<SegLog>,
         shard_chunks_per_axis: u32,
     ) -> Arc<Inner> {
         let task_queue = WorkQueue::new();
-        // Raw-source retention lives at the unified root (volume-agnostic:
-        // keys are (url, range) hashes), so every volume shares one budget.
-        let raw_root = root.parent().map(|p| p.join("raw")).unwrap_or_else(|| root.join("raw"));
-        let chunks_root = root;
-        let _ = std::fs::create_dir_all(&raw_root);
-
+        std::fs::create_dir_all(&spill_root)
+            .unwrap_or_else(|e| panic!("creating spill dir {}: {}", spill_root.display(), e));
         let volume_id = backfiller.volume_id();
-        let extent = backfiller.voxel_extent();
-        let max_lod = backfiller.max_lod();
-
-        let disk = if shard_chunks_per_axis == super::disk::SHARD_CHUNKS_PER_AXIS {
-            DiskStore::new(chunks_root, volume_id, extent, max_lod)
-        } else {
-            DiskStore::new_with_shard_chunks_per_axis(chunks_root, volume_id, extent, max_lod, shard_chunks_per_axis)
-        };
-        // Accumulate this volume's residency into the global histogram.
-        // The registry already scanned the unified root at first init
-        // and seeded every volume it found on disk, so for an existing
-        // volume this is a no-op (add_from_sidecar is idempotent on
-        // volume_id). For a volume that's brand-new to the cache dir
-        // (no prior sidecar), the scan didn't see it and this call
-        // does the initial accumulation — which for a fresh volume is
-        // zero residency, but still records the volume_id so future
-        // calls remain idempotent.
-        epoch.add_from_sidecar(&disk.sidecar());
+        let log_volume = seglog::volume_hash(&volume_id);
+        let slots = SlotStore::new_with_shard_chunks_per_axis(
+            volume_id,
+            backfiller.voxel_extent(),
+            backfiller.max_lod(),
+            shard_chunks_per_axis,
+        );
 
         let inner = Arc::new(Inner {
             map: DashMap::with_hasher(fxhash::FxBuildHasher::default()),
             dispatching: DashMap::new(),
-            disk,
-            raw: RawStore::new(raw_root),
+            slots,
+            log,
+            log_volume,
+            spill: SpillStore::new(spill_root),
             backfiller,
             sources: Mutex::new(HashMap::new()),
             chunks: DashMap::new(),
@@ -589,17 +536,13 @@ impl ChunkCache {
     ///      DashMap, so any future lookup re-takes the slow path.
     ///   3. Clear the shard's dispatched bit so the next reader of the
     ///      slot re-dispatches (and re-synthesizes its upscale preview).
-    ///   4. Punch the chunk's slot in the shard file
-    ///      (`fallocate(FALLOC_FL_PUNCH_HOLE)`), freeing physical
-    ///      blocks.
-    ///   5. Release the slot to MISSING (Release; bumps the pending
-    ///      counter so the sync thread eventually durably records the
-    ///      eviction).
+    ///   4. Give the slot's pages back to the kernel (`MADV_DONTNEED`).
+    ///   5. Release the slot to MISSING.
     ///   6. Update the global `EpochState` histogram and total_chunks.
     ///
-    /// Readers that already passed the sidecar check before step 1 may
-    /// transiently see zeros from the punched mmap; the async pipeline
-    /// tolerates that, and the next paint loop re-dispatches.
+    /// Readers that already passed the state check before step 1 may
+    /// transiently see zeros; the async pipeline tolerates that, and the
+    /// next paint loop re-dispatches (from the segment log).
     pub fn purge_to_target(&self, target_chunks: u64) -> u64 {
         let Some(plan) = PurgePlan::build(&self.inner.epoch, target_chunks) else {
             return 0;
@@ -688,7 +631,7 @@ impl ChunkCache {
     /// Chunks-per-axis of one shard cube. The volume's per-render hot slot
     /// derives shard coordinates from `ChunkKey`s using this value.
     pub fn shard_chunks_per_axis(&self) -> u32 {
-        self.inner.disk.shard_chunks_per_axis()
+        self.inner.slots.shard_chunks_per_axis()
     }
 
     /// Test support: non-creating peek for a shard's mmap + dispatched
@@ -696,7 +639,7 @@ impl ChunkCache {
     /// otherwise. The volume reader uses `ensure_shard_open` instead.
     #[cfg(test)]
     pub fn peek_shard(&self, lod: u8, shard: ShardCoord) -> Option<ShardSnapshot> {
-        self.inner.disk.peek_shard(lod, shard)
+        self.inner.slots.peek_shard(lod, shard)
     }
 
     /// Shared handle to this volume's sidecar — the durable per-chunk
@@ -704,7 +647,7 @@ impl ChunkCache {
     /// per chunk per LOD). The volume reader probes it directly on the
     /// per-voxel fast path.
     pub(super) fn sidecar(&self) -> Arc<super::sidecar::Sidecar> {
-        self.inner.disk.sidecar()
+        self.inner.slots.sidecar()
     }
 
     /// Open (sparse-mmap) the shard at `(lod, shard)` if it isn't
@@ -713,13 +656,7 @@ impl ChunkCache {
     /// per-voxel lookups in that shard run off the cached mmap base +
     /// direct sidecar probes.
     pub fn ensure_shard_open(&self, lod: u8, shard: ShardCoord) -> Option<ShardSnapshot> {
-        match self.inner.disk.ensure_shard_open(lod, shard) {
-            Ok(snap) => snap,
-            Err(e) => {
-                log::warn!("ensure_shard_open failed for lod {} shard {:?}: {}", lod, shard, e);
-                None
-            }
-        }
+        self.inner.slots.ensure_shard_open(lod, shard)
     }
 
     /// Test support: look up the shard layout for `key` — `(shard_coord,
@@ -727,7 +664,7 @@ impl ChunkCache {
     /// this math itself from `shard_chunks_per_axis`.
     #[cfg(test)]
     pub fn locate(&self, key: ChunkKey) -> Option<(ShardCoord, u64)> {
-        self.inner.disk.locate(key)
+        self.inner.slots.locate(key)
     }
 
     /// Test support: poll `state_or_fetch` until `key` leaves `Pending`
@@ -843,14 +780,6 @@ impl ChunkCache {
         }
     }
 
-    /// Synchronously persist the on-disk chunk-state sidecar. Call this
-    /// before relying on a fresh `ChunkCache` opened against the same root
-    /// to see chunks written by the current process — the background sync
-    /// thread otherwise flushes only every ~10 s.
-    pub fn flush(&self) {
-        self.inner.disk.flush();
-    }
-
     /// Enable or disable upscaled-from-parent preview synthesis on a
     /// chunk's first dispatch (default: enabled). Interactive callers leave
     /// this on so panes paint a downsampled preview while real bytes stream
@@ -924,10 +853,10 @@ fn pending_state() -> Arc<ChunkState> {
 }
 impl PurgeTarget for Inner {
     fn volume_id(&self) -> String {
-        self.disk.sidecar().header.volume_id.clone()
+        self.slots.sidecar().header.volume_id.clone()
     }
     fn summarize(&self, plan: PurgePlan, current: u8) -> super::purge::VolumeBreakdown {
-        super::purge::VolumeBreakdown::from_sidecar(&self.disk.sidecar(), plan, current)
+        super::purge::VolumeBreakdown::from_sidecar(&self.slots.sidecar(), plan, current)
     }
     fn run_purge(&self, plan: PurgePlan) -> u64 {
         Inner::run_purge(self, plan)
@@ -935,13 +864,6 @@ impl PurgeTarget for Inner {
 }
 
 impl Inner {
-    /// Synchronously flush this volume's sidecar to disk. Wraps
-    /// `DiskStore::flush` so `UnifiedCache::shutdown` can drive it
-    /// through a `Weak<Inner>` upgrade without exposing the disk store.
-    fn flush(&self) {
-        self.disk.flush();
-    }
-
     /// Evict all Resident chunks whose access epoch falls into the
     /// `plan.is_victim` set, under per-slot CAS protection.
     ///
@@ -952,9 +874,8 @@ impl Inner {
     ///   2. Drop the in-memory `ChunkState::Resident` entry so new
     ///      readers take the slow path.
     ///   3. Demote the per-shard bitmaps to `Unknown` (Release).
-    ///   4. Punch holes — one `fallocate` per contiguous in-shard run
-    ///      instead of one syscall per chunk (victims walk in raster
-    ///      order, so long runs are the norm).
+    ///   4. Release the memory — one `madvise` per contiguous in-shard
+    ///      run (victims walk in raster order, so long runs are the norm).
     ///   5. Store `MISSING` on every slot (releases the locks; pairs
     ///      with reader Acquire loads).
     ///   6. record_evict per victim.
@@ -963,11 +884,11 @@ impl Inner {
     /// `write_atomic` on the same slot: a peer that started its CAS
     /// from `MISSING` would have failed (we're at `RESIDENT`), and a
     /// peer that races our `LOCKED` claim sees LOCKED and yields until
-    /// we release in step (5) — so no pwrite can interleave with the
-    /// punch. The bounded batch size caps how long any one slot stays
+    /// we release in step (5) — so no write can interleave with the
+    /// release. The bounded batch size caps how long any one slot stays
     /// LOCKED.
     fn run_purge(&self, plan: PurgePlan) -> u64 {
-        let sidecar = self.disk.sidecar();
+        let sidecar = self.slots.sidecar();
         let current = self.epoch.current();
         let volume_id = sidecar.header.volume_id.clone();
         log::info!(
@@ -1058,12 +979,12 @@ impl Inner {
         // `opened`-map lock and the punches can coalesce.
         let mut by_shard: HashMap<ShardCoord, Vec<u64>> = HashMap::new();
         for (_, _, key) in batch.iter() {
-            if let Some((shard, in_shard_idx)) = self.disk.locate(*key) {
+            if let Some((shard, in_shard_idx)) = self.slots.locate(*key) {
                 by_shard.entry(shard).or_default().push(in_shard_idx);
             }
         }
         for (shard, mut idxs) in by_shard {
-            if let Some(snap) = self.disk.peek_shard(lod, shard) {
+            if let Some(snap) = self.slots.peek_shard(lod, shard) {
                 for &i in &idxs {
                     snap.dispatched.clear(i);
                 }
@@ -1074,15 +995,7 @@ impl Inner {
             idxs.sort_unstable();
             let mut run_start = idxs[0];
             let mut run_len: u64 = 1;
-            let punch = |start: u64, n: u64| {
-                if let Err(e) = self.disk.punch_hole_run(lod, shard, start, n) {
-                    log::warn!(
-                        target: super::purge::LOG_TARGET,
-                        "punch_hole_run failed lod={} shard={:?} start={} n={}: {}",
-                        lod, shard, start, n, e,
-                    );
-                }
-            };
+            let punch = |start: u64, n: u64| self.slots.release_run(lod, shard, start, n);
             for &i in &idxs[1..] {
                 if i == run_start + run_len {
                     run_len += 1;
@@ -1227,13 +1140,13 @@ impl Inner {
     /// `or_insert_with` closure on the entry guard — we must NEVER call
     /// `self.map.insert(key, …)` for this same key from here.
     fn dispatch_chunk(self: &Arc<Self>, key: ChunkKey) -> Arc<ChunkState> {
-        match self.disk.load(key) {
+        match self.slots.load(key) {
             LoadOutcome::Resident { mmap, offset } => {
-                log::trace!("[{}] disk hit", key);
+                log::trace!("[{}] slot hit", key);
                 return Arc::new(ChunkState::Resident { mmap, offset });
             }
             LoadOutcome::Empty => {
-                log::trace!("[{}] disk hit (empty)", key);
+                log::trace!("[{}] slot hit (empty)", key);
                 return Arc::new(ChunkState::Empty);
             }
             LoadOutcome::Missing => {}
@@ -1257,13 +1170,10 @@ impl Inner {
         // synthesized for this slot yet this session (or the real data it
         // held was purged)" — which is exactly when we want to fill the
         // preview.
-        let first_dispatch = match self.disk.mark_dispatched(key) {
-            Ok(transitioned) => transitioned,
-            Err(e) => {
-                log::trace!("[{}] mark_dispatched failed: {}", key, e);
-                false
-            }
-        };
+        if let Some(state) = self.dispatch_from_log(key) {
+            return state;
+        }
+        let first_dispatch = self.slots.mark_dispatched(key);
 
         // Upscale-from-parent preview. Walks the LOD pyramid from
         // `key.lod + 1` toward `max_lod`, and at the first resident
@@ -1330,6 +1240,7 @@ impl Inner {
             }
         }
         let progress_arc = Arc::new(Mutex::new(ChunkProgress {
+            from_log: false,
             order: order.clone(),
             remaining: order.len(),
             results: HashMap::new(),
@@ -1500,52 +1411,15 @@ impl Inner {
                 }
             }
             SourceSpec::Download { key: _, url, range } => {
-                // Retention key: the (url, byte-range) identity of the
-                // bytes themselves — volume-agnostic, so the same shard
-                // range fetched through two volume identities still hits.
-                let raw_key = match range {
-                    Some((off, len)) => format!("{}#{}+{}", url, off, len),
-                    None => format!("{}#full", url),
-                };
-
-                // Raw-store hit: the bytes are already on local disk from
-                // an earlier download. Complete the source synchronously —
-                // no locks are held here, and complete_source firing from
-                // this thread is the same re-entrancy the downloader's
-                // synchronous on_done path already exercises.
-                if let Some(mmap) = self.raw.get(&raw_key) {
-                    if super::netlog::enabled() {
-                        super::netlog::emit(serde_json::json!({
-                            "t": super::netlog::now_ms(),
-                            "event": "raw_hit",
-                            "url": url,
-                            "range_off": range.map(|(off, _)| off),
-                            "range_len": range.map(|(_, len)| len),
-                            "chunk": format!("{:?}", chunk_key),
-                            "bytes": mmap.len(),
-                        }));
-                    }
-                    log::trace!("[{}] raw-store hit (chunk {})", source_key, chunk_key);
-                    let payload = Arc::new(LazySource::new(Arc::new(mmap)).with_on_reject(self.raw_rejecter(&raw_key)))
-                        as SourcePayload;
-                    self.complete_source(source_key, Ok(Some(payload)));
-                    return RegisterResult::Queued;
-                }
-
                 let inner = self.clone();
                 let key_for_done = source_key.clone();
                 let on_done: OnDone = Box::new(move |result: DownloadResult| {
-                    // Persist the bytes to the raw store as soon as they
-                    // arrive: the payload is mmap-backed (heap stays
-                    // bounded even when downloads outpace extraction) and
-                    // the file is retained so future evictions of the
-                    // decoded chunks re-decode locally instead of
-                    // re-downloading.
+                    // Spill the bytes as soon as they arrive: the payload
+                    // is mmap-backed, so the heap stays bounded even when
+                    // downloads outpace extraction.
                     let outcome: SourceOutcome = match result {
-                        Ok(Some(bytes)) => match inner.raw.put(&raw_key, &bytes) {
-                            Ok(mmap) => Ok(Some(Arc::new(
-                                LazySource::new(Arc::new(mmap)).with_on_reject(inner.raw_rejecter(&raw_key)),
-                            ) as SourcePayload)),
+                        Ok(Some(bytes)) => match inner.spill.write_and_mmap(&bytes) {
+                            Ok(mmap) => Ok(Some(Arc::new(LazySource::new(Arc::new(mmap))) as SourcePayload)),
                             Err(e) => {
                                 log::warn!("[{}] spill failed ({}); falling back to in-memory", key_for_done, e);
                                 Ok(Some(Arc::new(LazySource::new(Arc::new(bytes.to_vec()))) as SourcePayload))
@@ -1567,18 +1441,6 @@ impl Inner {
                 self.downloader.submit(&url, range, chunk_key, liveness, on_done);
                 log::trace!("[{}] submitted (chunk {})", source_key, chunk_key);
                 RegisterResult::Queued
-            }
-        }
-    }
-
-    /// Reject hook for a payload retained under `raw_key`: drops the stored
-    /// copy, so the retry downloads it again.
-    fn raw_rejecter(self: &Arc<Self>, raw_key: &str) -> impl Fn() + Send + Sync + 'static {
-        let inner = Arc::downgrade(self);
-        let raw_key = raw_key.to_string();
-        move || {
-            if let Some(inner) = inner.upgrade() {
-                inner.raw.remove(&raw_key);
             }
         }
     }
@@ -1726,7 +1588,7 @@ impl Inner {
             Some(v) => v,
             None => return,
         };
-        let (order, results, extract, covered, dispatched_at) = {
+        let (order, results, extract, covered, dispatched_at, from_log) = {
             let mut p = arc.lock().unwrap();
             let extract = match p.extract.take() {
                 Some(e) => e,
@@ -1735,7 +1597,7 @@ impl Inner {
             let order = std::mem::take(&mut p.order);
             let results = std::mem::take(&mut p.results);
             let covered = std::mem::take(&mut p.covered);
-            (order, results, extract, covered, p.dispatched_at)
+            (order, results, extract, covered, p.dispatched_at, p.from_log)
         };
         let mut inputs: Vec<SourceOutcome> = Vec::with_capacity(order.len());
         let mut results = results;
@@ -1761,13 +1623,22 @@ impl Inner {
                 // follow-up disk-load round trip.
                 let mut seen_primary = false;
                 for (k, data) in fills {
+                    // A byproduct nobody asked for (e.g. the rest of a
+                    // decoded c3d sub-chunk): only persist it.
+                    if k != key && !covered.contains(&k) && !self.is_pending(k) {
+                        n_fills -= 1;
+                        if !from_log {
+                            self.log_only(k, data);
+                        }
+                        continue;
+                    }
                     let state = if k == key {
-                        let s = self.primary_state(k, data, t0);
+                        let s = self.primary_state(k, data, t0, !from_log);
                         seen_primary = true;
                         primary_state = Some(s.clone());
                         s
                     } else {
-                        self.primary_state(k, data, t0)
+                        self.primary_state(k, data, t0, !from_log)
                     };
                     if k != key {
                         sibling_states.push((k, state));
@@ -1912,66 +1783,138 @@ impl Inner {
         self.queue_deferred(&order);
     }
 
-    /// Translate a primary `ExtractedChunk` into the in-memory state to
-    /// publish. `Bytes` → write to disk, mmap, `Resident`. `Empty` → persist
-    /// the `.empty` sentinel, `Empty`. IO failures fall back to a cooldown
-    /// so paint retries.
-    fn primary_state(&self, key: ChunkKey, primary: ExtractedChunk, t0: std::time::Instant) -> Arc<ChunkState> {
-        use super::disk::WriteOutcome;
-        match primary {
-            ExtractedChunk::Bytes(bytes) => match self.disk.write_atomic(key, &bytes) {
-                Ok(outcome) => {
-                    // Only the thread that actually performed the
-                    // MISSING → RESIDENT transition should record_fill —
-                    // sibling writes that lose the CAS race (slot was
-                    // already filled by a peer) must skip, otherwise
-                    // the histogram and `total_chunks` over-count by
-                    // one per redundant sibling.
-                    if matches!(outcome, WriteOutcome::Wrote) {
-                        let ep = self.epoch.record_fill(CHUNK_VOXELS as u64);
-                        self.disk.set_access_epoch(key, ep);
-                    }
-                    match outcome {
-                        WriteOutcome::Wrote | WriteOutcome::AlreadyResident => match self.disk.try_load(key) {
-                            Some((mmap, offset)) => {
-                                log::debug!("[{}] ready ({:?})", key, t0.elapsed());
-                                Arc::new(ChunkState::Resident { mmap, offset })
-                            }
-                            None => {
-                                log::warn!("[{}] write ok but mmap reload failed", key);
-                                super::netlog::emit(serde_json::json!({
-                                    "t": super::netlog::now_ms(),
-                                    "event": "disk_anomaly",
-                                    "kind": "mmap_reload_failed",
-                                    "chunk": format!("{:?}", key),
-                                }));
-                                cooldown()
-                            }
-                        },
-                        WriteOutcome::AlreadyEmpty => {
-                            log::debug!("[{}] empty (peer-marked, {:?})", key, t0.elapsed());
-                            Arc::new(ChunkState::Empty)
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[{}] disk write failed: {}", key, e);
-                    super::netlog::emit(serde_json::json!({
-                        "t": super::netlog::now_ms(),
-                        "event": "disk_anomaly",
-                        "kind": "write_failed",
-                        "chunk": format!("{:?}", key),
-                        "error": e.to_string(),
-                    }));
-                    cooldown()
-                }
-            },
+    /// Publish one extracted chunk: append it to the segment log (when
+    /// `persist`; `Encoded` bytes as they are, otherwise `delta`-encoded),
+    /// fill its slot and return its terminal state.
+    fn primary_state(
+        &self,
+        key: ChunkKey,
+        data: ExtractedChunk,
+        t0: std::time::Instant,
+        persist: bool,
+    ) -> Arc<ChunkState> {
+        use super::slots::WriteOutcome;
+        let (bytes, encoded) = match data {
             ExtractedChunk::Empty => {
-                if let Err(e) = self.disk.mark_empty(key) {
-                    log::warn!("[{}] mark_empty failed ({}); empty still cached in-memory only", key, e);
+                if persist {
+                    self.log_append(key, Format::Empty, &[]);
                 }
+                self.slots.mark_empty(key);
                 log::debug!("[{}] empty ({:?})", key, t0.elapsed());
-                Arc::new(ChunkState::Empty)
+                return Arc::new(ChunkState::Empty);
+            }
+            ExtractedChunk::Bytes(bytes) => (bytes, None),
+            ExtractedChunk::Encoded { bytes, encoded } => (bytes, Some(encoded)),
+        };
+        if persist && self.log.is_some() {
+            let encoded = encoded.unwrap_or_else(|| {
+                vesuvius_delta3d::encode_preset(&bytes, [super::CHUNK_SIDE; 3], vesuvius_delta3d::Preset::Delta)
+            });
+            self.log_append(key, Format::Vc, &encoded);
+        }
+        match self.slots.write_atomic(key, &bytes) {
+            WriteOutcome::Wrote => {
+                let ep = self.epoch.record_fill(CHUNK_VOXELS as u64);
+                self.slots.set_access_epoch(key, ep);
+            }
+            WriteOutcome::AlreadyResident => {}
+            WriteOutcome::AlreadyEmpty => {
+                log::debug!("[{}] empty (peer-marked, {:?})", key, t0.elapsed());
+                return Arc::new(ChunkState::Empty);
+            }
+        }
+        let (mmap, offset) = self
+            .slots
+            .try_load(key)
+            .unwrap_or_else(|| panic!("[{}] not resident right after filling it", key));
+        log::debug!("[{}] ready ({:?})", key, t0.elapsed());
+        Arc::new(ChunkState::Resident { mmap, offset })
+    }
+
+    fn is_pending(&self, key: ChunkKey) -> bool {
+        self.map
+            .get(&key)
+            .is_some_and(|s| matches!(s.as_ref(), ChunkState::Pending { .. }))
+    }
+
+    /// Append an extracted chunk to the segment log without making it
+    /// resident. Skipped if the log already has it.
+    fn log_only(&self, key: ChunkKey, data: ExtractedChunk) {
+        let Some(log) = &self.log else { return };
+        if log.contains(&self.log_key(key)).is_some() {
+            return;
+        }
+        match data {
+            ExtractedChunk::Empty => self.log_append(key, Format::Empty, &[]),
+            ExtractedChunk::Bytes(bytes) => {
+                let encoded =
+                    vesuvius_delta3d::encode_preset(&bytes, [super::CHUNK_SIDE; 3], vesuvius_delta3d::Preset::Delta);
+                self.log_append(key, Format::Vc, &encoded);
+            }
+            ExtractedChunk::Encoded { encoded, .. } => self.log_append(key, Format::Vc, &encoded),
+        }
+    }
+
+    fn log_key(&self, key: ChunkKey) -> LogKey {
+        LogKey {
+            volume: self.log_volume,
+            chunk: key,
+        }
+    }
+
+    fn log_append(&self, key: ChunkKey, format: Format, payload: &[u8]) {
+        if let Some(log) = &self.log {
+            if let Err(e) = log.append(&self.log_key(key), format, payload) {
+                log::warn!("[{}] segment log append failed: {}", key, e);
+            }
+        }
+    }
+
+    /// Serve a slot miss from the segment log: `Empty` records resolve right
+    /// away; data records are decoded by an extract on a cache worker (never
+    /// on the painting thread). `None` if the log doesn't have the chunk.
+    fn dispatch_from_log(self: &Arc<Self>, key: ChunkKey) -> Option<Arc<ChunkState>> {
+        let log = self.log.as_ref()?;
+        let lk = self.log_key(key);
+        match log.contains(&lk)? {
+            Format::Empty => {
+                // Read (not just look up) so an old copy gets promoted.
+                log.read(&lk);
+                self.slots.mark_empty(key);
+                Some(Arc::new(ChunkState::Empty))
+            }
+            Format::Vc => {
+                let log = log.clone();
+                let extract = Box::new(
+                    move |_: &[SourceOutcome]| -> Result<Vec<(ChunkKey, ExtractedChunk)>, BackfillError> {
+                        match log.read(&lk) {
+                            Some(Record::Vc(payload)) => {
+                                let mut bytes = vec![0u8; CHUNK_VOXELS];
+                                vesuvius_delta3d::decode_into(&payload, &mut bytes)
+                                    .unwrap_or_else(|e| panic!("[{}] decoding segment log record: {}", key, e));
+                                Ok(vec![(key, ExtractedChunk::Bytes(bytes))])
+                            }
+                            Some(Record::Empty) => Ok(vec![(key, ExtractedChunk::Empty)]),
+                            // Evicted since the lookup: requestable again,
+                            // the next dispatch goes to the backfiller.
+                            None => Err(BackfillError::Cancelled),
+                        }
+                    },
+                );
+                self.chunks.insert(
+                    key,
+                    Arc::new(Mutex::new(ChunkProgress {
+                        from_log: true,
+                        order: Vec::new(),
+                        remaining: 0,
+                        results: HashMap::new(),
+                        extract: Some(extract),
+                        covered: vec![key],
+                        dispatched_at: std::time::Instant::now(),
+                    })),
+                );
+                self.task_queue.submit_durable(key, EXTRACT_PRIORITY, Task::Extract);
+                Some(pending_state())
             }
         }
     }
@@ -2064,14 +2007,14 @@ impl Inner {
         for shift in 1..=max_shift {
             let parent_lod = key.lod + shift;
             let parent_key = ChunkKey::new(parent_lod, key.x >> shift, key.y >> shift, key.z >> shift);
-            let (mmap, offset) = match self.disk.load(parent_key) {
+            let (mmap, offset) = match self.slots.load(parent_key) {
                 LoadOutcome::Resident { mmap, offset } => (mmap, offset),
                 _ => continue,
             };
             let parent_slice = &mmap[offset..offset + CHUNK_VOXELS];
             let bytes = upsample_from_parent(parent_slice, key.x, key.y, key.z, shift);
-            match self.disk.write_unconfirmed(key, &bytes) {
-                Ok(true) => {
+            match self.slots.write_unconfirmed(key, &bytes) {
+                true => {
                     // The source parent is now serving as a live preview
                     // backing for the composite — LRU-bump it (CAS +
                     // histogram) so the purge sweep keeps it warm. The
@@ -2081,16 +2024,13 @@ impl Inner {
                     // anyway so any later code that inspects it sees this
                     // frame's epoch.
                     self.touch_access(parent_key);
-                    self.disk.set_access_epoch(key, self.epoch.current());
+                    self.slots.set_access_epoch(key, self.epoch.current());
                 }
-                Ok(false) => {
+                false => {
                     // CAS lost — target was already non-MISSING (real
                     // fetch beat us, or a peer raced us through). Still
                     // bump the parent we read.
                     self.touch_access(parent_key);
-                }
-                Err(e) => {
-                    log::debug!("[{}] upscale-from-parent write failed: {}", key, e);
                 }
             }
             return;
@@ -2110,14 +2050,19 @@ impl Inner {
     /// effectively the paint loop itself.
     fn touch_access(&self, key: ChunkKey) {
         let current = self.epoch.current();
-        let Some(old) = self.disk.get_access_epoch(key) else {
+        let Some(old) = self.slots.get_access_epoch(key) else {
             return;
         };
         if old == current {
             return;
         }
-        if let Some(Ok(_)) = self.disk.cas_access_epoch(key, old, current) {
+        if let Some(Ok(_)) = self.slots.cas_access_epoch(key, old, current) {
             self.epoch.record_access_transition(old, current);
+            // Still in use: keep its compressed copy out of the log's
+            // eviction zone.
+            if let Some(log) = &self.log {
+                log.touch(&self.log_key(key));
+            }
         }
     }
 

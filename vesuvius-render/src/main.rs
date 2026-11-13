@@ -291,8 +291,9 @@ pub struct Args {
     #[clap(long)]
     prefetch_depth: Option<usize>,
 
-    /// Override the unified cache size cap, in GB (sets VESUVIUS_CACHE_CAP_GB).
-    /// Raise this for large renders so the working set fits without purging.
+    /// Memory budget for decoded chunks, in GiB (sets VESUVIUS_MEMORY_CACHE_GB).
+    /// Raise this for large renders so the working set fits without purging;
+    /// the persistent compressed cache is sized by VESUVIUS_LOG_CACHE_GB.
     #[clap(long)]
     cache_cap_gb: Option<u64>,
 
@@ -352,11 +353,9 @@ fn main() -> Result<()> {
         .unwrap()
         .block_on(main_run(args));
 
-    // Normal / error exit: durably record everything this run wrote. The
-    // per-tile sync watchdog only fires every few seconds, so without this a
-    // run that finishes between ticks loses its last batch of residency and
-    // the next run re-decodes it. (Ctrl+C / SIGTERM are handled separately by
-    // the signal task installed in `main_run`.)
+    // Normal / error exit: seal the segment log so the next run (and other
+    // processes) see everything this run fetched. (Ctrl+C / SIGTERM are
+    // handled separately by the signal task installed in `main_run`.)
     UnifiedCache::shutdown_all();
 
     result
@@ -912,9 +911,6 @@ impl Rendering {
         let cache_workers =
             vesuvius_rs::cache::configured_workers() * (1 + self.overlay_cache.is_some() as usize);
         print_render_summary(ensure_bar.elapsed(), cache_workers);
-
-        // Make sure the chunks we fetched are durably recorded for the next run.
-        self.cache.flush();
 
         // Propagate the first per-layer failure. Without this, a layer whose
         // save/encode errored (e.g. a TIFF that overflowed classic 32-bit

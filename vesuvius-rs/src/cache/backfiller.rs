@@ -60,11 +60,11 @@ pub type SourceOutcome = Result<Option<SourcePayload>, BackfillError>;
 /// extract pays the decode and the other 15 reuse the buffer. The memo's
 /// lifetime is the source entry's consumer window: when the last
 /// registered chunk releases the source, the decoded buffer drops with
-/// it. Later waves (raw-store hits) decode afresh — by design, this is a
+/// it. Later waves decode afresh — by design, this is a
 /// coalescing window, not a cache.
 pub struct LazySource {
-    /// The raw downloaded bytes: `Arc<Mmap>` (spilled/raw-store path) or
-    /// `Arc<Vec<u8>>` (write-failure fallback).
+    /// The raw downloaded bytes: `Arc<Mmap>` (spilled) or `Arc<Vec<u8>>`
+    /// (spill-failure fallback).
     raw: SourcePayload,
     decoded: std::sync::OnceLock<Result<Arc<Vec<u8>>, String>>,
     /// Chunks registered on this source that are extract-ready. The cache
@@ -72,9 +72,6 @@ pub struct LazySource {
     /// single batch extract reads the snapshot and fills every requester
     /// its plan geometry covers, so one decode serves the whole wave.
     requesters: std::sync::Mutex<Vec<crate::cache::ChunkKey>>,
-    /// Called by [`reject`](Self::reject): drops the retained copy of
-    /// these bytes so a retry downloads them again.
-    on_reject: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl LazySource {
@@ -83,20 +80,6 @@ impl LazySource {
             raw,
             decoded: std::sync::OnceLock::new(),
             requesters: std::sync::Mutex::new(Vec::new()),
-            on_reject: None,
-        }
-    }
-
-    pub fn with_on_reject(mut self, on_reject: impl Fn() + Send + Sync + 'static) -> Self {
-        self.on_reject = Some(Box::new(on_reject));
-        self
-    }
-
-    /// The bytes turned out to be unusable (e.g. the wrong size for their
-    /// chunk): forget any retained copy of them.
-    pub fn reject(&self) {
-        if let Some(f) = &self.on_reject {
-            f();
         }
     }
 
@@ -228,6 +211,11 @@ pub enum ExtractedChunk {
     /// `write_atomic` and (for the chunk that triggered the extract) mmaps
     /// for in-memory residency.
     Bytes(Vec<u8>),
+    /// Like `Bytes`, plus a vc-delta3d payload that decodes to exactly
+    /// `bytes` (e.g. the downloaded ng chunk when it maps 1:1 onto this cache
+    /// chunk). The segment log stores `encoded` as is instead of encoding
+    /// `bytes` again.
+    Encoded { bytes: Vec<u8>, encoded: Vec<u8> },
     /// Chunk is definitively absent — cache writes a `.empty` sentinel and
     /// (for the chunk that triggered the extract) transitions to
     /// `ChunkState::Empty`. Use this when the backfiller can determine,
@@ -261,8 +249,8 @@ pub struct BackfillPlan {
     /// ExtractedChunk)` entries.
     ///
     /// Every entry's key SHOULD appear in `covered`; any entry whose key
-    /// is not in `covered` is still persisted to disk but won't be promoted
-    /// to in-memory `Resident`. Conversely, any `covered` key not present in
+    /// is not in `covered` (and not pending) only goes to the segment log
+    /// and won't be promoted to in-memory `Resident`. Conversely, any `covered` key not present in
     /// the extract output is treated as transient (its Pending claim is
     /// cleared so a later dispatch can retry).
     pub extract:
@@ -282,7 +270,7 @@ pub trait ChunkBackfiller: Send + Sync {
     /// math and constructs closures. Actual I/O happens inside source fetches.
     fn plan(&self, key: ChunkKey) -> Result<BackfillPlan, BackfillError>;
 
-    /// Stable identifier used for the on-disk cache directory. Different
+    /// Stable identifier keying this volume's chunks in the segment log. Different
     /// volumes must produce different ids; the same volume must produce the
     /// same id across runs.
     fn volume_id(&self) -> String;

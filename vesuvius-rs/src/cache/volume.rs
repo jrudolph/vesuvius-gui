@@ -35,7 +35,7 @@
 //!   so do NOT redivide here.
 
 use super::cache::ChunkCache;
-use super::disk::{DispatchedBits, ShardCoord};
+use super::slots::{DispatchedBits, ShardCoord};
 use super::sidecar::{Sidecar, STATE_EMPTY, STATE_LOCKED, STATE_RESIDENT};
 use super::state::{ChunkKey, ChunkState};
 use super::CHUNK_VOXELS;
@@ -44,7 +44,7 @@ use crate::volume::composition::MaxCompositionState;
 use crate::volume::composition::{CompositionState, CompositorRef};
 use crate::volume::{DrawingConfig, Image, PaintVolume, VolumeCons, VoxelPaintVolume, VoxelVolume};
 use ecolor::Color32;
-use memmap::Mmap;
+use super::region::Region;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -137,7 +137,7 @@ impl Default for LocalSlot {
 struct ShardSlot {
     shard: ShardCoord,
     base: *const u8,
-    _mmap: Arc<Mmap>,
+    _mmap: Arc<Region>,
     /// Per-chunk "dispatch attempted" bits for this shard. Consulted only
     /// when the sidecar says MISSING, so the slow path kicks each chunk's
     /// dispatch exactly once instead of re-entering the DashMap per voxel.
@@ -310,12 +310,12 @@ impl UnifiedVolume {
     /// Resolve the chunk base pointer for a +1 neighbor chunk that lives in
     /// a *different* shard than the home slot, using the dedicated
     /// `neighbor_shard` slot so the home slot is never evicted. Returns the
-    /// chunk base pointer plus an `Arc<Mmap>` keepalive so the caller can
+    /// chunk base pointer plus an `Arc<Region>` keepalive so the caller can
     /// build a slice that outlives the `local` borrow. `None` when the
     /// neighbor shard is out of grid / can't be opened — caller then treats
     /// the neighbor corners as 0 (the true volume edge, same as before).
     #[inline]
-    fn neighbor_chunk_base(&self, lod: u8, ncx: u32, ncy: u32, ncz: u32) -> Option<(*const u8, Arc<Mmap>)> {
+    fn neighbor_chunk_base(&self, lod: u8, ncx: u32, ncy: u32, ncz: u32) -> Option<(*const u8, Arc<Region>)> {
         let (shard, in_shard_idx) = self.shard_decompose(ncx, ncy, ncz);
         let chunk_off = (in_shard_idx as usize) * CHUNK_VOXELS;
         {
@@ -1099,7 +1099,7 @@ fn run_length_1d(p: f64, d: f64, lo: f64, hi: f64) -> usize {
 /// call that can repopulate a shard slot (`populate_shard_slot`,
 /// `drop_hot_slot`, recursive `get`/`interpolate_u8`). Callers must read
 /// the bytes before making any such call. Skipping the per-voxel
-/// `Arc<Mmap>` clone matters: `get()` runs once per sampled voxel in the
+/// `Arc<Region>` clone matters: `get()` runs once per sampled voxel in the
 /// PPM/Obj render paths.
 struct BoundChunk {
     /// `lod_use - target_lod`. Zero in the common case (target chunk

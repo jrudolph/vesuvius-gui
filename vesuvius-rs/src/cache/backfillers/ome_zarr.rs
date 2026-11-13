@@ -11,7 +11,7 @@
 //! rather than the download pool (I/O-sized).
 //!
 //! Source payload type: `Arc<LazySource>` over the raw HTTP body (mmap-
-//! backed via the raw store). Sibling cache chunks that consume the same
+//! backed via the spill). Sibling cache chunks that consume the same
 //! source share one allocation via the `Arc`.
 //!
 //! Arrays without a chunk URL (e.g. local-disk zarrs) fall back to the
@@ -33,13 +33,12 @@ pub struct OmeZarrBackfiller {
     volume_id: String,
     extent_xyz: [u32; 3],
     arrays: Vec<ZarrArray<3, u8>>,
-    /// When true, the v3 plan covers (decodes + persists) every 64³ cache
-    /// chunk inside a decoded 256³ sub-chunk on the first request, instead
-    /// of just the requesting chunk. The lazy default suits interactive
-    /// slab-browsing (the viewport never visits ~3/4 of a sub-chunk's
-    /// depth); the offline renderer eventually reads the whole sub-chunk,
-    /// so persisting all siblings amortizes the ~500ms decode over 64
-    /// chunks instead of re-decoding from the raw store per sibling.
+    /// When true, the v3 plan makes every 64³ cache chunk inside a decoded
+    /// 256³ sub-chunk resident on the first request, instead of just the
+    /// requesting chunk. The lazy default suits interactive slab-browsing
+    /// (the viewport never visits ~3/4 of a sub-chunk's depth; the rest
+    /// only goes to the segment log); the offline renderer eventually reads
+    /// the whole sub-chunk.
     eager_materialization: bool,
 }
 
@@ -218,7 +217,7 @@ impl ChunkBackfiller for OmeZarrBackfiller {
                         ctx_arc
                     } else if let Some(lazy) = &lazy {
                         // Download payload — raw bytes are mmap-backed by
-                        // the cache's raw store (or heap on spill failure).
+                        // the cache's spill (or heap on spill failure).
                         // v2 decodes into a ChunkContext rather than a flat
                         // buffer, so the LazySource decode memo isn't used
                         // here — just the raw bytes.
@@ -244,9 +243,6 @@ impl ChunkBackfiller for OmeZarrBackfiller {
                             nchunk_for_extract,
                             labels_for_extract[i]
                         );
-                        if let Some(lazy) = &lazy {
-                            lazy.reject();
-                        }
                         return Err(BackfillError::Transient(format!(
                             "native chunk {} has {} bytes, expected {}",
                             labels_for_extract[i],

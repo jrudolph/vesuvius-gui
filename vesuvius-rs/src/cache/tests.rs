@@ -112,16 +112,16 @@ fn all_absent_sources_transition_to_empty_and_persist() {
         "fetch should have run exactly once"
     );
 
-    // Reopen with a fresh cache (same disk root). The Empty entry in the
-    // sidecar should short-circuit dispatch — no second fetch.
-    cache.flush();
+    // A fresh slot store over the same log: the Empty record short-circuits
+    // dispatch — no second fetch.
     drop(cache);
     let backfiller2 = Arc::new(AllAbsentBackfiller {
         volume_id: "absent-test".to_string(),
         extent: [128, 128, 128],
         fetch_count: counter.clone(),
     });
-    let cache2 = UnifiedCache::for_cache_dir(&root).open_volume(backfiller2);
+    let cache2 = UnifiedCache::for_cache_dir(&root)
+        .open_volume_with_shard_chunks_per_axis(backfiller2, super::slots::SHARD_CHUNKS_PER_AXIS);
     let state2 = cache2.state_or_fetch(key);
     assert!(matches!(state2.as_ref(), ChunkState::Empty), "expected Empty on reload, got {:?}", state2);
     assert_eq!(
@@ -1194,29 +1194,31 @@ fn composite_fast_path_has_no_shard_boundary_seam() {
 }
 
 #[test]
-fn second_open_picks_up_disk_cache() {
+fn second_open_decodes_from_segment_log() {
     let root = tmp_root("persist");
     let key = ChunkKey::new(0, 0, 0, 0);
+    let unified = UnifiedCache::for_cache_dir(&root);
 
     {
-        let backfiller = Arc::new(SyntheticBackfiller::new("vol", [64, 64, 64], 0, |_, _, _, _| 42));
-        let cache = UnifiedCache::for_cache_dir(&root).open_volume(backfiller);
+        let backfiller = Arc::new(SyntheticBackfiller::new("vol", [64, 64, 64], 0, |x, y, z, _| {
+            (x ^ y ^ z) as u8
+        }));
+        let cache = unified.open_volume(backfiller);
         cache.wait_for(key, Duration::from_secs(2));
-        assert_eq!(cache.voxel(0, 0, 0, 0), 42);
-        cache.flush();
+        assert_eq!(cache.voxel(3, 5, 7, 0), 3 ^ 5 ^ 7);
     }
+    assert_eq!(unified.log().unwrap().stats().records, 1);
 
-    // New cache, same volume_id + root → should hit the disk without a fetch.
+    // Fresh slot store, same volume_id + log → decoded from the log, not
+    // from the (now different) backfiller.
     let backfiller = Arc::new(SyntheticBackfiller::new("vol", [64, 64, 64], 0, |_, _, _, _| 99));
-    let cache = UnifiedCache::for_cache_dir(&root).open_volume(backfiller);
-    let state = cache.state_or_fetch(key);
-    // It should already be resident from disk (no worker dispatch).
+    let cache = unified.open_volume_with_shard_chunks_per_axis(backfiller, super::slots::SHARD_CHUNKS_PER_AXIS);
+    let state = cache.wait_for(key, Duration::from_secs(2));
     assert!(state.as_resident().is_some());
-    assert_eq!(
-        cache.voxel(0, 0, 0, 0),
-        42,
-        "disk-cached value should override new backfiller"
-    );
+    assert_eq!(cache.voxel(3, 5, 7, 0), 3 ^ 5 ^ 7, "log copy wins over the new backfiller");
+    // Served from the log: nothing appended again.
+    assert_eq!(unified.log().unwrap().stats().records, 1);
+    assert_eq!(unified.log().unwrap().stats().appended, 1);
 }
 
 #[test]
@@ -1316,61 +1318,6 @@ fn purge_evicts_oldest_and_preserves_survivors() {
 /// (`paint_falls_back_to_coarser_lod_when_target_missing` et al.).
 /// Run with:
 ///   cargo test -p vesuvius-rs --lib cache::tests::shutdown -- --ignored
-#[test]
-#[ignore]
-fn shutdown_flushes_sidecar_and_is_idempotent() {
-    use super::sidecar::{sidecar_path, Sidecar, STATE_RESIDENT};
-
-    let root = tmp_root("shutdown-flush");
-    let backfiller = Arc::new(SyntheticBackfiller::new(
-        "shutdown-vol",
-        [128, 128, 128],
-        0,
-        |x, y, z, _| (x ^ y ^ z) as u8,
-    ));
-    let unified = UnifiedCache::for_cache_dir(&root);
-    let cache = unified.open_volume(backfiller);
-
-    // Materialize two chunks. wait_for guarantees they're Resident in
-    // the in-memory map + the sidecar's atomic byte, but the sync
-    // watchdog hasn't fired yet (10s cadence), so the on-disk sidecar
-    // file is still the empty one written at construction.
-    let k0 = ChunkKey::new(0, 0, 0, 0);
-    let k1 = ChunkKey::new(0, 1, 0, 0);
-    for k in [k0, k1] {
-        let s = cache.wait_for(k, Duration::from_secs(2));
-        assert!(s.as_resident().is_some(), "expected Resident, got {:?}", s);
-    }
-
-    // Drive shutdown explicitly (this is what eframe::App::on_exit
-    // would do in the app).
-    unified.shutdown();
-
-    // Reload the sidecar straight from disk — it must reflect both
-    // writes now that shutdown has run.
-    let vol_root = unified.unified_root().join("shutdown-vol");
-    let sc = Sidecar::load(&sidecar_path(&vol_root))
-        .expect("sidecar load")
-        .expect("sidecar present");
-    let dims = sc.header.lods[0];
-    let idx0 = dims.linear_index(0, 0, 0).unwrap();
-    let idx1 = dims.linear_index(1, 0, 0).unwrap();
-    assert_eq!(sc.get_state(0, idx0), STATE_RESIDENT, "k0 should be Resident on disk");
-    assert_eq!(sc.get_state(0, idx1), STATE_RESIDENT, "k1 should be Resident on disk");
-
-    // Idempotency: second shutdown is a cheap no-op (nothing pending).
-    unified.shutdown();
-
-    // shutdown_all() walks the process-wide registry; calling it must
-    // not panic and must keep the persisted sidecar consistent.
-    UnifiedCache::shutdown_all();
-    let sc2 = Sidecar::load(&sidecar_path(&vol_root))
-        .expect("sidecar load")
-        .expect("sidecar present");
-    assert_eq!(sc2.get_state(0, idx0), STATE_RESIDENT);
-    assert_eq!(sc2.get_state(0, idx1), STATE_RESIDENT);
-}
-
 #[test]
 fn paint_report_records_merges_and_polls_landings() {
     use super::paint_scope::{capture, MissingChunk, PaintReport};
