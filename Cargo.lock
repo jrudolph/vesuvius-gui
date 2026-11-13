@@ -4725,6 +4725,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesuvius-delta3d"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "vesuvius-gui"
 version = "0.1.0"
 dependencies = [
@@ -4811,7 +4818,6 @@ dependencies = [
  "tempfile",
  "tiff 0.10.3",
  "tokio",
- "vesuvius-c3d",
  "vesuvius-zarr",
  "wavefront_obj",
 ]
@@ -4836,6 +4842,7 @@ dependencies = [
  "serde_path_to_error",
  "sha2 0.10.9",
  "vesuvius-c3d",
+ "vesuvius-delta3d",
 ]
 
 [[package]]

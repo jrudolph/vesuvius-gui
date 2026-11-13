@@ -64,7 +64,9 @@ pub struct OmeMultiScale {
     pub axes: Vec<OmeAxis>,
     pub datasets: Vec<OmeDataset>,
     pub name: String,
-    pub version: String,
+    /// Per-multiscale in NGFF 0.4; NGFF 0.5 moves it to `attributes.ome.version` instead.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

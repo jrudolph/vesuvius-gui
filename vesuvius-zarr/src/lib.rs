@@ -74,20 +74,29 @@ pub enum ZarrCompressionName {
     Zstd,
 }
 
+/// v2 `compressor`, selected by its numcodecs `id`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum ZarrCompressorId {
+#[serde(tag = "id")]
+pub enum ZarrCompressor {
     #[serde(rename = "blosc")]
-    Blosc,
+    Blosc {
+        blocksize: u8,
+        clevel: u8,
+        #[serde(rename = "cname")]
+        compression_name: ZarrCompressionName,
+        shuffle: u8,
+    },
+    /// vc-delta3d. Its settings (`quant`, `predictor`, ...) only steer encoding: frames describe
+    /// themselves, so the decoder ignores them.
+    #[serde(rename = "vc-delta3d")]
+    Delta3d {},
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ZarrCompressor {
-    blocksize: u8,
-    clevel: u8,
-    #[serde(rename = "cname")]
-    compression_name: ZarrCompressionName,
-    id: ZarrCompressorId,
-    shuffle: u8,
+/// Decode one vc-delta3d v2 chunk, which must fill the whole chunk shape.
+fn decode_delta3d_chunk(def: &ZarrArrayDef, bytes: &[u8]) -> Vec<u8> {
+    let expected: usize = def.chunks.iter().product();
+    vesuvius_delta3d::decode_expecting(bytes, expected)
+        .unwrap_or_else(|e| panic!("vc-delta3d chunk decode failed (chunk shape {:?}): {}", def.chunks, e))
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -136,9 +145,14 @@ pub trait ZarrFileAccess: Send + Sync + Debug {
 /// so that v3 access impls can keep their own decompression path without sharing this.
 fn decompress_v2_chunk(def: &ZarrArrayDef, file: Arc<File>) -> ChunkContext {
     match &def.compressor {
-        Some(compressor) => match compressor.id {
-            ZarrCompressorId::Blosc => ChunkContext::Heap(BloscChunk::load_data_from_file(&file)),
-        },
+        Some(ZarrCompressor::Blosc { .. }) => ChunkContext::Heap(BloscChunk::load_data_from_file(&file)),
+        Some(ZarrCompressor::Delta3d {}) => {
+            let mut bytes = Vec::new();
+            (&*file)
+                .read_to_end(&mut bytes)
+                .unwrap_or_else(|e| panic!("read vc-delta3d chunk file: {}", e));
+            ChunkContext::Heap(decode_delta3d_chunk(def, &bytes))
+        }
         None => ChunkContext::Raw(RawContext::load_from_file(&file)),
     }
 }
@@ -577,12 +591,11 @@ impl<const N: usize> ZarrArray<N, u8> {
 
     /// Decode raw bytes for one native chunk per this array's compressor +
     /// dtype. The bytes are the full chunk file as it sits on the server
-    /// (blosc-framed, zstd-framed, or raw u8 depending on `def.compressor`).
+    /// (blosc-framed, vc-delta3d, or raw u8 depending on `def.compressor`).
     pub fn decode_chunk_bytes(&self, bytes: &[u8]) -> ChunkContext {
         match &self.def.compressor {
-            Some(compressor) => match compressor.id {
-                ZarrCompressorId::Blosc => ChunkContext::Heap(BloscChunk::decompress_to_vec(bytes)),
-            },
+            Some(ZarrCompressor::Blosc { .. }) => ChunkContext::Heap(BloscChunk::decompress_to_vec(bytes)),
+            Some(ZarrCompressor::Delta3d {}) => ChunkContext::Heap(decode_delta3d_chunk(&self.def, bytes)),
             None => ChunkContext::Heap(bytes.to_vec()),
         }
     }

@@ -3,6 +3,7 @@ members = [
     "vesuvius-rs",
     "vesuvius-atlas-rs",
     "vesuvius-c3d",
+    "vesuvius-delta3d",
     "vesuvius-zarr",
     "vesuvius-gui",
     "vesuvius-render",

@@ -1,23 +1,23 @@
-//! V3-sharded-c3d specialization for `OmeZarrBackfiller`.
+//! V3-sharded specialization for `OmeZarrBackfiller` (c3d or vc-delta3d sub-chunks).
 //!
-//! V3 sharded c3d arrays publish a single shard file per group of (typically
-//! 2×2×2 = 8) 256³ c3d sub-chunks. The shard's first bytes are a small
-//! index of `(offset, len)` pairs telling you where each sub-chunk lives
-//! inside the shard. The default OME-Zarr path doesn't model this — it
+//! V3 sharded arrays publish a single shard file per group of sub-chunks
+//! (e.g. 2×2×2 = 8 256³ c3d sub-chunks). Each shard carries a small
+//! index of `(offset, len)` pairs (at its head or tail) telling you where
+//! each sub-chunk lives inside the shard. The default OME-Zarr path doesn't model this — it
 //! falls through to `array.load_chunk(coord)` (a `Compute` source) which
 //! does the index fetch + Range request synchronously on a cache worker
 //! and bypasses the central downloader pool.
 //!
 //! This module replaces that path for remote v3 arrays:
 //!
-//!   1. Iterate the 256³ sub-chunks overlapping the 64³ cache chunk.
+//!   1. Iterate the sub-chunks overlapping the 64³ cache chunk.
 //!   2. For each, look up its shard, fetch the shard index *blockingly*
 //!      (single-flight inside the V3 access handle so concurrent
 //!      `plan()` calls coalesce), read the sub-chunk's `(offset, len)`.
 //!   3. Emit one `SourceSpec::Download { url, range }` per non-empty
 //!      sub-chunk. Sentinel index entries and 404-on-shard-index get
 //!      no source — the extract closure treats their region as zero.
-//!   4. Extract: c3d-decode the sub-chunk (memoized on the shared
+//!   4. Extract: decode the sub-chunk (memoized on the shared
 //!      `LazySource` payload, so concurrent sibling extracts decode once)
 //!      and slice out the requesting 64³ cache chunk. Coverage is lazy —
 //!      only requested chunks are materialized; see the `covered`
@@ -169,6 +169,7 @@ pub(super) fn plan_v3_chunk(
 
     let key_dbg = key;
     let covered_for_extract = covered.clone();
+    let decoder = handle.clone();
     let extract = Box::new(
         move |outcomes: &[SourceOutcome]| -> Result<Vec<(ChunkKey, ExtractedChunk)>, BackfillError> {
             super::ome_zarr::triage_outcomes(outcomes)?;
@@ -179,7 +180,7 @@ pub(super) fn plan_v3_chunk(
                 "v3 extract: source_coords must zip 1:1 with outcomes"
             );
 
-            // Decode each present sub-chunk into a 256³ heap buffer keyed
+            // Decode each present sub-chunk into a heap buffer keyed
             // by sub-chunk coordinate. Absent (Ok(None)) and skipped
             // sub-chunks stay out of the map → extract zero-fills.
             //
@@ -228,8 +229,8 @@ pub(super) fn plan_v3_chunk(
                     }
                 }
                 let decoded_bytes = lazy
-                    .decoded_with(|bytes| vesuvius_c3d::with_decoder(|d| d.decode(bytes)).map_err(|e| e.to_string()))
-                    .map_err(|e| BackfillError::Permanent(format!("c3d decode at {:?}: {}", coord, e)))?;
+                    .decoded_with(|bytes| decoder.decode_sub_chunk(bytes))
+                    .map_err(|e| BackfillError::Permanent(format!("v3 sub-chunk decode at {:?}: {}", coord, e)))?;
                 decoded.insert(*coord, decoded_bytes);
             }
 

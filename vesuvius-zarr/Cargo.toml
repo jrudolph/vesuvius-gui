@@ -23,6 +23,7 @@ serde_json           = { workspace = true }
 serde_path_to_error  = { workspace = true }
 sha2            = { workspace = true }
 vesuvius-c3d    = { path = "../vesuvius-c3d" }
+vesuvius-delta3d = { path = "../vesuvius-delta3d" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memmap = { workspace = true }

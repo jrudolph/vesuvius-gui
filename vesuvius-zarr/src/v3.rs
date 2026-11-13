@@ -1,12 +1,14 @@
-//! Zarr v3 metadata parsing + sharded c3d access.
+//! Zarr v3 metadata parsing + sharded c3d / vc-delta3d access.
 //!
-//! Scope is deliberately narrow: only the codec chain that production c3d
-//! volumes use today, which is
-//!     `[ sharding_indexed { codecs: [c3d], index_codecs: [bytes], index_location: start } ]`.
-//! Anything else `panic!`s at array-open time rather than failing later in an
-//! opaque way. When the format broadens, extend this module.
+//! Scope is deliberately narrow: `uint8` arrays with exactly one top-level
+//! `sharding_indexed` codec whose inner chain is one of
+//!     `[c3d]`                                  (production c3d volumes, 256³ sub-chunks)
+//!     `[bytes { endian: little }, vc-delta3d]` (vc-delta3d, any sub-chunk shape)
+//! and whose index is `[bytes]` or `[bytes, crc32c]` at the `start` or `end`
+//! of the shard. Anything else `panic!`s at array-open time rather than
+//! failing later in an opaque way. When the format broadens, extend this module.
 
-use crate::sharding::{LocalShard, RemoteShard, ShardAccess, ShardIndex};
+use crate::sharding::{IndexLayout, IndexLocation, LocalShard, RemoteShard, ShardAccess, ShardIndex};
 use crate::{
     default_cache_dir_for_url, parse_json, ChunkContext, RawContext, ZarrArray, ZarrArrayDef, ZarrDataType,
     ZarrFileAccess, ZarrOrder, ZarrVersion,
@@ -37,6 +39,45 @@ pub trait V3RemoteShardedAccess: Send + Sync {
     /// previously persisted `_missing` marker on disk). Concurrent
     /// callers for the same shard coalesce to a single HTTP fetch.
     fn shard_index(&self, shard: [usize; 3]) -> Option<Arc<ShardIndex>>;
+    /// Decode one compressed sub-chunk (as addressed by the shard index) to
+    /// `sub_chunk_shape` u8 voxels in C order.
+    fn decode_sub_chunk(&self, compressed: &[u8]) -> Result<Vec<u8>, String>;
+}
+
+/// Codec applied to each sub-chunk inside a shard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubChunkCodec {
+    C3d,
+    Delta3d,
+}
+
+impl SubChunkCodec {
+    /// Decode one sub-chunk that must yield exactly `expected_bytes`.
+    pub fn decode(&self, compressed: &[u8], expected_bytes: usize) -> Result<Vec<u8>, String> {
+        let decoded = match self {
+            SubChunkCodec::C3d => vesuvius_c3d::with_decoder(|d| d.decode(compressed)).map_err(|e| e.to_string())?,
+            SubChunkCodec::Delta3d => {
+                vesuvius_delta3d::decode_expecting(compressed, expected_bytes).map_err(|e| e.to_string())?
+            }
+        };
+        if decoded.len() != expected_bytes {
+            return Err(format!(
+                "{:?} sub-chunk decoded to {} bytes, expected {}",
+                self,
+                decoded.len(),
+                expected_bytes
+            ));
+        }
+        Ok(decoded)
+    }
+
+    /// Extension of compressed sub-chunks in the remote byte cache.
+    fn compressed_ext(&self) -> &'static str {
+        match self {
+            SubChunkCodec::C3d => "c3dc",
+            SubChunkCodec::Delta3d => "vcd3",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +142,50 @@ pub struct Sharded {
     pub sub_chunks_per_shard: [usize; 3],
     pub n_sub_chunks_per_shard: usize,
     pub separator: String,
+    pub codec: SubChunkCodec,
+    pub index_layout: IndexLayout,
+}
+
+/// A `bytes` codec entry; only little-endian (or unspecified, fine for uint8) is accepted.
+fn assert_bytes_little(c: &V3CodecJson, what: &str) {
+    assert_eq!(c.name, "bytes", "v3.rs: {}: expected `bytes` codec, got `{}`", what, c.name);
+    let endian = c.configuration.get("endian").and_then(|e| e.as_str()).unwrap_or("little");
+    assert_eq!(endian, "little", "v3.rs: {}: only little-endian `bytes` supported", what);
+}
+
+fn parse_sub_chunk_codec(codecs: &[V3CodecJson]) -> SubChunkCodec {
+    let names: Vec<&str> = codecs.iter().map(|c| c.name.as_str()).collect();
+    match names.as_slice() {
+        ["c3d"] => SubChunkCodec::C3d,
+        ["bytes", "vc-delta3d"] => {
+            assert_bytes_little(&codecs[0], "sharding.codecs");
+            SubChunkCodec::Delta3d
+        }
+        _ => panic!(
+            "v3.rs: unsupported sub-chunk codec chain {:?} (supported: [c3d], [bytes, vc-delta3d])",
+            names
+        ),
+    }
+}
+
+fn parse_index_layout(sharding: &ShardingConfig) -> IndexLayout {
+    let names: Vec<&str> = sharding.index_codecs.iter().map(|c| c.name.as_str()).collect();
+    let crc32c = match names.as_slice() {
+        ["bytes"] => false,
+        ["bytes", "crc32c"] => true,
+        _ => panic!(
+            "v3.rs: unsupported index_codecs {:?} (supported: [bytes], [bytes, crc32c])",
+            names
+        ),
+    };
+    assert_bytes_little(&sharding.index_codecs[0], "sharding.index_codecs");
+    // The v3 spec default is `end`.
+    let location = match sharding.index_location.as_deref().unwrap_or("end") {
+        "start" => IndexLocation::Start,
+        "end" => IndexLocation::End,
+        other => panic!("v3.rs: unknown index_location `{}`", other),
+    };
+    IndexLayout { location, crc32c }
 }
 
 impl Sharded {
@@ -139,35 +224,8 @@ impl Sharded {
         let sharding: ShardingConfig =
             serde_json::from_value(outer.configuration.clone()).expect("v3.rs: invalid sharding_indexed configuration");
 
-        // Inner sub-chunk codec chain must be exactly [c3d].
-        assert_eq!(
-            sharding.codecs.len(),
-            1,
-            "v3.rs: sharding.codecs must be exactly [c3d], got {} entries",
-            sharding.codecs.len()
-        );
-        assert_eq!(
-            sharding.codecs[0].name, "c3d",
-            "v3.rs: unsupported sub-chunk codec `{}` (only c3d today)",
-            sharding.codecs[0].name
-        );
-
-        // Index codecs must be exactly [bytes].
-        assert_eq!(
-            sharding.index_codecs.len(),
-            1,
-            "v3.rs: only single-codec [bytes] index_codecs supported, got {} entries",
-            sharding.index_codecs.len()
-        );
-        assert_eq!(
-            sharding.index_codecs[0].name, "bytes",
-            "v3.rs: unsupported index codec `{}`",
-            sharding.index_codecs[0].name
-        );
-
-        // Index location: only "start" supported.
-        let loc = sharding.index_location.as_deref().unwrap_or("end");
-        assert_eq!(loc, "start", "v3.rs: only index_location=start supported, got {}", loc);
+        let codec = parse_sub_chunk_codec(&sharding.codecs);
+        let index_layout = parse_index_layout(&sharding);
 
         assert_eq!(j.shape.len(), 3, "v3.rs: only 3D arrays supported");
         assert_eq!(j.chunk_grid.configuration.chunk_shape.len(), 3);
@@ -193,17 +251,20 @@ impl Sharded {
         let n_sub_chunks_per_shard = sub_chunks_per_shard[0] * sub_chunks_per_shard[1] * sub_chunks_per_shard[2];
 
         // The c3d codec is fixed at 256³ sub-chunks. Loudly assert until we
-        // implement a more permissive integration.
-        assert_eq!(
+        // implement a more permissive integration. vc-delta3d frames carry
+        // their own shape, so any sub-chunk shape works there.
+        if codec == SubChunkCodec::C3d {
+            assert_eq!(
             sub_chunk_shape,
             [
                 vesuvius_c3d::C3D_CHUNK_SIDE,
                 vesuvius_c3d::C3D_CHUNK_SIDE,
                 vesuvius_c3d::C3D_CHUNK_SIDE
             ],
-            "v3.rs: c3d codec atom is fixed at 256^3, got sub_chunk_shape {:?}",
-            sub_chunk_shape
-        );
+                "v3.rs: c3d codec atom is fixed at 256^3, got sub_chunk_shape {:?}",
+                sub_chunk_shape
+            );
+        }
 
         Self {
             shard_chunk_shape,
@@ -211,7 +272,19 @@ impl Sharded {
             sub_chunks_per_shard,
             n_sub_chunks_per_shard,
             separator,
+            codec,
+            index_layout,
         }
+    }
+
+    pub fn sub_chunk_bytes(&self) -> usize {
+        self.sub_chunk_shape.iter().product()
+    }
+
+    fn decode_sub_chunk(&self, compressed: &[u8], shard: [usize; 3], flat: usize) -> Vec<u8> {
+        self.codec
+            .decode(compressed, self.sub_chunk_bytes())
+            .unwrap_or_else(|e| panic!("decode failed at shard {:?} sub-chunk {}: {}", shard, flat, e))
     }
 
     /// Build a v2-shaped `ZarrArrayDef` so the rest of the crate can use this
@@ -259,18 +332,19 @@ impl Sharded {
 // mmapped on read. The OS page cache then acts as the implicit RAM tier — we
 // don't track residency or evict anything ourselves. Files are written via
 // `*.raw.tmp.<n>` + `rename` so concurrent decodes of the same sub-chunk are
-// safe (c3d decode is deterministic, so last-rename-wins is fine).
+// safe (decoding is deterministic, so last-rename-wins is fine).
 
 const DECODED_SUFFIX: &str = "raw";
 
 #[derive(Debug)]
 struct DecodedCache {
     root: PathBuf,
+    sub_chunk_bytes: usize,
 }
 
 impl DecodedCache {
-    fn new(root: PathBuf) -> Self {
-        Self { root }
+    fn new(root: PathBuf, sub_chunk_bytes: usize) -> Self {
+        Self { root, sub_chunk_bytes }
     }
 
     fn path_for(&self, shard: [usize; 3], flat: usize) -> PathBuf {
@@ -286,7 +360,7 @@ impl DecodedCache {
     fn try_load(&self, shard: [usize; 3], flat: usize) -> Option<ChunkContext> {
         let path = self.path_for(shard, flat);
         let raw = RawContext::open(&path)?;
-        if raw.len() != vesuvius_c3d::C3D_CHUNK_BYTES {
+        if raw.len() != self.sub_chunk_bytes {
             return None;
         }
         Some(ChunkContext::Raw(raw))
@@ -382,10 +456,12 @@ impl LocalV3ShardedAccess {
             return Some(entry.clone());
         }
         let shard_handle = self.get_shard(shard)?;
-        let idx_bytes = shard_handle.read_index_bytes(self.sharded.n_sub_chunks_per_shard)?;
-        let parsed = Arc::new(ShardIndex::parse_bytes_codec(
+        let idx_bytes =
+            shard_handle.read_index_bytes(&self.sharded.index_layout, self.sharded.n_sub_chunks_per_shard)?;
+        let parsed = Arc::new(ShardIndex::parse(
             &idx_bytes,
             self.sharded.n_sub_chunks_per_shard,
+            &self.sharded.index_layout,
         ));
         self.index_cache.insert(shard, parsed.clone());
         Some(parsed)
@@ -412,8 +488,7 @@ impl ZarrFileAccess for LocalV3ShardedAccess {
         let compressed = shard_handle.read_range(off, len)?;
 
         // Decode and persist for next time.
-        let decoded = vesuvius_c3d::with_decoder(|d| d.decode(&compressed))
-            .unwrap_or_else(|e| panic!("c3d decode failed at shard {:?} sub-chunk {}: {}", shard, flat, e));
+        let decoded = self.sharded.decode_sub_chunk(&compressed, shard, flat);
         self.decoded_cache.write_atomic(shard, flat, &decoded);
 
         // Prefer to return the mmap'd view (so subsequent in-process accesses
@@ -478,7 +553,8 @@ impl RemoteV3ShardedAccess {
     }
 
     fn subchunk_disk_path(&self, shard: [usize; 3], flat: usize) -> PathBuf {
-        self.shard_cache_dir(shard).join(format!("sub_{:05}.c3dc", flat))
+        self.shard_cache_dir(shard)
+            .join(format!("sub_{:05}.{}", flat, self.sharded.codec.compressed_ext()))
     }
 
     fn missing_marker_path(&self, shard: [usize; 3]) -> PathBuf {
@@ -508,9 +584,10 @@ impl RemoteV3ShardedAccess {
             return None;
         }
         if let Ok(bytes) = std::fs::read(&disk_idx) {
-            return Some(Arc::new(ShardIndex::parse_bytes_codec(
+            return Some(Arc::new(ShardIndex::parse(
                 &bytes,
                 self.sharded.n_sub_chunks_per_shard,
+                &self.sharded.index_layout,
             )));
         }
 
@@ -519,7 +596,7 @@ impl RemoteV3ShardedAccess {
             url,
             client: self.client.clone(),
         };
-        let bytes = match remote.read_index_bytes(self.sharded.n_sub_chunks_per_shard) {
+        let bytes = match remote.read_index_bytes(&self.sharded.index_layout, self.sharded.n_sub_chunks_per_shard) {
             Some(b) => b,
             None => {
                 // Persist a "missing" marker so the next process doesn't retry.
@@ -528,9 +605,10 @@ impl RemoteV3ShardedAccess {
                 return None;
             }
         };
-        let parsed = Arc::new(ShardIndex::parse_bytes_codec(
+        let parsed = Arc::new(ShardIndex::parse(
             &bytes,
             self.sharded.n_sub_chunks_per_shard,
+            &self.sharded.index_layout,
         ));
 
         let _ = std::fs::create_dir_all(self.shard_cache_dir(shard));
@@ -555,7 +633,7 @@ impl RemoteV3ShardedAccess {
         let bytes = remote.read_range(off, len)?;
 
         let _ = std::fs::create_dir_all(self.shard_cache_dir(shard));
-        let tmp = disk_path.with_extension("c3dc.tmp");
+        let tmp = disk_path.with_extension(format!("{}.tmp", self.sharded.codec.compressed_ext()));
         if std::fs::write(&tmp, &bytes).is_ok() {
             let _ = std::fs::rename(&tmp, &disk_path);
         }
@@ -579,6 +657,9 @@ impl V3RemoteShardedAccess for RemoteV3ShardedAccess {
     fn shard_index(&self, shard: [usize; 3]) -> Option<Arc<ShardIndex>> {
         self.get_index(shard)
     }
+    fn decode_sub_chunk(&self, compressed: &[u8]) -> Result<Vec<u8>, String> {
+        self.sharded.codec.decode(compressed, self.sharded.sub_chunk_bytes())
+    }
 }
 
 impl ZarrFileAccess for RemoteV3ShardedAccess {
@@ -600,8 +681,7 @@ impl ZarrFileAccess for RemoteV3ShardedAccess {
         let compressed = self.fetch_subchunk(shard, flat, off, len)?;
 
         // Decode and persist for next time.
-        let decoded = vesuvius_c3d::with_decoder(|d| d.decode(&compressed))
-            .unwrap_or_else(|e| panic!("c3d decode failed at shard {:?} sub-chunk {}: {}", shard, flat, e));
+        let decoded = self.sharded.decode_sub_chunk(&compressed, shard, flat);
         self.decoded_cache.write_atomic(shard, flat, &decoded);
 
         if let Some(ctx) = self.decoded_cache.try_load(shard, flat) {
@@ -616,7 +696,7 @@ impl ZarrFileAccess for RemoteV3ShardedAccess {
     }
 }
 
-/// Open a v3 sharded c3d array hosted at a remote URL. Caches the array
+/// Open a v3 sharded (c3d or vc-delta3d) array hosted at a remote URL. Caches the array
 /// `zarr.json`, the per-shard index, and the per-sub-chunk compressed bytes
 /// under `cache_dir` so warm reads don't go to the network.
 pub fn open_v3_array_remote(url: &str, cache_dir: &str, client: Client) -> ZarrArray<3, u8> {
@@ -646,6 +726,7 @@ pub fn open_v3_array_remote(url: &str, cache_dir: &str, client: Client) -> ZarrA
     let sharded = Sharded::from_array_json(&json);
     let shape = json.shape.clone();
     let def = sharded.synthesize_def(&shape);
+    let decoded_cache = DecodedCache::new(decoded_dir, sharded.sub_chunk_bytes());
 
     let access = Arc::new(RemoteV3ShardedAccess {
         array_url: url.to_string(),
@@ -654,7 +735,7 @@ pub fn open_v3_array_remote(url: &str, cache_dir: &str, client: Client) -> ZarrA
         sharded,
         shape,
         index_cells: DashMap::with_hasher(FxBuildHasher::default()),
-        decoded_cache: DecodedCache::new(decoded_dir),
+        decoded_cache,
     });
     let v3_handle: Arc<dyn V3RemoteShardedAccess> = access.clone();
     let access_dyn: Arc<dyn ZarrFileAccess> = access;
@@ -670,7 +751,7 @@ pub fn open_v3_array_local(path: &str) -> ZarrArray<3, u8> {
     let def = sharded.synthesize_def(&shape);
 
     let cache_root = local_cache_root(path);
-    let decoded_cache = DecodedCache::new(cache_root.join("decoded"));
+    let decoded_cache = DecodedCache::new(cache_root.join("decoded"), sharded.sub_chunk_bytes());
 
     let access = Arc::new(LocalV3ShardedAccess {
         array_root: path.trim_end_matches('/').to_string(),
@@ -683,9 +764,10 @@ pub fn open_v3_array_local(path: &str) -> ZarrArray<3, u8> {
     ZarrArray::from_def_and_access(def, access)
 }
 
-/// Read a v3 group's `zarr.json` and return its `attributes` blob. The OME
-/// multiscales live at `attributes.multiscales` and have the same shape as v2
-/// `.zattrs`, so the existing OmeZarrAttrs deserializer takes it directly.
+/// Read a v3 group's `zarr.json` and return its OME attributes blob: the
+/// object holding `multiscales`, which has the same shape as v2 `.zattrs`, so
+/// the existing OmeZarrAttrs deserializer takes it directly. That object is
+/// `attributes` itself (NGFF 0.4 style) or `attributes.ome` (NGFF 0.5).
 pub fn read_v3_group_attributes(path: &str) -> Option<serde_json::Value> {
     let json_path = format!("{}/zarr.json", path);
     let raw = std::fs::read_to_string(&json_path).ok()?;
@@ -716,5 +798,25 @@ fn parse_v3_group_attrs(raw: &str) -> Option<serde_json::Value> {
     if node_type != "group" {
         return None;
     }
-    parsed.get("attributes").cloned()
+    let attributes = parsed.get("attributes")?;
+    // NGFF 0.5 nests everything under `ome`; 0.4-style v3 groups put `multiscales` at the top.
+    Some(attributes.get("ome").unwrap_or(attributes).clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_v3_group_attrs;
+
+    #[test]
+    fn group_attrs_ngff_04_and_05() {
+        let v04 = r#"{"zarr_format":3,"node_type":"group","attributes":{"multiscales":[{"version":"0.4"}]}}"#;
+        let v05 = r#"{"zarr_format":3,"node_type":"group",
+            "attributes":{"ome":{"version":"0.5","multiscales":[{"name":"/"}]},"zarr_transform":{}}}"#;
+        assert!(parse_v3_group_attrs(v04).unwrap().get("multiscales").is_some());
+        let a = parse_v3_group_attrs(v05).unwrap();
+        assert!(a.get("multiscales").is_some());
+        assert_eq!(a["version"], "0.5");
+        let array = r#"{"zarr_format":3,"node_type":"array","attributes":{}}"#;
+        assert!(parse_v3_group_attrs(array).is_none());
+    }
 }

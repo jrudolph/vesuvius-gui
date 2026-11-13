@@ -1,0 +1,11 @@
+[package]
+name = "vesuvius-delta3d"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "FFI bindings to vc-delta3d (3D volumetric codec) for vesuvius-gui, decode only."
+
+[dependencies]
+
+[build-dependencies]
+cc = { workspace = true }

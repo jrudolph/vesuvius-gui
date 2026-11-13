@@ -1,0 +1,22 @@
+/* AVX2 recurrence operations: 16 rows per vector, two halves per wave. */
+#define NG_RATTR __attribute__((target("avx2"),always_inline))
+#define NG_RV __m256i
+#define NG_RHALVES 2
+#define NG_RSTEP 16
+#define NG_RSET _mm256_set1_epi16
+#define NG_RLOAD _mm256_loadu_si256
+#define NG_RSTORE _mm256_storeu_si256
+#define NG_RAND _mm256_and_si256
+#define NG_REQ _mm256_cmpeq_epi16
+#define NG_RBLEND _mm256_blendv_epi8
+#define NG_RMASK _mm256_movemask_epi8
+#define NG_RADD _mm256_add_epi16
+#define NG_RMUL _mm256_mullo_epi16
+#define NG_RMIN _mm256_min_epi16
+#define NG_RMAX _mm256_max_epi16
+#define NG_RSRL _mm256_srli_epi16
+#define NG_RSRA _mm256_srai_epi16
+#define NG_RSLL _mm256_slli_epi16
+#define NG_RSUB _mm256_sub_epi16
+#define NG_RXOR _mm256_xor_si256
+#define NG_ROUT(P,V) _mm_storeu_si128((__m128i*)(P),_mm_packus_epi16(_mm256_castsi256_si128(V),_mm256_extracti128_si256(V,1)))
