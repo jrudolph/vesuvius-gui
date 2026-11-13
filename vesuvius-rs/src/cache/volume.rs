@@ -1184,16 +1184,32 @@ impl UnifiedVolume {
                     // outlives the fetch to mark the slot's preview as done.
                     let dispatched = self.with_shard_slot(lod_try, shard, |slot| slot.dispatched.get(in_shard_idx));
                     let key = ChunkKey::new(lod_try, cx_try, cy_try, cz_try);
-                    match dispatched {
-                        Some(false) => {
-                            let _ = self.cache.state_or_fetch(key);
+                    let fetched = match dispatched {
+                        Some(false) => Some(self.cache.state_or_fetch(key)),
+                        Some(true) if self.local.borrow_mut().revisited.insert(key) => {
+                            Some(self.cache.state_or_fetch(key))
                         }
-                        Some(true) => {
-                            if self.local.borrow_mut().revisited.insert(key) {
-                                let _ = self.cache.state_or_fetch(key);
+                        _ => None,
+                    };
+                    // The request may have resolved it on the spot (decoded
+                    // from the segment log on this painting thread): use it
+                    // now rather than painting coarser data and waiting for a
+                    // repaint, by which time it may be evicted again.
+                    match fetched.as_deref() {
+                        Some(ChunkState::Resident { .. }) => {
+                            let chunk_ptr = self.with_shard_slot(lod_try, shard, |slot| {
+                                // SAFETY: as in the RESIDENT arm above.
+                                unsafe { slot.base.add((in_shard_idx as usize) * CHUNK_VOXELS) }
+                            });
+                            if let Some(p) = chunk_ptr {
+                                if shift > 0 {
+                                    self.note_missing(ChunkKey::new(target_lod, cx, cy, cz), Some(lod_try));
+                                }
+                                return Some(BoundChunk { shift, chunk_ptr: p });
                             }
                         }
-                        None => {}
+                        Some(ChunkState::Empty) => return None,
+                        _ => {}
                     }
                     continue;
                 }
