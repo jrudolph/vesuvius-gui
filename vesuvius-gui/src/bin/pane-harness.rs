@@ -23,6 +23,19 @@ struct Args {
     #[clap(long)]
     tifxyz: Option<String>,
 
+    /// Transform for the tifxyz segment (as the GUI's --transform): a transform json file or a
+    /// 4x3 affine matrix as a json array string
+    #[clap(long, requires = "tifxyz")]
+    transform: Option<String>,
+
+    /// Invert --transform before applying it
+    #[clap(long, requires = "transform")]
+    invert_transform: bool,
+
+    /// Compositing mode (the GUI's compositing dropdown), with its default layer counts
+    #[clap(long, default_value = "none", value_parser = ["none", "max", "alpha"])]
+    composite: String,
+
     /// Pane to render: uv (default with --tifxyz), uw, vw, xy (default otherwise), xz, yz
     #[clap(long)]
     pane: Option<String>,
@@ -107,7 +120,14 @@ fn run(args: Args) -> Result<(), String> {
 
     let mut world = HarnessWorld::open_volume(&args.volume, cache_dir.as_deref())?;
     if let Some(dir) = &args.tifxyz {
-        world = world.with_tifxyz(dir)?;
+        let transform = match &args.transform {
+            Some(t) => {
+                let t = vesuvius_rs::volume::AffineTransform::from_json_array_or_path(t).map_err(|e| e.to_string())?;
+                Some(if args.invert_transform { t.invert().map_err(|e| e.to_string())? } else { t })
+            }
+            None => None,
+        };
+        world = world.with_tifxyz(dir, &transform)?;
     }
     let pane = match &args.pane {
         Some(p) => parse_pane(p)?,
@@ -127,10 +147,18 @@ fn run(args: Args) -> Result<(), String> {
         zoom: args.zoom,
         coord,
         honor_repaint: args.honor_repaint,
-        drawing_config: vesuvius_rs::volume::DrawingConfig {
-            trilinear_interpolation: args.trilinear == "on",
-            lod_bias: args.lod_bias,
-            ..Default::default()
+        drawing_config: {
+            let mut c = vesuvius_rs::volume::DrawingConfig {
+                trilinear_interpolation: args.trilinear == "on",
+                lod_bias: args.lod_bias,
+                ..Default::default()
+            };
+            c.compositing.mode = match args.composite.as_str() {
+                "max" => vesuvius_rs::volume::CompositingMode::Max,
+                "alpha" => vesuvius_rs::volume::CompositingMode::Alpha,
+                _ => vesuvius_rs::volume::CompositingMode::None,
+            };
+            c
         },
         ..Default::default()
     };

@@ -94,11 +94,15 @@ impl HarnessWorld {
         }
     }
 
-    /// Wrap the volume in a tifxyz segment, as the GUI's `--tifxyz` does
-    /// (no transform, no overlay).
-    pub fn with_tifxyz(self, dir: impl AsRef<Path>) -> Result<Self, String> {
+    /// Wrap the volume in a tifxyz segment, as the GUI's `--tifxyz` (with an
+    /// optional `--transform`) does (no overlay).
+    pub fn with_tifxyz(
+        self,
+        dir: impl AsRef<Path>,
+        transform: &Option<vesuvius_rs::volume::AffineTransform>,
+    ) -> Result<Self, String> {
         let dir = dir.as_ref();
-        let seg = TifXyzVolume::load_from_directory(dir, self.world.clone(), &None)
+        let seg = TifXyzVolume::load_from_directory(dir, self.world.clone(), transform)
             .map_err(|e| format!("cannot load tifxyz {}: {:#}", dir.display(), e))?;
         let (w, h) = (seg.width() as i32, seg.height() as i32);
         Ok(Self {
