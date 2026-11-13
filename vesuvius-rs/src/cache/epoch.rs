@@ -19,7 +19,8 @@
 //! The budget is a plain number (`VESUVIUS_MEMORY_CACHE_GB`, default 2 GiB of
 //! decoded chunks). A fill that pushes the resident set over the high-water
 //! mark wakes the purge thread, which evicts the oldest chunks down to the
-//! low-water mark. There is no reaction to system memory pressure; swap is the
+//! low-water mark. A fill that finds the budget itself exceeded (fills
+//! outpacing the purge thread) runs the purge itself, so the budget holds. There is no reaction to system memory pressure; swap is the
 //! backstop.
 
 use super::purge::{PurgePlan, PurgeTarget, VolumeBreakdown};
@@ -87,6 +88,8 @@ pub struct EpochState {
     targets: Mutex<Vec<Weak<dyn PurgeTarget>>>,
     /// Wakes the purge thread: set when a fill crosses the high-water mark.
     purge_signal: Arc<(Mutex<bool>, Condvar)>,
+    /// One purge at a time; fillers over budget queue up behind it.
+    purge_lock: Mutex<()>,
 }
 
 struct Inner {
@@ -113,6 +116,7 @@ impl EpochState {
             }),
             targets: Mutex::new(Vec::new()),
             purge_signal: Arc::new((Mutex::new(false), Condvar::new())),
+            purge_lock: Mutex::new(()),
         }
     }
 
@@ -128,6 +132,7 @@ impl EpochState {
     /// Evict down to the low-water mark if over the high-water mark. Returns
     /// the number of chunks evicted.
     pub fn run_purge_pass(&self, source: &str) -> u64 {
+        let _serial = self.purge_lock.lock().unwrap();
         let chunks_capacity = self.cap_bytes() / CHUNK_VOXELS as u64;
         let high_water = self.high_water_chunks();
         let low_water = chunks_capacity.saturating_mul(LOW_WATER_PCT) / 100;
@@ -219,7 +224,10 @@ impl EpochState {
             s.epoch_chunks[cur as usize] = s.epoch_chunks[cur as usize].saturating_add(1);
             (cur, s.total_chunks)
         };
-        if total > self.high_water_chunks() {
+        if total > self.cap_bytes() / CHUNK_VOXELS as u64 {
+            // Fills outpace the purge thread: make room before filling more.
+            self.run_purge_pass("backpressure");
+        } else if total > self.high_water_chunks() {
             let (m, cv) = &*self.purge_signal;
             *m.lock().unwrap() = true;
             cv.notify_one();
