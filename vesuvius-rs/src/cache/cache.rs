@@ -1058,8 +1058,21 @@ impl Inner {
         }
 
         let _guard = DispatchGuard { inner: self.clone(), key };
+        // Publish Pending *before* dispatching: `dispatch_chunk` may queue
+        // this chunk's extract (log hit, 0-source plan, sources already
+        // done), and a worker can finish it — publishing Resident, a
+        // cooldown, or removing the entry on cancel — before
+        // `dispatch_chunk` returns. A Pending written after that would
+        // strand the chunk with nothing left to resolve it.
+        self.map.insert(key, pending_state());
         let state = self.dispatch_chunk(key);
-        self.map.insert(key, state.clone());
+        let state = if matches!(state.as_ref(), ChunkState::Pending { .. }) {
+            // Whatever the workers made of it by now.
+            self.map.get(&key).map(|e| e.clone()).unwrap_or(state)
+        } else {
+            self.map.insert(key, state.clone());
+            state
+        };
         if !matches!(state.as_ref(), ChunkState::Pending { .. }) {
             self.interest.remove(&key);
         }
