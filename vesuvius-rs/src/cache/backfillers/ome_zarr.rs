@@ -85,7 +85,7 @@ impl ChunkBackfiller for OmeZarrBackfiller {
         let lod = key.lod as usize;
         let array = self.arrays.get(lod).ok_or(BackfillError::OutOfBounds)?;
 
-        // V3 sharded c3d remote arrays take a specialized planning path
+        // V3 sharded remote arrays take a specialized planning path
         // that issues HTTP Range requests for individual sub-chunks
         // through the central downloader pool. Everything else (v2, local
         // v3, anything that doesn't expose a v3 remote handle) keeps the
@@ -287,7 +287,7 @@ impl ChunkBackfiller for OmeZarrBackfiller {
 ///
 /// Shared between the v2 OME-Zarr planner and the v3 sub-chunk planner;
 /// the math is identical once the native-chunk shape is plugged in
-/// (`nchunk` for v2 = native chunk shape, for v3 = c3d sub-chunk shape).
+/// (`nchunk` for v2 = native chunk shape, for v3 = sub-chunk shape).
 /// Both planners enumerate full axis-aligned ranges, so the box form
 /// replaces the old `HashSet` membership walk with six comparisons per
 /// cache chunk.
@@ -341,7 +341,7 @@ pub(super) fn covered_cache_chunks(
 }
 
 /// Sampling interface over one decoded native chunk, shared by the v2
-/// (`ChunkContext`) and v3 (raw c3d buffer) extract paths so they can
+/// (`ChunkContext`) and v3 (decoded sub-chunk buffer) extract paths so they can
 /// drive the same slicing loop.
 pub(super) trait NativeSample {
     fn at(&self, idx: usize) -> u8;

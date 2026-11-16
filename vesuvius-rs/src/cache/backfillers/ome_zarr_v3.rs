@@ -1,7 +1,7 @@
-//! V3-sharded specialization for `OmeZarrBackfiller` (c3d or vc-delta3d sub-chunks).
+//! V3-sharded specialization for `OmeZarrBackfiller` (vc-delta3d sub-chunks).
 //!
 //! V3 sharded arrays publish a single shard file per group of sub-chunks
-//! (e.g. 2×2×2 = 8 256³ c3d sub-chunks). Each shard carries a small
+//! (e.g. 2×2×2 = 8 256³ sub-chunks). Each shard carries a small
 //! index of `(offset, len)` pairs (at its head or tail) telling you where
 //! each sub-chunk lives inside the shard. The default OME-Zarr path doesn't model this — it
 //! falls through to `array.load_chunk(coord)` (a `Compute` source) which
@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use vesuvius_zarr::v3::V3RemoteShardedAccess;
 
-/// Plan one 64³ cache chunk against a remote v3 sharded c3d array.
+/// Plan one 64³ cache chunk against a remote v3 sharded array.
 ///
 /// `volume_id` and `lod` only flow through into source keys so two cache
 /// chunks needing the same sub-chunk dedup at the cache's source map.

@@ -1,9 +1,8 @@
-//! Zarr v3 metadata parsing + sharded c3d / vc-delta3d access.
+//! Zarr v3 metadata parsing + sharded vc-delta3d access.
 //!
 //! Scope is deliberately narrow: `uint8` arrays with exactly one top-level
-//! `sharding_indexed` codec whose inner chain is one of
-//!     `[c3d]`                                  (production c3d volumes, 256³ sub-chunks)
-//!     `[bytes { endian: little }, vc-delta3d]` (vc-delta3d, any sub-chunk shape)
+//! `sharding_indexed` codec whose inner chain is
+//!     `[bytes { endian: little }, vc-delta3d]` (any sub-chunk shape)
 //! and whose index is `[bytes]` or `[bytes, crc32c]` at the `start` or `end`
 //! of the shard. Anything else `panic!`s at array-open time rather than
 //! failing later in an opaque way. When the format broadens, extend this module.
@@ -21,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-/// Public handle into a remote v3 sharded c3d array. Exposes the shard
+/// Public handle into a remote v3 sharded array. Exposes the shard
 /// grid metadata, shard URL builder, and a single-flight, blocking
 /// shard-index fetcher — i.e. everything a planner needs to issue HTTP
 /// Range requests against sub-chunks without going through `load_chunk`.
@@ -47,7 +46,6 @@ pub trait V3RemoteShardedAccess: Send + Sync {
 /// Codec applied to each sub-chunk inside a shard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubChunkCodec {
-    C3d,
     Delta3d,
 }
 
@@ -55,7 +53,6 @@ impl SubChunkCodec {
     /// Decode one sub-chunk that must yield exactly `expected_bytes`.
     pub fn decode(&self, compressed: &[u8], expected_bytes: usize) -> Result<Vec<u8>, String> {
         let decoded = match self {
-            SubChunkCodec::C3d => vesuvius_c3d::with_decoder(|d| d.decode(compressed)).map_err(|e| e.to_string())?,
             SubChunkCodec::Delta3d => {
                 vesuvius_delta3d::decode_expecting(compressed, expected_bytes).map_err(|e| e.to_string())?
             }
@@ -74,7 +71,6 @@ impl SubChunkCodec {
     /// Extension of compressed sub-chunks in the remote byte cache.
     fn compressed_ext(&self) -> &'static str {
         match self {
-            SubChunkCodec::C3d => "c3dc",
             SubChunkCodec::Delta3d => "vcd3",
         }
     }
@@ -156,13 +152,12 @@ fn assert_bytes_little(c: &V3CodecJson, what: &str) {
 fn parse_sub_chunk_codec(codecs: &[V3CodecJson]) -> SubChunkCodec {
     let names: Vec<&str> = codecs.iter().map(|c| c.name.as_str()).collect();
     match names.as_slice() {
-        ["c3d"] => SubChunkCodec::C3d,
         ["bytes", "vc-delta3d"] => {
             assert_bytes_little(&codecs[0], "sharding.codecs");
             SubChunkCodec::Delta3d
         }
         _ => panic!(
-            "v3.rs: unsupported sub-chunk codec chain {:?} (supported: [c3d], [bytes, vc-delta3d])",
+            "v3.rs: unsupported sub-chunk codec chain {:?} (supported: [bytes, vc-delta3d])",
             names
         ),
     }
@@ -249,22 +244,6 @@ impl Sharded {
             );
         }
         let n_sub_chunks_per_shard = sub_chunks_per_shard[0] * sub_chunks_per_shard[1] * sub_chunks_per_shard[2];
-
-        // The c3d codec is fixed at 256³ sub-chunks. Loudly assert until we
-        // implement a more permissive integration. vc-delta3d frames carry
-        // their own shape, so any sub-chunk shape works there.
-        if codec == SubChunkCodec::C3d {
-            assert_eq!(
-            sub_chunk_shape,
-            [
-                vesuvius_c3d::C3D_CHUNK_SIDE,
-                vesuvius_c3d::C3D_CHUNK_SIDE,
-                vesuvius_c3d::C3D_CHUNK_SIDE
-            ],
-                "v3.rs: c3d codec atom is fixed at 256^3, got sub_chunk_shape {:?}",
-                sub_chunk_shape
-            );
-        }
 
         Self {
             shard_chunk_shape,
@@ -696,7 +675,7 @@ impl ZarrFileAccess for RemoteV3ShardedAccess {
     }
 }
 
-/// Open a v3 sharded (c3d or vc-delta3d) array hosted at a remote URL. Caches the array
+/// Open a v3 sharded (vc-delta3d) array hosted at a remote URL. Caches the array
 /// `zarr.json`, the per-shard index, and the per-sub-chunk compressed bytes
 /// under `cache_dir` so warm reads don't go to the network.
 pub fn open_v3_array_remote(url: &str, cache_dir: &str, client: Client) -> ZarrArray<3, u8> {

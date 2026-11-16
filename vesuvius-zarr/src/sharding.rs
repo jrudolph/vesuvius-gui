@@ -1,7 +1,7 @@
 //! Zarr v3 `sharding_indexed` codec — minimal partial-read implementation.
 //!
 //! Supported index layouts:
-//!   * `index_location`: `start` (production c3d volumes) or `end` (zarr-python's default).
+//!   * `index_location`: `start` or `end` (zarr-python's default).
 //!   * `index_codecs`: `[bytes { endian: little }]` or `[bytes { endian: little }, crc32c]`
 //!     (zarr-python's default). The checksum is verified on parse.
 //!

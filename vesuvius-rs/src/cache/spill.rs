@@ -90,7 +90,7 @@ const RAW_EVICT_TO_PCT: u64 = 90;
 /// unified purger's floor.
 const RAW_MIN_FREE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
-/// Keyed retention store for downloaded source bytes (compressed c3d
+/// Keyed retention store for downloaded source bytes (compressed v3
 /// sub-chunks, zarr chunks, …), keyed by `(url, byte range)`.
 ///
 /// Rationale: decoded chunks amplify ~25x over the wire bytes, so the

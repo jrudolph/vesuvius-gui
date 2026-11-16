@@ -117,7 +117,7 @@ pub struct ZarrArrayDef {
 #[derive(Clone)]
 pub struct ZarrArray<const N: usize, T> {
     access: Arc<dyn ZarrFileAccess>,
-    /// Backend-specific handle for v3 sharded c3d arrays hosted remotely.
+    /// Backend-specific handle for v3 sharded arrays hosted remotely.
     /// Populated by `v3::open_v3_array_remote`; all other constructors
     /// leave it `None`. The unified-cache backfiller uses this to bypass
     /// `load_chunk` and issue HTTP Range requests against shard files
@@ -637,7 +637,7 @@ impl<const N: usize> ZarrArray<N, u8> {
             phantom_t: std::marker::PhantomData,
         }
     }
-    /// Construct a ZarrArray backed by a v3-sharded-c3d remote access. The
+    /// Construct a ZarrArray backed by a v3-sharded remote access. The
     /// caller supplies both the type-erased `ZarrFileAccess` for the
     /// shared `load_chunk` pipeline and the same impl exposed as a
     /// `V3RemoteShardedAccess` so the unified cache can plan HTTP Range
@@ -656,7 +656,7 @@ impl<const N: usize> ZarrArray<N, u8> {
     }
 
     /// Returns the remote v3 sharded handle when this array is backed by
-    /// a remote v3 c3d-sharded zarr. Returns `None` for v2 arrays, local
+    /// a remote v3 sharded zarr. Returns `None` for v2 arrays, local
     /// v3 arrays, and any other backend. The cache backfiller uses this
     /// to switch between the existing `decode_chunk_bytes` path and the
     /// Range-request planner.
@@ -678,8 +678,7 @@ impl<const N: usize> ZarrArray<N, u8> {
 impl ZarrArray<3, u8> {
     /// Open a 3D zarr at `path`. Tries zarr v3 (`zarr.json`) first and falls
     /// back to v2 (`.zarray`). Specialised to 3D because the only v3 codec
-    /// chain we currently support (`sharding_indexed { c3d }`) is fixed at
-    /// 3D 256³ sub-chunks.
+    /// chain we currently support (`sharding_indexed { vc-delta3d }`) is 3D.
     pub fn from_path_auto(path: &str) -> Self {
         if std::path::Path::new(&format!("{}/zarr.json", path)).exists() {
             v3::open_v3_array_local(path)

@@ -120,7 +120,7 @@ pub struct OmeZarrContext {
 impl OmeZarrContext {
     pub fn from_url(url: &str, local_cache_dir: &str) -> Self {
         // v3 first: if the group exposes a v3 `zarr.json` (with multiscales)
-        // we route the per-dataset opens through the v3 sharded c3d path.
+        // we route the per-dataset opens through the v3 sharded path.
         // Use a blocking client so range requests work; the v2 async-download
         // pipeline does not support HTTP Range.
         let client = build_blocking_client();
@@ -237,7 +237,7 @@ impl OmeZarrContext {
         Self::from_url_blocking(url, &default_cache_dir_for_url(url))
     }
     pub fn from_path(path: &str) -> Self {
-        // Prefer v3 group `zarr.json` (the c3d-compressed volumes) over the
+        // Prefer v3 group `zarr.json` (sharded vc-delta3d volumes) over the
         // legacy v2 `.zattrs`. Both have the same `multiscales` shape inside.
         let attrs = if let Some(attrs_value) = v3::read_v3_group_attributes(path) {
             serde_json::from_value::<OmeZarrAttrs>(attrs_value)

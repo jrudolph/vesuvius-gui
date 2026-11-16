@@ -56,7 +56,7 @@ pub type SourceOutcome = Result<Option<SourcePayload>, BackfillError>;
 ///
 /// Every chunk registered on a source shares the same `Arc<LazySource>`
 /// (the cache's source map hands the identical payload to each consumer),
-/// so when 16 slab chunks extract from one 256³ c3d sub-chunk, the first
+/// so when 16 slab chunks extract from one 256³ sub-chunk, the first
 /// extract pays the decode and the other 15 reuse the buffer. The memo's
 /// lifetime is the source entry's consumer window: when the last
 /// registered chunk releases the source, the decoded buffer drops with
@@ -170,7 +170,7 @@ impl LazySource {
 /// `Download` is the async path: the cache hands the URL to its central
 /// downloader, gets bytes back without ever blocking a cache worker, and
 /// surfaces the raw bytes as the source payload. The expensive decode
-/// (blosc/zstd/c3d) belongs to the backfiller's `extract` closure, which
+/// (blosc/zstd/vc-delta3d) belongs to the backfiller's `extract` closure, which
 /// runs on the cache worker pool — i.e. on CPU-sized concurrency, not
 /// I/O-sized.
 pub enum SourceSpec {
@@ -192,7 +192,7 @@ pub enum SourceSpec {
         /// Optional byte range `(offset, len)` to request. When `Some`, the
         /// downloader issues a `Range: bytes=offset-(offset+len-1)` request
         /// and treats `206 Partial Content` as success. Used by sharded
-        /// formats (e.g. zarr v3 c3d) where one URL backs many sub-chunks
+        /// formats (e.g. zarr v3 sharded) where one URL backs many sub-chunks
         /// addressed by offset+length pairs derived from a shard index.
         range: Option<(u64, u64)>,
     },

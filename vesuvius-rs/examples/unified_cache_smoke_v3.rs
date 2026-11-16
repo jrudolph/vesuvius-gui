@@ -1,13 +1,11 @@
 //! Convergence smoke test for the unified cache against a remote v3
-//! sharded-c3d volume. Spins up a tiny Range-aware HTTP server pointing
+//! sharded volume. Spins up a tiny Range-aware HTTP server pointing
 //! at a local OME-Zarr v3 directory, then opens it through the cache and
 //! requests a small grid of chunks at LOD 2.
 //!
 //! Usage:
-//!   RUST_LOG=info cargo run -p vesuvius-rs --example unified_cache_smoke_v3 --release
-//!
-//! Override the source directory with:
-//!   VESUVIUS_V3_ROOT=/path/to/some.zarr cargo run ...
+//!   VESUVIUS_V3_ROOT=/path/to/some.zarr RUST_LOG=info \
+//!     cargo run -p vesuvius-rs --example unified_cache_smoke_v3 --release
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -20,13 +18,10 @@ use vesuvius_rs::cache::backfillers::ome_zarr::OmeZarrBackfiller;
 use vesuvius_rs::cache::{ChunkBackfiller, ChunkKey, ChunkState, UnifiedCache};
 use vesuvius_zarr::OmeZarrContext;
 
-const DEFAULT_ROOT: &str =
-    "/home/johannes/tmp/pap/PHercParis4/c3d-volume/20260411134726-2.400um-0.2m-78keV-masked.zarr";
-
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let root_str = std::env::var("VESUVIUS_V3_ROOT").unwrap_or_else(|_| DEFAULT_ROOT.to_string());
+    let root_str = std::env::var("VESUVIUS_V3_ROOT").expect("set VESUVIUS_V3_ROOT to a local zarr v3 root");
     let root = PathBuf::from(&root_str);
     if !root.join("zarr.json").exists() {
         eprintln!("error: {} does not look like a zarr v3 root (no zarr.json)", root.display());
@@ -78,8 +73,8 @@ fn main() {
 
     let cache = UnifiedCache::for_cache_dir(cache_dir.clone()).open_volume(backfiller);
 
-    // 4×4×4 cache chunks at LOD 0 around a known-good voxel in the
-    // companion `read_c3d_remote.rs` example: (z=20500, y=12320, x=12330).
+    // 4×4×4 cache chunks at LOD 0 around a known-good voxel on
+    // PHerc Paris 4: (z=20500, y=12320, x=12330).
     // 64-voxel cache chunks → divide by 64 and subtract 2 to centre 4×4×4.
     let lod = 0u8.min(max_lod);
     let cx0 = (12330u32 / 64).saturating_sub(2);
