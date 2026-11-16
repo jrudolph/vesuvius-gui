@@ -255,30 +255,55 @@ pub struct AtlasMetadata {
     pub models: HashMap<String, Model>,
 }
 
-fn get_standard_url(data: &[DataEntry], data_type: &str) -> Option<String> {
-    for data_entry in data {
-        if data_entry.data_type == data_type {
-            for origin in &data_entry.origins {
-                for access_root in &origin.access_roots {
-                    let full_url = format!(
-                        "{}/{}",
-                        access_root.url.trim_end_matches('/'),
-                        origin.path.trim_start_matches('/')
-                    );
-                    if let Some(rewritten) = RemapConfig::get().rewrite_atlas_url(&access_root.usage, &full_url) {
-                        return Some(rewritten);
-                    }
-                    if access_root.usage == "standard" {
-                        return Some(format!(
-                            "https://data.aws.ash2txt.org/samples/{}",
-                            origin.path.trim_start_matches('/')
-                        ));
-                    }
-                }
+const OPEN_DATA_BUCKET: &str = "s3://vesuvius-challenge-open-data";
+const OPEN_DATA_HTTPS: &str = "https://vesuvius-challenge-open-data.s3.us-east-1.amazonaws.com";
+const PUBLIC_HTTPS: &str = "https://data.aws.ash2txt.org";
+
+/// Where a resolved URL points, best first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum UrlSource {
+    /// A user remap rule (`VESUVIUS_REMAP_CONFIG`) matched; always wins.
+    Remap,
+    /// Listed `public-read` copy in the open-data S3 bucket, read directly over HTTPS.
+    OpenDataBucket,
+    /// Listed `public-read` copy on data.aws.ash2txt.org.
+    PublicHttps,
+    /// `standard` copy in the vesuvius-challenge bucket, which data.aws.ash2txt.org/samples/
+    /// serves (not listed as an access root in the atlas).
+    StandardViaPublicHttps,
+}
+
+/// Best URL for one data entry across all its origins and access roots.
+fn resolve_entry_url(entry: &DataEntry) -> Option<(UrlSource, String)> {
+    let mut candidates = Vec::new();
+    for origin in &entry.origins {
+        let path = origin.path.trim_start_matches('/');
+        for access_root in &origin.access_roots {
+            let root = access_root.url.trim_end_matches('/');
+            let full_url = format!("{}/{}", root, path);
+            if let Some(rewritten) = RemapConfig::get().rewrite_atlas_url(&access_root.usage, &full_url) {
+                candidates.push((UrlSource::Remap, rewritten));
+            } else if access_root.usage == "public-read" && root == OPEN_DATA_BUCKET {
+                candidates.push((UrlSource::OpenDataBucket, format!("{}/{}", OPEN_DATA_HTTPS, path)));
+            } else if access_root.usage == "public-read" && root == PUBLIC_HTTPS {
+                candidates.push((UrlSource::PublicHttps, full_url));
+            } else if access_root.usage == "standard" {
+                candidates.push((UrlSource::StandardViaPublicHttps, format!("{}/samples/{}", PUBLIC_HTTPS, path)));
             }
         }
     }
-    None
+    // min_by_key keeps the first of equal keys, so atlas order breaks ties.
+    candidates.into_iter().min_by_key(|(source, _)| *source)
+}
+
+/// Best URL for data of `data_type`, preferring the open-data bucket over
+/// data.aws.ash2txt.org (see [`UrlSource`]).
+fn get_standard_url(data: &[DataEntry], data_type: &str) -> Option<String> {
+    data.iter()
+        .filter(|entry| entry.data_type == data_type)
+        .filter_map(resolve_entry_url)
+        .min_by_key(|(source, _)| *source)
+        .map(|(_, url)| url)
 }
 
 impl Segment {
@@ -347,10 +372,11 @@ impl Volume {
                     .split('.')
                     .map(|p| p.parse().unwrap_or_else(|_| panic!("bad vc_delta3d_version {:?}", version)))
                     .collect();
-                Some((version, entry))
+                let (_, url) = resolve_entry_url(entry)?;
+                Some((version, url))
             })
             .max_by(|(a, _), (b, _)| a.cmp(b))
-            .and_then(|(_, entry)| get_standard_url(std::slice::from_ref(entry), "ome-zarr-vcd3d"))
+            .map(|(_, url)| url)
             .or_else(|| get_standard_url(&self.data, "ome-zarr"))
     }
 }
