@@ -84,12 +84,12 @@ pub fn encode(data: &[u8], shape: [usize; 3]) -> Vec<u8> {
 /// Encoder presets (`vc_preset` in `codec.h`), fastest to smallest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
-    Delta = 1,
-    Faster = 8,
-    Fast = 3,
-    Balanced = 9,
-    Small = 10,
-    Slower = 6,
+    Delta = ffi::VC_DELTA as isize,
+    Faster = ffi::VC_FASTER as isize,
+    Fast = ffi::VC_FAST as isize,
+    Balanced = ffi::VC_BALANCED as isize,
+    Small = ffi::VC_SMALL as isize,
+    Slower = ffi::VC_SLOWER as isize,
 }
 
 /// Like [`encode`], with an explicit preset.
@@ -104,7 +104,7 @@ fn encode_with(data: &[u8], shape: [usize; 3], preset: Option<Preset>) -> Vec<u8
         let mut opts = ffi::vc_default_options();
         opts.shape = shape.map(|s| u32::try_from(s).expect("shape fits u32"));
         if let Some(p) = preset {
-            opts.preset = p as c_int;
+            opts.preset = p as ffi::vc_preset;
         }
         let mut out: *mut u8 = std::ptr::null_mut();
         let mut out_size = 0usize;

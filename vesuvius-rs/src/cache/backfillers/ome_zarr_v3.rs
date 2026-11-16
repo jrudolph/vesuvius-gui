@@ -150,7 +150,7 @@ pub(super) fn plan_v3_chunk(
     let full_box =
         || super::ome_zarr::covered_cache_chunks([cz_lo, cy_lo, cx_lo], [cz_hi, cy_hi, cx_hi], &sub, &shape, key.lod);
     let covered = if sources.is_empty() || eager { full_box() } else { vec![key] };
-    // Sub-chunks larger than a cache chunk (c3d 256³): the extract also
+    // Sub-chunks larger than a cache chunk (e.g. 128³): the extract also
     // fills every other cache chunk of the box, so one decode puts all of
     // them into the segment log. The cache only makes the requested ones
     // resident; the rest are logged, ready for a cheap decode later.
@@ -253,9 +253,9 @@ pub(super) fn plan_v3_chunk(
     })
 }
 
-/// A cache chunk that is exactly one interior vc-delta3d 64³ sub-chunk keeps
-/// the downloaded bytes, so the segment log stores them instead of encoding
-/// the chunk again.
+/// A cache chunk that is exactly one interior 64³ sub-chunk keeps the
+/// downloaded vc-delta3d bytes, so the segment log can store them instead of
+/// encoding the chunk again.
 fn passthrough(
     k: ChunkKey,
     data: ExtractedChunk,
@@ -272,12 +272,9 @@ fn passthrough(
     let Some(raw) = raws.get(&c).and_then(|l| l.raw_bytes()) else {
         return ExtractedChunk::Bytes(bytes);
     };
-    match vesuvius_delta3d::decoded_size(raw) {
-        Ok(n) if n == bytes.len() => ExtractedChunk::Encoded {
-            bytes,
-            encoded: raw.to_vec(),
-        },
-        // c3d sub-chunks: re-encode.
-        _ => ExtractedChunk::Bytes(bytes),
+    // `bytes` was decoded from `raw`, which therefore decodes to exactly it.
+    ExtractedChunk::Encoded {
+        bytes,
+        encoded: raw.to_vec(),
     }
 }

@@ -1637,7 +1637,7 @@ impl Inner {
                 let mut seen_primary = false;
                 for (k, data) in fills {
                     // A byproduct nobody asked for (e.g. the rest of a
-                    // decoded c3d sub-chunk): only persist it.
+                    // decoded 128³ sub-chunk): only persist it.
                     if k != key && !covered.contains(&k) && !self.is_pending(k) {
                         n_fills -= 1;
                         if !from_log {
