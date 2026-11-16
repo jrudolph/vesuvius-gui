@@ -322,8 +322,36 @@ impl Segment {
 }
 
 impl Volume {
+    /// URL of the volume as OME-zarr, preferring a losslessly vc-delta3d-compressed
+    /// copy (`ome-zarr-vcd3d` with `quant == 1`) over the plain `ome-zarr` one. When
+    /// several lossless copies exist, the newest `vc_delta3d_version` wins.
     pub fn get_ome_zarr_url(&self) -> Option<String> {
-        get_standard_url(&self.data, "ome-zarr")
+        self.data
+            .iter()
+            .filter(|entry| entry.data_type == "ome-zarr-vcd3d")
+            .filter_map(|entry| {
+                let params = entry
+                    .parameters
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("ome-zarr-vcd3d entry of volume {} has no parameters", self.id));
+                let quant = params["quant"]
+                    .as_u64()
+                    .unwrap_or_else(|| panic!("ome-zarr-vcd3d entry of volume {} has no numeric quant", self.id));
+                if quant != 1 {
+                    return None;
+                }
+                let version = params["vc_delta3d_version"].as_str().unwrap_or_else(|| {
+                    panic!("ome-zarr-vcd3d entry of volume {} has no vc_delta3d_version", self.id)
+                });
+                let version: Vec<u32> = version
+                    .split('.')
+                    .map(|p| p.parse().unwrap_or_else(|_| panic!("bad vc_delta3d_version {:?}", version)))
+                    .collect();
+                Some((version, entry))
+            })
+            .max_by(|(a, _), (b, _)| a.cmp(b))
+            .and_then(|(_, entry)| get_standard_url(std::slice::from_ref(entry), "ome-zarr-vcd3d"))
+            .or_else(|| get_standard_url(&self.data, "ome-zarr"))
     }
 }
 
